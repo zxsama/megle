@@ -1,0 +1,447 @@
+openapi: 3.1.0
+info:
+  title: Megle Core API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:{port}/api
+    variables:
+      port:
+        default: "47321"
+security:
+  - sessionToken: []
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      responses:
+        "200":
+          description: Core is alive.
+  /roots:
+    get:
+      operationId: listRoots
+      responses:
+        "200":
+          description: Existing indexed roots.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RootListResponse"
+    post:
+      operationId: addRoot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddRootRequest"
+      responses:
+        "202":
+          description: Root accepted and scan task queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedRootResponse"
+  /roots/{rootId}:
+    delete:
+      operationId: removeRoot
+      parameters:
+        - $ref: "#/components/parameters/rootId"
+      responses:
+        "202":
+          description: Root disabled or removed from index.
+  /folders/{folderId}/children:
+    get:
+      operationId: listFolderChildren
+      parameters:
+        - $ref: "#/components/parameters/folderId"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Child folders for lazy folder-tree loading.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderListResponse"
+        "404":
+          description: Folder not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /media:
+    get:
+      operationId: listMedia
+      parameters:
+        - $ref: "#/components/parameters/rootIdQuery"
+        - $ref: "#/components/parameters/folderIdQuery"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [mtime_desc, mtime_asc, name_asc, name_desc]
+            default: mtime_desc
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [image, video, other]
+      responses:
+        "200":
+          description: Keyset-paged media result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaListResponse"
+  /media/{fileId}:
+    get:
+      operationId: getMedia
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+      responses:
+        "200":
+          description: Single media item and derived metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaRecord"
+        "404":
+          description: Media item not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /media/{fileId}/thumbnail/{profile}:
+    get:
+      operationId: getThumbnail
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+        - $ref: "#/components/parameters/profile"
+      responses:
+        "200":
+          description: Thumbnail bytes or redirect to safe local media serving path.
+        "202":
+          description: Thumbnail queued.
+  /media/{fileId}/preview:
+    get:
+      operationId: getPreview
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+      responses:
+        "200":
+          description: Preview resource information.
+        "202":
+          description: Preview generation queued.
+  /tasks:
+    get:
+      operationId: listTasks
+      responses:
+        "200":
+          description: Background task list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskListResponse"
+  /tasks/scan:
+    post:
+      operationId: enqueueScan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanTaskRequest"
+      responses:
+        "202":
+          description: Scan task queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedRootResponse"
+        "404":
+          description: Root not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /file-ops/rename:
+    post:
+      operationId: renameFile
+      responses:
+        "202":
+          description: Rename task accepted.
+  /file-ops/move:
+    post:
+      operationId: moveFiles
+      responses:
+        "202":
+          description: Move task accepted.
+  /file-ops/delete:
+    post:
+      operationId: deleteFiles
+      responses:
+        "202":
+          description: Delete task accepted.
+  /plugins:
+    get:
+      operationId: listPlugins
+      responses:
+        "200":
+          description: Installed plugin states.
+components:
+  securitySchemes:
+    sessionToken:
+      type: apiKey
+      in: header
+      name: X-Megle-Session
+  parameters:
+    rootId:
+      name: rootId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    folderId:
+      name: folderId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    fileId:
+      name: fileId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    rootIdQuery:
+      name: rootId
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+    folderIdQuery:
+      name: folderId
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+    limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 200
+    cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    profile:
+      name: profile
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [tiny, grid, retina, preview]
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    ScanSummary:
+      type: object
+      required: [foldersSeen, mediaFilesSeen, skippedFiles]
+      properties:
+        foldersSeen:
+          type: integer
+          minimum: 0
+        mediaFilesSeen:
+          type: integer
+          minimum: 0
+        skippedFiles:
+          type: integer
+          minimum: 0
+    AddRootRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+        displayName:
+          type: string
+    AcceptedRootResponse:
+      type: object
+      required: [accepted, taskId, rootId, scan]
+      properties:
+        accepted:
+          type: boolean
+        taskId:
+          type: integer
+          nullable: true
+        rootId:
+          type: integer
+          nullable: true
+        scan:
+          anyOf:
+            - $ref: "#/components/schemas/ScanSummary"
+            - type: "null"
+    ScanTaskRequest:
+      type: object
+      required: [rootId]
+      properties:
+        rootId:
+          type: integer
+          minimum: 1
+    TaskRecord:
+      type: object
+      required: [id, kind, priority, status, rootId, fileId, createdAt, updatedAt, error]
+      properties:
+        id:
+          type: integer
+        kind:
+          type: string
+        priority:
+          type: integer
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed]
+        rootId:
+          type: integer
+          nullable: true
+        fileId:
+          type: integer
+          nullable: true
+        createdAt:
+          type: integer
+        updatedAt:
+          type: integer
+        error:
+          type: string
+          nullable: true
+    TaskListResponse:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskRecord"
+        nextCursor:
+          type: string
+          nullable: true
+    RootRecord:
+      type: object
+      required: [id, path, displayName, enabled, createdAt, lastScanAt, rootFolderId]
+      properties:
+        id:
+          type: integer
+        path:
+          type: string
+        displayName:
+          type: string
+        enabled:
+          type: boolean
+        createdAt:
+          type: integer
+        lastScanAt:
+          type: integer
+          nullable: true
+        rootFolderId:
+          type: integer
+          nullable: true
+    RootListResponse:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RootRecord"
+        nextCursor:
+          type: string
+          nullable: true
+    FolderRecord:
+      type: object
+      required: [id, rootId, parentId, name, status]
+      properties:
+        id:
+          type: integer
+        rootId:
+          type: integer
+        parentId:
+          type: integer
+          nullable: true
+        name:
+          type: string
+        status:
+          type: string
+    FolderListResponse:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FolderRecord"
+        nextCursor:
+          type: string
+          nullable: true
+    MediaRecord:
+      type: object
+      required: [id, rootId, folderId, name, ext, size, mtime]
+      properties:
+        id:
+          type: integer
+        rootId:
+          type: integer
+        folderId:
+          type: integer
+        name:
+          type: string
+        ext:
+          type: string
+        size:
+          type: integer
+        mtime:
+          type: integer
+        kind:
+          type: string
+          nullable: true
+        width:
+          type: integer
+          nullable: true
+        height:
+          type: integer
+          nullable: true
+        durationMs:
+          type: integer
+          nullable: true
+        codec:
+          type: string
+          nullable: true
+        thumbnailState:
+          type: string
+          nullable: true
+        thumbnailCacheKey:
+          type: string
+          nullable: true
+    MediaListResponse:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MediaRecord"
+        nextCursor:
+          type: string
+          nullable: true

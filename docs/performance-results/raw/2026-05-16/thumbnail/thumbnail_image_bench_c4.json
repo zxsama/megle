@@ -1,0 +1,112 @@
+{
+  "engine": "sharp/libvips",
+  "targetMinSide": 320,
+  "resize": "fit=outside, withoutEnlargement=true, output=webp quality 78",
+  "concurrency": 4,
+  "totalImages": 152,
+  "generated": 128,
+  "skippedSmall": 24,
+  "totalMs": 685.294,
+  "imagesPerSecond": 221.803,
+  "generatedPerSecond": 186.781,
+  "sourceMB": 116.04,
+  "outputMB": 0.61,
+  "allLatency": {
+    "count": 152,
+    "minMs": 0.639,
+    "p50Ms": 19.209,
+    "p95Ms": 28.058,
+    "p99Ms": 28.849,
+    "maxMs": 29.399
+  },
+  "generatedLatency": {
+    "count": 128,
+    "minMs": 14.979,
+    "p50Ms": 19.511,
+    "p95Ms": 28.28,
+    "p99Ms": 29.007,
+    "maxMs": 29.399
+  },
+  "skippedLatency": {
+    "count": 24,
+    "minMs": 0.639,
+    "p50Ms": 1.167,
+    "p95Ms": 2.085,
+    "p99Ms": 2.141,
+    "maxMs": 2.141
+  },
+  "samples": [
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0000.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 31626,
+      "outputBytes": 19114,
+      "ms": 20.101
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0001.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33506,
+      "outputBytes": 19636,
+      "ms": 19.209400000000002
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0003.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33291,
+      "outputBytes": 19210,
+      "ms": 19.0201
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0002.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 32791,
+      "outputBytes": 19672,
+      "ms": 19.342299999999994
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0006.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33836,
+      "outputBytes": 19838,
+      "ms": 15.7744
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0004.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 31864,
+      "outputBytes": 19298,
+      "ms": 16.926900000000003
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0007.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33904,
+      "outputBytes": 19642,
+      "ms": 16.507499999999993
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0005.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33806,
+      "outputBytes": 19944,
+      "ms": 17.162900000000008
+    }
+  ]
+}

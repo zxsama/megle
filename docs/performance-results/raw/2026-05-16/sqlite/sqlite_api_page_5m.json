@@ -1,0 +1,19 @@
+{
+  "db": "bench-results\\sqlite_media_5m.sqlite",
+  "folders": 10000,
+  "iterations": 2000,
+  "limit": 200,
+  "query_map_json": {
+    "count": 2000,
+    "min_ms": 0.62,
+    "p50_ms": 0.866,
+    "p95_ms": 1.831,
+    "p99_ms": 2.617,
+    "max_ms": 3.596
+  },
+  "payload_bytes": {
+    "min": 42174,
+    "p50": 42194,
+    "max": 42207
+  }
+}

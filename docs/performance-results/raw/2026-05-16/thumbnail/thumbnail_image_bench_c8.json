@@ -1,0 +1,204 @@
+{
+  "engine": "sharp/libvips",
+  "targetMinSide": 320,
+  "resize": "fit=outside, withoutEnlargement=true, output=webp quality 78",
+  "concurrency": 8,
+  "totalImages": 152,
+  "generated": 128,
+  "skippedSmall": 24,
+  "totalMs": 614.49,
+  "imagesPerSecond": 247.36,
+  "generatedPerSecond": 208.303,
+  "sourceMB": 116.04,
+  "outputMB": 0.61,
+  "allLatency": {
+    "count": 152,
+    "minMs": 0.534,
+    "p50Ms": 31.734,
+    "p95Ms": 56.255,
+    "p99Ms": 74.871,
+    "maxMs": 81.64
+  },
+  "generatedLatency": {
+    "count": 128,
+    "minMs": 17.714,
+    "p50Ms": 38.8,
+    "p95Ms": 62.372,
+    "p99Ms": 74.932,
+    "maxMs": 81.64
+  },
+  "skippedLatency": {
+    "count": 24,
+    "minMs": 0.534,
+    "p50Ms": 1.468,
+    "p95Ms": 2.684,
+    "p99Ms": 3.167,
+    "maxMs": 3.167
+  },
+  "groups": {
+    "exactish": {
+      "total": 16,
+      "generated": 16,
+      "skipped": 0,
+      "sourceMB": 0.51,
+      "outputMB": 0.3,
+      "latency": {
+        "count": 16,
+        "minMs": 17.714,
+        "p50Ms": 31.734,
+        "p95Ms": 46.908,
+        "p99Ms": 53.769,
+        "maxMs": 53.769
+      }
+    },
+    "large": {
+      "total": 24,
+      "generated": 24,
+      "skipped": 0,
+      "sourceMB": 53.01,
+      "outputMB": 0.05,
+      "latency": {
+        "count": 24,
+        "minMs": 30.48,
+        "p50Ms": 52.153,
+        "p95Ms": 74.932,
+        "p99Ms": 81.64,
+        "maxMs": 81.64
+      }
+    },
+    "medium": {
+      "total": 48,
+      "generated": 48,
+      "skipped": 0,
+      "sourceMB": 18.87,
+      "outputMB": 0.15,
+      "latency": {
+        "count": 48,
+        "minMs": 20.221,
+        "p50Ms": 32.352,
+        "p95Ms": 50.017,
+        "p99Ms": 51.01,
+        "maxMs": 51.01
+      }
+    },
+    "png": {
+      "total": 16,
+      "generated": 16,
+      "skipped": 0,
+      "sourceMB": 33.96,
+      "outputMB": 0.04,
+      "latency": {
+        "count": 16,
+        "minMs": 25.281,
+        "p50Ms": 42.859,
+        "p95Ms": 62.372,
+        "p99Ms": 62.464,
+        "maxMs": 62.464
+      }
+    },
+    "portrait": {
+      "total": 24,
+      "generated": 24,
+      "skipped": 0,
+      "sourceMB": 9.43,
+      "outputMB": 0.07,
+      "latency": {
+        "count": 24,
+        "minMs": 19.031,
+        "p50Ms": 29.711,
+        "p95Ms": 44.639,
+        "p99Ms": 45.055,
+        "maxMs": 45.055
+      }
+    },
+    "small": {
+      "total": 24,
+      "generated": 0,
+      "skipped": 24,
+      "sourceMB": 0.25,
+      "outputMB": 0,
+      "latency": {
+        "count": 24,
+        "minMs": 0.534,
+        "p50Ms": 1.468,
+        "p95Ms": 2.684,
+        "p99Ms": 3.167,
+        "maxMs": 3.167
+      }
+    }
+  },
+  "samples": [
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0000.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 31626,
+      "outputBytes": 19114,
+      "ms": 30.882099999999994
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0001.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33506,
+      "outputBytes": 19636,
+      "ms": 30.12850000000001
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0002.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 32791,
+      "outputBytes": 19672,
+      "ms": 30.093600000000002
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0003.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33291,
+      "outputBytes": 19210,
+      "ms": 30.067499999999995
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0004.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 31864,
+      "outputBytes": 19298,
+      "ms": 31.7342
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0005.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33806,
+      "outputBytes": 19944,
+      "ms": 46.4558
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0007.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33904,
+      "outputBytes": 19642,
+      "ms": 46.74340000000001
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\images\\exactish_0006.jpg",
+      "skipped": false,
+      "width": 480,
+      "height": 320,
+      "sourceBytes": 33836,
+      "outputBytes": 19838,
+      "ms": 46.907599999999995
+    }
+  ]
+}

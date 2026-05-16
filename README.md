@@ -1,0 +1,20 @@
+# Megle
+
+Windows-first local media browser and manager for existing folders.
+
+Current phase: Phase 1 skeleton. The repository is contract-first so the Electron desktop shell, reusable React UI, Rust Core, SQLite schema, plugin protocol, and tests stay aligned.
+
+Start here:
+
+- [Docs index](docs/README.md)
+- [Final solution](docs/final-solution.md)
+- [Project structure](docs/project-structure.md)
+- [Testing strategy](docs/testing-strategy.md)
+
+Fast verification:
+
+```text
+npm test
+```
+
+The verification command checks repository structure, Core API alignment, SQLite migration behavior, Rust formatting, and Rust workspace tests. If the current terminal PATH has not picked up Rust yet, `tools/checks/verify-rust.mjs` also checks the standard `.cargo/bin` install path.

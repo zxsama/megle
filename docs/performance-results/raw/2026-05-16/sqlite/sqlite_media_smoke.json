@@ -1,0 +1,62 @@
+{
+  "rows": 10000,
+  "folders": 100,
+  "roots": 4,
+  "batch_size": 10000,
+  "fts": true,
+  "db": "bench-results\\sqlite_media_smoke.sqlite",
+  "db_size_mb": 4.07,
+  "timings": {
+    "schema_create_ms": 3.312,
+    "roots_folders_insert_ms": 0.138,
+    "files_media_metadata_insert_ms": 51.333,
+    "index_create_ms": 28.06,
+    "analyze_optimize_ms": 2.575,
+    "query_suite_ms": 23.842
+  },
+  "queries": [
+    {
+      "name": "folder_first_page",
+      "rows": 100,
+      "min_ms": 0.074,
+      "p50_ms": 0.077,
+      "max_ms": 0.115
+    },
+    {
+      "name": "folder_keyset_next_page",
+      "rows": 0,
+      "min_ms": 0.006,
+      "p50_ms": 0.007,
+      "max_ms": 0.007
+    },
+    {
+      "name": "ext_filter_recent_jpg",
+      "rows": 200,
+      "min_ms": 0.125,
+      "p50_ms": 0.127,
+      "max_ms": 0.131
+    },
+    {
+      "name": "rating_filter",
+      "rows": 200,
+      "min_ms": 0.081,
+      "p50_ms": 0.082,
+      "max_ms": 0.086
+    },
+    {
+      "name": "recent_images",
+      "rows": 200,
+      "min_ms": 1.92,
+      "p50_ms": 2.046,
+      "max_ms": 2.396
+    },
+    {
+      "name": "fts_tag_search",
+      "rows": 200,
+      "min_ms": 0.149,
+      "p50_ms": 0.171,
+      "max_ms": 0.311
+    }
+  ],
+  "total_ms": 120.849
+}

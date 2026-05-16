@@ -1,0 +1,66 @@
+{
+  "generation": {
+    "root": "D:\\Megle\\tools\\bench\\fs-scan\\results\\tree_500k",
+    "files": 500000,
+    "folders": 5000,
+    "elapsed_ms": 180740.73
+  },
+  "runs": [
+    {
+      "root": "D:\\Megle\\tools\\bench\\fs-scan\\results\\tree_500k",
+      "db": "D:\\Megle\\tools\\bench\\fs-scan\\results\\fs_scan_500k_run1.sqlite",
+      "scanned_dirs": 5051,
+      "scanned_files": 500001,
+      "media_files": 437500,
+      "folder_rows": 5051,
+      "file_rows": 437500,
+      "traverse_ms": 1687.214,
+      "insert_ms": 663.789,
+      "total_ms": 2351.003,
+      "files_per_second_traverse": 296347.11,
+      "media_rows_per_second_insert": 659094.98,
+      "db_size_mb": 45.45
+    },
+    {
+      "root": "D:\\Megle\\tools\\bench\\fs-scan\\results\\tree_500k",
+      "db": "D:\\Megle\\tools\\bench\\fs-scan\\results\\fs_scan_500k_run2.sqlite",
+      "scanned_dirs": 5051,
+      "scanned_files": 500001,
+      "media_files": 437500,
+      "folder_rows": 5051,
+      "file_rows": 437500,
+      "traverse_ms": 1508.626,
+      "insert_ms": 656.348,
+      "total_ms": 2164.974,
+      "files_per_second_traverse": 331428.07,
+      "media_rows_per_second_insert": 666567.13,
+      "db_size_mb": 45.45
+    }
+  ],
+  "summary": {
+    "traverse_ms": {
+      "count": 2,
+      "min": 1508.626,
+      "p50": 1597.92,
+      "max": 1687.214
+    },
+    "insert_ms": {
+      "count": 2,
+      "min": 656.348,
+      "p50": 660.0685,
+      "max": 663.789
+    },
+    "total_ms": {
+      "count": 2,
+      "min": 2164.974,
+      "p50": 2257.9885000000004,
+      "max": 2351.003
+    },
+    "files_per_second_traverse": {
+      "count": 2,
+      "min": 296347.11,
+      "p50": 313887.58999999997,
+      "max": 331428.07
+    }
+  }
+}

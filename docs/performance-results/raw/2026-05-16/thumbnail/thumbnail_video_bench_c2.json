@@ -1,0 +1,68 @@
+{
+  "engine": "ffmpeg",
+  "targetMinSide": 320,
+  "concurrency": 2,
+  "totalVideos": 12,
+  "totalMs": 757.476,
+  "videosPerSecond": 15.842,
+  "sourceMB": 9.19,
+  "outputMB": 0.19,
+  "latency": {
+    "count": 12,
+    "minMs": 79.18,
+    "p50Ms": 118.143,
+    "p95Ms": 180.586,
+    "p99Ms": 183.088,
+    "maxMs": 183.088
+  },
+  "samples": [
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_1080p_0000.mp4",
+      "sourceBytes": 1214661,
+      "outputBytes": 15759,
+      "ms": 118.14349999999999
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_1080p_0001.mp4",
+      "sourceBytes": 1213024,
+      "outputBytes": 15779,
+      "ms": 149.8954
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_1080p_0002.mp4",
+      "sourceBytes": 1207641,
+      "outputBytes": 15745,
+      "ms": 183.0883
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_1080p_0003.mp4",
+      "sourceBytes": 1208559,
+      "outputBytes": 15727,
+      "ms": 180.58560000000003
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_720p_0000.mp4",
+      "sourceBytes": 601205,
+      "outputBytes": 17297,
+      "ms": 137.6929
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_720p_0001.mp4",
+      "sourceBytes": 605970,
+      "outputBytes": 17336,
+      "ms": 123.35079999999999
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_720p_0002.mp4",
+      "sourceBytes": 601590,
+      "outputBytes": 17300,
+      "ms": 115.98090000000002
+    },
+    {
+      "file": "D:\\Megle\\tools\\bench\\thumbnail\\results\\thumbnail-samples\\videos\\video_720p_0003.mp4",
+      "sourceBytes": 600437,
+      "outputBytes": 17243,
+      "ms": 114.76229999999993
+    }
+  ]
+}

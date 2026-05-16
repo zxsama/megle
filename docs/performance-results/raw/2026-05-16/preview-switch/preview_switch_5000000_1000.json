@@ -1,0 +1,61 @@
+{
+  "url": "http://127.0.0.1:5189/?count=5000000",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "cached": {
+    "mode": "cached",
+    "itemCount": 5000000,
+    "assetCount": 128,
+    "iterations": 1000,
+    "preloadRadius": 12,
+    "preloadAllMs": 41.6,
+    "durationMs": 16639.8,
+    "switchesPerSecond": 60.097,
+    "latencyP50Ms": 16.1,
+    "latencyP95Ms": 17.4,
+    "latencyP99Ms": 17.6,
+    "latencyMaxMs": 18.2,
+    "decodeP50Ms": 0.5,
+    "decodeP95Ms": 0.9,
+    "decodeP99Ms": 1.2,
+    "decodeMaxMs": 2.7,
+    "committedMismatches": 0,
+    "finalSelectedId": 16983
+  },
+  "prefetch": {
+    "mode": "prefetch",
+    "itemCount": 5000000,
+    "assetCount": 128,
+    "iterations": 1000,
+    "preloadRadius": 12,
+    "durationMs": 16664.1,
+    "switchesPerSecond": 60.009,
+    "latencyP50Ms": 16.1,
+    "latencyP95Ms": 17.4,
+    "latencyP99Ms": 17.6,
+    "latencyMaxMs": 17.9,
+    "decodeP50Ms": 0.5,
+    "decodeP95Ms": 0.7,
+    "decodeP99Ms": 0.8,
+    "decodeMaxMs": 1.1,
+    "committedMismatches": 0,
+    "finalSelectedId": 999
+  },
+  "burst": {
+    "itemCount": 5000000,
+    "assetCount": 128,
+    "bursts": 200,
+    "changesPerBurst": 20,
+    "totalChanges": 4000,
+    "durationMs": 3328.6,
+    "changesPerSecond": 1201.706,
+    "burstLatencyP50Ms": 16.6,
+    "burstLatencyP95Ms": 18,
+    "burstLatencyP99Ms": 18.1,
+    "burstLatencyMaxMs": 18.2,
+    "committedMismatches": 0,
+    "finalSelectedId": 75981
+  }
+}

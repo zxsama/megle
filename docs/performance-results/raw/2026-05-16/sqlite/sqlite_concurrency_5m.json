@@ -1,0 +1,42 @@
+{
+  "db": "bench-results\\sqlite_media_5m.sqlite",
+  "readers": 4,
+  "writes": 100000,
+  "write_batch_size": 1000,
+  "elapsed_ms": 351.84,
+  "write_rows_per_second": 284220.1,
+  "summaries": {
+    "folder_first_page": {
+      "count": 182,
+      "min_ms": 2.023,
+      "p50_ms": 3.45,
+      "p95_ms": 4.549,
+      "p99_ms": 5.178,
+      "max_ms": 5.269
+    },
+    "fts_tag_search": {
+      "count": 179,
+      "min_ms": 0.21,
+      "p50_ms": 0.938,
+      "p95_ms": 1.48,
+      "p99_ms": 2.283,
+      "max_ms": 2.853
+    },
+    "recent_images": {
+      "count": 181,
+      "min_ms": 0.267,
+      "p50_ms": 2.327,
+      "p95_ms": 3.482,
+      "p99_ms": 3.865,
+      "max_ms": 3.96
+    },
+    "write_batch": {
+      "count": 100,
+      "min_ms": 1.09,
+      "p50_ms": 2.825,
+      "p95_ms": 5.412,
+      "p99_ms": 8.125,
+      "max_ms": 12.895
+    }
+  }
+}

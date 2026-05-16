@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://megle.local/contracts/plugins/manifest.schema.json",
+  "title": "Megle Plugin Manifest",
+  "type": "object",
+  "required": ["id", "name", "version", "engine", "entry", "capabilities", "permissions"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.-]+)?$"
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["process"]
+    },
+    "entry": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["decoder", "metadata", "action", "import-provider"]
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["read-media-file", "write-user-selected-folder", "spawn-process", "network"]
+      }
+    },
+    "formats": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^\\.[A-Za-z0-9]+$"
+      }
+    }
+  }
+}

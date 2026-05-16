@@ -1,0 +1,14 @@
+{
+  "name": "@megle/thumbnail-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate:samples": "python generate_samples.py",
+    "bench:image": "node image_thumb_bench.mjs",
+    "bench:formats": "node image_format_bench.mjs",
+    "bench:video": "node video_poster_bench.mjs"
+  },
+  "dependencies": {
+    "sharp": "^0.34.0"
+  }
+}

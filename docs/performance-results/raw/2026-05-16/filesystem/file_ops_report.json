@@ -1,0 +1,22 @@
+{
+  "files": 1000,
+  "elapsed_ms": 339.365,
+  "ops_per_second": 2654.96,
+  "results": {
+    "rename": 300,
+    "move": 400,
+    "delete": 200,
+    "failed_conflict": 1
+  },
+  "verification": {
+    "files": 1000,
+    "mismatches": [],
+    "mismatch_count": 0,
+    "operation_counts": {
+      "delete:ok": 200,
+      "move:ok": 400,
+      "rename:failed": 1,
+      "rename:ok": 300
+    }
+  }
+}

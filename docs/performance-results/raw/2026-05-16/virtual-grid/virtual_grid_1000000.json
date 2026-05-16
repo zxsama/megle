@@ -1,0 +1,23 @@
+{
+  "url": "http://127.0.0.1:5177/?count=1000000",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "result": {
+    "itemCount": 1000000,
+    "columns": 8,
+    "rows": 125000,
+    "durationMs": 5014,
+    "frames": 301,
+    "fps": 60,
+    "frameP50Ms": 16.7,
+    "frameP95Ms": 16.7,
+    "frameP99Ms": 16.8,
+    "frameMaxMs": 16.8,
+    "renderedTiles": 176,
+    "renderedRows": 22,
+    "scrollHeight": 22000000,
+    "virtualTotalSize": 22000000
+  }
+}
