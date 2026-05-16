@@ -22,6 +22,8 @@ const dbMigrationsRs = read("crates/core/src/db/migrations.rs");
 const mainRs = read("crates/core/src/main.rs");
 const migrationSql = read("crates/core/migrations/0001_initial.sql");
 const thumbnailMigrationSql = read("crates/core/migrations/0004_thumbnail_state.sql");
+const thumbnailSourceMigrationSql = read("crates/core/migrations/0005_thumbnail_source_fingerprint.sql");
+const thumbnailTaskAttemptMigrationSql = read("crates/core/migrations/0006_thumbnail_task_attempt_fingerprint.sql");
 const thumbnailsRs = read("crates/core/src/thumbnails/mod.rs");
 const pluginsRs = read("crates/core/src/plugins/mod.rs");
 const fsopsRs = read("crates/core/src/fsops/mod.rs");
@@ -118,6 +120,12 @@ if (!dbMigrationsRs.includes('include_str!("../../migrations/0003_browsing_index
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0004_thumbnail_state.sql")')) {
   fail("db thumbnail state migration include path changed or missing");
 }
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0005_thumbnail_source_fingerprint.sql")')) {
+  fail("db thumbnail source fingerprint migration include path changed or missing");
+}
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0006_thumbnail_task_attempt_fingerprint.sql")')) {
+  fail("db thumbnail task attempt fingerprint migration include path changed or missing");
+}
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");
 }
@@ -176,6 +184,19 @@ for (const value of ["image/webp", "shortSidePx", "outputFormat", "ThumbnailResp
 for (const value of ["short_side_px", "output_format", "skipped_small", "image/webp"]) {
   if (!migrationSql.includes(value) || !thumbnailMigrationSql.includes(value)) {
     fail(`thumbnail schema migration missing ${value}`);
+  }
+}
+for (const value of [
+  "source_fingerprint",
+  "state IN ('ready', 'skipped_small')"
+]) {
+  if (!thumbnailSourceMigrationSql.includes(value)) {
+    fail(`thumbnail source fingerprint migration missing ${value}`);
+  }
+}
+for (const value of ["thumbnail_source_fingerprint", "thumbnail_task_attempt_fingerprint"]) {
+  if (!thumbnailTaskAttemptMigrationSql.includes(value)) {
+    fail(`thumbnail task attempt fingerprint migration missing ${value}`);
   }
 }
 for (const value of [

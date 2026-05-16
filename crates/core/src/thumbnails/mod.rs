@@ -1,3 +1,8 @@
+use std::fs;
+use std::path::Path;
+
+use sha2::{Digest, Sha256};
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThumbnailProfile {
@@ -23,6 +28,65 @@ pub const THUMBNAIL_PROFILE_VALUES: &[&str] = &[GRID_320_PROFILE];
 pub const THUMBNAIL_STATUS_VALUES: &[&str] =
     &["pending", "queued", "ready", "failed", "skipped_small"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThumbnailPolicy {
+    pub profile: &'static str,
+    pub short_side_px: i64,
+    pub output_format: &'static str,
+    pub file_extension: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbnailDecision {
+    Generatable,
+    SkippedSmall,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CacheIdentity<'a> {
+    pub file_id: i64,
+    pub root_id: i64,
+    pub folder_id: i64,
+    pub name: &'a str,
+    pub size: i64,
+    pub mtime: i64,
+    pub file_key: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneratedThumbnail {
+    pub width: i64,
+    pub height: i64,
+    pub byte_size: i64,
+}
+
+impl ThumbnailPolicy {
+    pub fn grid_320() -> Self {
+        Self {
+            profile: GRID_320_PROFILE,
+            short_side_px: GRID_320_SHORT_SIDE_PX,
+            output_format: GENERATED_FORMAT,
+            file_extension: "webp",
+        }
+    }
+
+    pub fn initial_state(
+        &self,
+        media_kind: Option<&str>,
+        width: Option<i64>,
+        height: Option<i64>,
+    ) -> ThumbnailDecision {
+        if media_kind == Some("image") {
+            if let (Some(width), Some(height)) = (width, height) {
+                if width < self.short_side_px && height < self.short_side_px {
+                    return ThumbnailDecision::SkippedSmall;
+                }
+            }
+        }
+        ThumbnailDecision::Generatable
+    }
+}
+
 pub fn normalize_profile(profile: Option<&str>) -> Option<&'static str> {
     match profile.unwrap_or(GRID_320_PROFILE) {
         GRID_320_PROFILE => Some(GRID_320_PROFILE),
@@ -32,4 +96,210 @@ pub fn normalize_profile(profile: Option<&str>) -> Option<&'static str> {
 
 pub fn is_pending_status(state: &str) -> bool {
     matches!(state, "pending" | "queued")
+}
+
+pub fn cache_key_for(identity: &CacheIdentity<'_>, profile: &str) -> String {
+    let digest = source_fingerprint_for(identity, profile);
+    format!("{}/{}/{}.webp", &digest[0..2], &digest[2..4], digest)
+}
+
+pub fn source_fingerprint_for(identity: &CacheIdentity<'_>, profile: &str) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        "v2",
+        &identity.file_id.to_string(),
+        &identity.root_id.to_string(),
+        &identity.folder_id.to_string(),
+        identity.name,
+        &identity.size.to_string(),
+        &identity.mtime.to_string(),
+        identity.file_key.unwrap_or(""),
+        profile,
+    ] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+pub fn is_safe_cache_key(cache_key: &str) -> bool {
+    !cache_key.is_empty()
+        && !cache_key.starts_with('/')
+        && !cache_key.starts_with('\\')
+        && !cache_key.contains(':')
+        && !cache_key.contains('\\')
+        && cache_key
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+pub fn write_placeholder_thumbnail(
+    cache_root: &Path,
+    cache_key: &str,
+) -> anyhow::Result<GeneratedThumbnail> {
+    if !is_safe_cache_key(cache_key) {
+        return Err(anyhow::anyhow!("unsafe thumbnail cache key: {cache_key}"));
+    }
+    let path = cache_root.join(cache_key);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = placeholder_bytes(cache_key);
+    fs::write(&path, &bytes)?;
+    Ok(GeneratedThumbnail {
+        width: GRID_320_SHORT_SIDE_PX,
+        height: GRID_320_SHORT_SIDE_PX,
+        byte_size: bytes.len() as i64,
+    })
+}
+
+fn placeholder_bytes(cache_key: &str) -> Vec<u8> {
+    let _ = cache_key;
+    // 1x1 lossy WebP. This is a valid RIFF/WEBP container used until the real decoder lands.
+    [
+        0x52, 0x49, 0x46, 0x46, 0x22, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x20, 0x16, 0x00, 0x00, 0x00, 0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x01, 0x00, 0x01, 0x00,
+        0x0e, 0xc0, 0xfe, 0x25, 0xa4, 0x00, 0x03, 0x70, 0x00, 0x00, 0x00, 0x00,
+    ]
+    .to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn grid_320_policy_is_webp_with_exact_short_side() {
+        let policy = ThumbnailPolicy::grid_320();
+
+        assert_eq!(policy.profile, GRID_320_PROFILE);
+        assert_eq!(policy.output_format, GENERATED_FORMAT);
+        assert_eq!(policy.short_side_px, 320);
+        assert_eq!(policy.file_extension, "webp");
+    }
+
+    #[test]
+    fn displayable_originals_below_profile_are_skipped_small() {
+        let policy = ThumbnailPolicy::grid_320();
+
+        assert_eq!(
+            policy.initial_state(Some("image"), Some(128), Some(240)),
+            ThumbnailDecision::SkippedSmall
+        );
+        assert_eq!(
+            policy.initial_state(Some("image"), Some(640), Some(240)),
+            ThumbnailDecision::Generatable
+        );
+        assert_eq!(
+            policy.initial_state(Some("image"), Some(320), Some(320)),
+            ThumbnailDecision::Generatable
+        );
+        assert_eq!(
+            policy.initial_state(Some("video"), Some(128), Some(128)),
+            ThumbnailDecision::Generatable
+        );
+        assert_eq!(
+            policy.initial_state(Some("other"), Some(128), Some(128)),
+            ThumbnailDecision::Generatable
+        );
+        assert_eq!(
+            policy.initial_state(Some("image"), None, Some(128)),
+            ThumbnailDecision::Generatable
+        );
+    }
+
+    #[test]
+    fn cache_key_is_sharded_safe_relative_and_changes_with_invalidation_inputs() {
+        let identity = CacheIdentity {
+            file_id: 42,
+            root_id: 7,
+            folder_id: 9,
+            name: "image.jpg",
+            size: 1024,
+            mtime: 123456,
+            file_key: Some("dev-inode-1"),
+        };
+
+        let first = cache_key_for(&identity, GRID_320_PROFILE);
+        let same = cache_key_for(&identity, GRID_320_PROFILE);
+        let changed_size = cache_key_for(
+            &CacheIdentity {
+                size: 2048,
+                ..identity
+            },
+            GRID_320_PROFILE,
+        );
+        let changed_key = cache_key_for(
+            &CacheIdentity {
+                file_key: Some("dev-inode-2"),
+                ..identity
+            },
+            GRID_320_PROFILE,
+        );
+
+        assert_eq!(first, same);
+        assert_ne!(first, changed_size);
+        assert_ne!(first, changed_key);
+        assert!(is_safe_cache_key(&first));
+        assert!(first.ends_with(".webp"));
+        assert_eq!(first.matches('/').count(), 2);
+        let parts: Vec<&str> = first.split('/').collect();
+        assert_eq!(parts[0].len(), 2);
+        assert_eq!(parts[1].len(), 2);
+        assert!(parts[2].ends_with(".webp"));
+        assert_eq!(parts[2].trim_end_matches(".webp").len(), 64);
+        assert!(!Path::new(&first).is_absolute());
+    }
+
+    #[test]
+    fn placeholder_writer_writes_minimal_webp_container_bytes() {
+        let cache_root = unique_temp_dir();
+        fs::create_dir_all(&cache_root).expect("create cache root");
+        let cache_key = "aa/bb/test.webp";
+
+        let generated =
+            write_placeholder_thumbnail(&cache_root, cache_key).expect("write placeholder");
+        let bytes = fs::read(cache_root.join(cache_key)).expect("read placeholder");
+
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WEBP");
+        assert_eq!(generated.byte_size, bytes.len() as i64);
+
+        fs::remove_dir_all(cache_root).expect("cleanup cache root");
+    }
+
+    #[test]
+    fn cache_key_rejects_absolute_parent_and_dot_segments() {
+        for candidate in [
+            "",
+            "/aa/bb/key.webp",
+            "\\aa\\bb\\key.webp",
+            "C:/aa/bb/key.webp",
+            "aa/../key.webp",
+            "aa/./key.webp",
+            "aa//key.webp",
+            "aa\\bb\\key.webp",
+        ] {
+            assert!(
+                !is_safe_cache_key(candidate),
+                "candidate should be rejected: {candidate}"
+            );
+        }
+    }
+
+    fn unique_temp_dir() -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        std::env::temp_dir().join(format!(
+            "megle_thumbnail_policy_test_{}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
 }

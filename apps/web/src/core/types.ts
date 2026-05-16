@@ -7,5 +7,6 @@ export type {
   RootRecord,
   ScanTaskRequest,
   ScanSummary,
-  TaskRecord
+  TaskRecord,
+  ThumbnailResponse
 } from "@megle/core-client";

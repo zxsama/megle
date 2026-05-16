@@ -10,6 +10,8 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0002_task_progress.sql",
     ROOT / "crates" / "core" / "migrations" / "0003_browsing_indexes.sql",
     ROOT / "crates" / "core" / "migrations" / "0004_thumbnail_state.sql",
+    ROOT / "crates" / "core" / "migrations" / "0005_thumbnail_source_fingerprint.sql",
+    ROOT / "crates" / "core" / "migrations" / "0006_thumbnail_task_attempt_fingerprint.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -18,6 +20,7 @@ TASK_PROGRESS_COLUMNS = {
     "folders_seen",
     "media_files_seen",
     "skipped_files",
+    "thumbnail_source_fingerprint",
 }
 
 REQUIRED_TABLES = {
@@ -123,6 +126,16 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 4 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 5"
+            ).fetchone()
+            if version is None:
+                fail("migration version 5 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 6"
+            ).fetchone()
+            if version is None:
+                fail("migration version 6 was not recorded")
 
             task_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
@@ -144,6 +157,7 @@ def main() -> None:
                 "byte_size",
                 "short_side_px",
                 "output_format",
+                "source_fingerprint",
                 "error",
                 "updated_at",
             }

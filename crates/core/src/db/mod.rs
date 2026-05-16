@@ -6,7 +6,10 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection};
 use serde::Serialize;
 
-use crate::thumbnails::{GENERATED_FORMAT, GRID_320_SHORT_SIDE_PX};
+use crate::thumbnails::{
+    is_safe_cache_key, source_fingerprint_for, CacheIdentity, ThumbnailDecision, ThumbnailPolicy,
+    GENERATED_FORMAT, GRID_320_PROFILE, GRID_320_SHORT_SIDE_PX,
+};
 
 #[allow(dead_code)]
 pub const WAL_MODE: &str = "WAL";
@@ -88,6 +91,51 @@ pub struct ThumbnailStateUpsert {
     pub height: Option<i64>,
     pub byte_size: Option<i64>,
     pub error: Option<String>,
+    pub source_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThumbnailTaskRequest {
+    pub thumbnail: ThumbnailRecord,
+    pub task_id: Option<i64>,
+    pub queued: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThumbnailSourceRecord {
+    pub file_id: i64,
+    pub root_id: i64,
+    pub folder_id: i64,
+    pub name: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub file_key: Option<String>,
+    pub media_kind: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub metadata_status: Option<String>,
+}
+
+impl ThumbnailSourceRecord {
+    pub fn cache_identity(&self) -> CacheIdentity<'_> {
+        CacheIdentity {
+            file_id: self.file_id,
+            root_id: self.root_id,
+            folder_id: self.folder_id,
+            name: &self.name,
+            size: self.size,
+            mtime: self.mtime,
+            file_key: self.file_key.as_deref(),
+        }
+    }
+
+    pub fn source_fingerprint(&self, profile: &str) -> String {
+        source_fingerprint_for(&self.cache_identity(), profile)
+    }
+
+    fn has_reliable_dimensions(&self) -> bool {
+        self.metadata_status.as_deref() == Some("ready")
+    }
 }
 
 #[derive(Debug)]
@@ -138,6 +186,7 @@ pub struct ThumbnailRecord {
     pub height: Option<i64>,
     pub byte_size: Option<i64>,
     pub error: Option<String>,
+    pub source_fingerprint: Option<String>,
     pub updated_at: Option<i64>,
 }
 
@@ -157,6 +206,8 @@ pub struct TaskRecord {
     pub folders_seen: i64,
     pub media_files_seen: i64,
     pub skipped_files: i64,
+    #[serde(skip_serializing)]
+    pub thumbnail_source_fingerprint: Option<String>,
     pub error: Option<String>,
 }
 
@@ -193,6 +244,16 @@ impl Database {
         Ok(Some(Self::open(path)?))
     }
 
+    pub fn default_thumbnail_cache_dir(&self) -> PathBuf {
+        if let Some(path) = &self.path {
+            return path
+                .parent()
+                .map(|parent| parent.join("thumbnail-cache"))
+                .unwrap_or_else(|| PathBuf::from("thumbnail-cache"));
+        }
+        std::env::temp_dir().join("megle-thumbnail-cache")
+    }
+
     pub fn apply_migrations(&self) -> anyhow::Result<()> {
         self.connection
             .execute_batch(migrations::INITIAL_MIGRATION)?;
@@ -210,6 +271,17 @@ impl Database {
                 .execute_batch(migrations::THUMBNAIL_STATE_MIGRATION);
             self.connection.pragma_update(None, "foreign_keys", "ON")?;
             result?;
+        }
+        if !self.migration_applied(5)? {
+            let result = self
+                .connection
+                .execute_batch(migrations::THUMBNAIL_SOURCE_FINGERPRINT_MIGRATION);
+            self.connection.pragma_update(None, "foreign_keys", "ON")?;
+            result?;
+        }
+        if !self.migration_applied(6)? {
+            self.connection
+                .execute_batch(migrations::THUMBNAIL_TASK_ATTEMPT_FINGERPRINT_MIGRATION)?;
         }
         Ok(())
     }
@@ -357,6 +429,43 @@ impl Database {
         Ok(updated)
     }
 
+    pub fn reset_running_thumbnail_tasks_for_recovery(&self) -> anyhow::Result<usize> {
+        let now = unix_timestamp();
+        let transaction = self.connection.unchecked_transaction()?;
+        let updated = transaction.execute(
+            r#"
+            UPDATE tasks
+            SET status = 'pending',
+                updated_at = ?1,
+                thumbnail_source_fingerprint = NULL,
+                error = NULL
+            WHERE kind = 'thumbnail' AND status = 'running'
+            "#,
+            [now],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE thumbs
+            SET state = 'queued',
+                cache_key = NULL,
+                width = NULL,
+                height = NULL,
+                byte_size = NULL,
+                error = NULL,
+                updated_at = ?1
+            WHERE profile = 'grid_320'
+              AND state = 'queued'
+              AND file_id IN (
+                SELECT file_id FROM tasks
+                WHERE kind = 'thumbnail' AND status = 'pending'
+              )
+            "#,
+            [now],
+        )?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
     pub fn list_pending_root_scan_task_ids(&self) -> anyhow::Result<Vec<i64>> {
         let mut statement = self.connection.prepare(
             r#"
@@ -364,6 +473,26 @@ impl Database {
             FROM tasks
             JOIN roots ON roots.id = tasks.root_id AND roots.enabled = 1
             WHERE tasks.kind = 'root_scan' AND tasks.status = 'pending'
+            ORDER BY tasks.priority DESC, tasks.created_at ASC, tasks.id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+
+        let mut task_ids = Vec::new();
+        for row in rows {
+            task_ids.push(row?);
+        }
+        Ok(task_ids)
+    }
+
+    pub fn list_pending_thumbnail_task_ids(&self) -> anyhow::Result<Vec<i64>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT tasks.id
+            FROM tasks
+            JOIN files ON files.id = tasks.file_id AND files.status = 'active'
+            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+            WHERE tasks.kind = 'thumbnail' AND tasks.status = 'pending'
             ORDER BY tasks.priority DESC, tasks.created_at ASC, tasks.id ASC
             "#,
         )?;
@@ -396,7 +525,8 @@ impl Database {
         let mut statement = self.connection.prepare(
             r#"
             SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at,
-                   items_seen, items_total, folders_seen, media_files_seen, skipped_files, error
+                   items_seen, items_total, folders_seen, media_files_seen, skipped_files,
+                   thumbnail_source_fingerprint, error
             FROM tasks
             ORDER BY id ASC
             "#,
@@ -414,7 +544,8 @@ impl Database {
         let mut statement = self.connection.prepare(
             r#"
             SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at,
-                   items_seen, items_total, folders_seen, media_files_seen, skipped_files, error
+                   items_seen, items_total, folders_seen, media_files_seen, skipped_files,
+                   thumbnail_source_fingerprint, error
             FROM tasks
             WHERE id = ?1
             "#,
@@ -429,6 +560,28 @@ impl Database {
             (unix_timestamp(), task_id),
         )?;
         self.ensure_one_task_updated(task_id, updated, "pending")?;
+        Ok(())
+    }
+
+    pub fn mark_thumbnail_task_running(
+        &self,
+        task_id: i64,
+        source_fingerprint: &str,
+    ) -> anyhow::Result<()> {
+        let updated = self.connection.execute(
+            r#"
+            UPDATE tasks
+            SET status = 'running',
+                updated_at = ?1,
+                thumbnail_source_fingerprint = ?2,
+                error = NULL
+            WHERE id = ?3
+              AND kind = 'thumbnail'
+              AND status = 'pending'
+            "#,
+            (unix_timestamp(), source_fingerprint, task_id),
+        )?;
+        self.ensure_one_task_updated(task_id, updated, "pending thumbnail")?;
         Ok(())
     }
 
@@ -537,18 +690,10 @@ impl Database {
             SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
                    files.size, files.mtime, media.kind, media.width, media.height,
                    media.duration_ms, media.codec,
-                   thumbs.state,
-                   CASE
-                     WHEN thumbs.state = 'ready'
-                      AND thumbs.cache_key IS NOT NULL
-                      AND thumbs.cache_key NOT LIKE '/%'
-                      AND thumbs.cache_key NOT LIKE '\%'
-                      AND thumbs.cache_key NOT LIKE '%\%'
-                      AND thumbs.cache_key NOT LIKE '%:%'
-                      AND thumbs.cache_key NOT LIKE '%..%'
-                     THEN thumbs.cache_key
-                     ELSE NULL
-                   END
+                   media.metadata_status, files.file_key,
+                   thumbs.profile, thumbs.state, thumbs.short_side_px,
+                   thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+                   thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.updated_at
             FROM files
             LEFT JOIN media ON media.file_id = files.id
             LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
@@ -582,18 +727,11 @@ impl Database {
             r#"
             SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
                    files.size, files.mtime, media.kind, media.width, media.height,
-                   media.duration_ms, media.codec, thumbs.state,
-                   CASE
-                     WHEN thumbs.state = 'ready'
-                      AND thumbs.cache_key IS NOT NULL
-                      AND thumbs.cache_key NOT LIKE '/%'
-                      AND thumbs.cache_key NOT LIKE '\%'
-                      AND thumbs.cache_key NOT LIKE '%\%'
-                      AND thumbs.cache_key NOT LIKE '%:%'
-                      AND thumbs.cache_key NOT LIKE '%..%'
-                     THEN thumbs.cache_key
-                     ELSE NULL
-                   END
+                   media.duration_ms, media.codec,
+                   media.metadata_status, files.file_key,
+                   thumbs.profile, thumbs.state, thumbs.short_side_px,
+                   thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+                   thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.updated_at
             FROM files
             LEFT JOIN media ON media.file_id = files.id
             LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
@@ -613,22 +751,229 @@ impl Database {
         file_id: i64,
         profile: &str,
     ) -> anyhow::Result<Option<ThumbnailRecord>> {
+        let mut thumbnail = {
+            let mut statement = self.connection.prepare(
+                r#"
+                SELECT files.id, thumbs.profile, thumbs.state, thumbs.short_side_px,
+                       thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+                       thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.updated_at
+                FROM files
+                JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+                LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = ?2
+                WHERE files.id = ?1 AND files.status = 'active'
+                "#,
+            )?;
+            let mut rows = statement.query((file_id, profile))?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            thumbnail_from_row(row, profile)?
+        };
+        if let Some(source) = self.get_thumbnail_source(file_id)? {
+            normalize_thumbnail_record_for_source(&mut thumbnail, &source);
+        }
+        Ok(Some(thumbnail))
+    }
+
+    pub fn reset_thumbnail_after_stale_source(
+        &self,
+        file_id: i64,
+        profile: &str,
+        error: &str,
+    ) -> anyhow::Result<()> {
+        let now = unix_timestamp();
+        let updated = self.connection.execute(
+            r#"
+            UPDATE thumbs
+            SET state = 'pending',
+                cache_key = NULL,
+                width = NULL,
+                height = NULL,
+                byte_size = NULL,
+                error = ?1,
+                source_fingerprint = NULL,
+                updated_at = ?2
+            WHERE file_id = ?3
+              AND profile = ?4
+              AND state IN ('pending', 'queued', 'failed')
+            "#,
+            (error, now, file_id, profile),
+        )?;
+        if updated == 0 {
+            self.connection.execute(
+                r#"
+                INSERT OR IGNORE INTO thumbs(
+                    file_id, profile, state, cache_key, width, height, byte_size,
+                    short_side_px, output_format, error, source_fingerprint, updated_at
+                )
+                VALUES (?1, ?2, 'pending', NULL, NULL, NULL, NULL, 320, 'image/webp', ?3, NULL, ?4)
+                "#,
+                (file_id, profile, error, now),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn publish_thumbnail_failure_for_attempted_source(
+        &self,
+        file_id: i64,
+        profile: &str,
+        attempted_source_fingerprint: Option<&str>,
+        error: &str,
+    ) -> anyhow::Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let current_source = thumbnail_source_in_transaction(&transaction, file_id)?
+            .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
+        let current_source_fingerprint = current_source.source_fingerprint(profile);
+        let is_current_attempt =
+            attempted_source_fingerprint == Some(current_source_fingerprint.as_str());
+
+        if is_current_attempt {
+            upsert_thumbnail_state_in_transaction(
+                &transaction,
+                ThumbnailStateUpsert {
+                    file_id,
+                    profile: profile.to_string(),
+                    state: "failed".to_string(),
+                    cache_key: None,
+                    width: None,
+                    height: None,
+                    byte_size: None,
+                    error: Some(error.to_string()),
+                    source_fingerprint: Some(current_source_fingerprint),
+                },
+            )?;
+            transaction.commit()?;
+            return Ok(true);
+        }
+
+        reset_thumbnail_after_stale_source_in_transaction(&transaction, file_id, profile, error)?;
+        transaction.commit()?;
+        Ok(false)
+    }
+
+    pub fn get_thumbnail_source(
+        &self,
+        file_id: i64,
+    ) -> anyhow::Result<Option<ThumbnailSourceRecord>> {
         let mut statement = self.connection.prepare(
             r#"
-            SELECT files.id, thumbs.profile, thumbs.state, thumbs.short_side_px,
-                   thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
-                   thumbs.byte_size, thumbs.error, thumbs.updated_at
+            SELECT files.id, files.root_id, files.folder_id, files.name, files.size,
+                   files.mtime, files.file_key, media.kind, media.width, media.height,
+                   media.metadata_status
             FROM files
             JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
-            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = ?2
+            LEFT JOIN media ON media.file_id = files.id
             WHERE files.id = ?1 AND files.status = 'active'
             "#,
         )?;
-        let mut rows = statement.query((file_id, profile))?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
+        let mut rows = statement.query([file_id])?;
+        Ok(rows.next()?.map(thumbnail_source_from_row).transpose()?)
+    }
+
+    pub fn request_thumbnail_task(
+        &self,
+        file_id: i64,
+        profile: &str,
+    ) -> anyhow::Result<ThumbnailTaskRequest> {
+        if profile != GRID_320_PROFILE {
+            return Err(anyhow::anyhow!("unsupported thumbnail profile: {profile}"));
+        }
+
+        let source = self
+            .get_thumbnail_source(file_id)?
+            .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
+        let policy = ThumbnailPolicy::grid_320();
+        let source_fingerprint = source.source_fingerprint(profile);
+        let dimensions = if source.has_reliable_dimensions() {
+            (source.width, source.height)
+        } else {
+            (None, None)
         };
-        Ok(Some(thumbnail_from_row(row, profile)?))
+        if policy.initial_state(source.media_kind.as_deref(), dimensions.0, dimensions.1)
+            == ThumbnailDecision::SkippedSmall
+        {
+            self.upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: profile.to_string(),
+                state: "skipped_small".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })?;
+            let thumbnail = self
+                .get_thumbnail(file_id, profile)?
+                .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
+            return Ok(ThumbnailTaskRequest {
+                thumbnail,
+                task_id: latest_thumbnail_task_id(&self.connection, file_id)?,
+                queued: false,
+            });
+        }
+
+        let transaction = self.connection.unchecked_transaction()?;
+        let current = thumbnail_for_update_in_transaction(&transaction, file_id, profile)?;
+        if let Some(current) = current {
+            if thumbnail_state_is_terminal_for_current_source(
+                &current,
+                &source,
+                source_fingerprint.as_str(),
+            ) {
+                let task_id = latest_thumbnail_task_id_in_transaction(&transaction, file_id)?;
+                transaction.commit()?;
+                return Ok(ThumbnailTaskRequest {
+                    thumbnail: current,
+                    task_id,
+                    queued: false,
+                });
+            }
+        }
+        let existing_task_id = pending_or_running_thumbnail_task_id(&transaction, file_id)?;
+        let mut queued = false;
+        let task_id = if let Some(task_id) = existing_task_id {
+            task_id
+        } else {
+            let now = unix_timestamp();
+            transaction.execute(
+                r#"
+                INSERT INTO tasks(
+                    kind, priority, status, root_id, file_id, created_at, updated_at,
+                    thumbnail_source_fingerprint, error
+                )
+                VALUES ('thumbnail', 10, 'pending', NULL, ?1, ?2, ?2, ?3, NULL)
+                "#,
+                (file_id, now, source_fingerprint.as_str()),
+            )?;
+            queued = true;
+            transaction.last_insert_rowid()
+        };
+        upsert_thumbnail_state_in_transaction(
+            &transaction,
+            ThumbnailStateUpsert {
+                file_id,
+                profile: profile.to_string(),
+                state: "queued".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            },
+        )?;
+        transaction.commit()?;
+
+        let thumbnail = self
+            .get_thumbnail(file_id, profile)?
+            .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
+        Ok(ThumbnailTaskRequest {
+            thumbnail,
+            task_id: Some(task_id),
+            queued,
+        })
     }
 
     pub fn list_folder_children_page(
@@ -746,6 +1091,12 @@ impl Database {
 
     #[allow(dead_code)]
     pub fn upsert_file(&self, file: FileUpsert) -> anyhow::Result<i64> {
+        let root_id = file.root_id;
+        let folder_id = file.folder_id;
+        let name = file.name.clone();
+        let size = file.size;
+        let mtime = file.mtime;
+        let file_key = file.file_key.clone();
         self.connection.execute(
             r#"
             INSERT INTO files(root_id, folder_id, name, ext, size, mtime, ctime, file_key, status)
@@ -774,6 +1125,18 @@ impl Database {
             (file.folder_id, &file.name),
             |row| row.get(0),
         )?;
+        invalidate_stale_thumbnail_states_in_connection(
+            &self.connection,
+            CacheIdentity {
+                file_id: id,
+                root_id,
+                folder_id,
+                name: &name,
+                size,
+                mtime,
+                file_key: file_key.as_deref(),
+            },
+        )?;
         Ok(id)
     }
 
@@ -784,7 +1147,16 @@ impl Database {
             INSERT INTO media(file_id, kind, metadata_status)
             VALUES (?1, ?2, 'pending')
             ON CONFLICT(file_id) DO UPDATE SET
-              kind = excluded.kind
+              kind = excluded.kind,
+              width = NULL,
+              height = NULL,
+              duration_ms = NULL,
+              codec = NULL,
+              orientation = NULL,
+              has_alpha = NULL,
+              dominant_color = NULL,
+              phash = NULL,
+              metadata_status = 'pending'
             "#,
             (file_id, kind),
         )?;
@@ -822,37 +1194,25 @@ impl Database {
 
     #[allow(dead_code)]
     pub fn upsert_thumbnail_state(&self, state: ThumbnailStateUpsert) -> anyhow::Result<()> {
-        self.connection.execute(
-            r#"
-            INSERT INTO thumbs(
-                file_id, profile, state, cache_key, width, height, byte_size,
-                short_side_px, output_format, error, updated_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 320, 'image/webp', ?8, ?9)
-            ON CONFLICT(file_id, profile) DO UPDATE SET
-                state = excluded.state,
-                cache_key = excluded.cache_key,
-                width = excluded.width,
-                height = excluded.height,
-                byte_size = excluded.byte_size,
-                short_side_px = excluded.short_side_px,
-                output_format = excluded.output_format,
-                error = excluded.error,
-                updated_at = excluded.updated_at
-            "#,
-            (
-                state.file_id,
-                &state.profile,
-                &state.state,
-                state.cache_key.as_deref(),
-                state.width,
-                state.height,
-                state.byte_size,
-                state.error.as_deref(),
-                unix_timestamp(),
-            ),
-        )?;
+        upsert_thumbnail_state_in_connection(&self.connection, state)?;
         Ok(())
+    }
+
+    pub fn upsert_thumbnail_state_if_source_fingerprint_current(
+        &self,
+        state: ThumbnailStateUpsert,
+        expected_source_fingerprint: &str,
+    ) -> anyhow::Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let current_source = thumbnail_source_in_transaction(&transaction, state.file_id)?
+            .ok_or_else(|| anyhow::anyhow!("media item not found: {}", state.file_id))?;
+        if current_source.source_fingerprint(&state.profile) != expected_source_fingerprint {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        upsert_thumbnail_state_in_transaction(&transaction, state)?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn mark_root_scanned(&self, root_id: i64) -> anyhow::Result<()> {
@@ -1007,6 +1367,12 @@ fn upsert_file_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     file: FileUpsert,
 ) -> anyhow::Result<i64> {
+    let root_id = file.root_id;
+    let folder_id = file.folder_id;
+    let name = file.name.clone();
+    let size = file.size;
+    let mtime = file.mtime;
+    let file_key = file.file_key.clone();
     transaction.execute(
         r#"
         INSERT INTO files(root_id, folder_id, name, ext, size, mtime, ctime, file_key, status)
@@ -1035,6 +1401,18 @@ fn upsert_file_in_transaction(
         (file.folder_id, &file.name),
         |row| row.get(0),
     )?;
+    invalidate_stale_thumbnail_states_in_transaction(
+        transaction,
+        CacheIdentity {
+            file_id: id,
+            root_id,
+            folder_id,
+            name: &name,
+            size,
+            mtime,
+            file_key: file_key.as_deref(),
+        },
+    )?;
     Ok(id)
 }
 
@@ -1048,10 +1426,285 @@ fn upsert_media_kind_in_transaction(
         INSERT INTO media(file_id, kind, metadata_status)
         VALUES (?1, ?2, 'pending')
         ON CONFLICT(file_id) DO UPDATE SET
-          kind = excluded.kind
+          kind = excluded.kind,
+          width = NULL,
+          height = NULL,
+          duration_ms = NULL,
+          codec = NULL,
+          orientation = NULL,
+          has_alpha = NULL,
+          dominant_color = NULL,
+          phash = NULL,
+          metadata_status = 'pending'
         "#,
         (file_id, kind),
     )?;
+    Ok(())
+}
+
+fn invalidate_stale_thumbnail_states_in_connection(
+    connection: &rusqlite::Connection,
+    identity: CacheIdentity<'_>,
+) -> anyhow::Result<()> {
+    invalidate_stale_thumbnail_states(
+        connection,
+        identity.file_id,
+        GRID_320_PROFILE,
+        &source_fingerprint_for(&identity, GRID_320_PROFILE),
+    )
+}
+
+fn invalidate_stale_thumbnail_states_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    identity: CacheIdentity<'_>,
+) -> anyhow::Result<()> {
+    invalidate_stale_thumbnail_states(
+        transaction,
+        identity.file_id,
+        GRID_320_PROFILE,
+        &source_fingerprint_for(&identity, GRID_320_PROFILE),
+    )
+}
+
+fn invalidate_stale_thumbnail_states(
+    connection: &rusqlite::Connection,
+    file_id: i64,
+    profile: &str,
+    source_fingerprint: &str,
+) -> anyhow::Result<()> {
+    connection.execute(
+        r#"
+        UPDATE thumbs
+        SET state = 'pending',
+            cache_key = NULL,
+            width = NULL,
+            height = NULL,
+            byte_size = NULL,
+            error = NULL,
+            source_fingerprint = NULL,
+            updated_at = ?1
+        WHERE file_id = ?2
+          AND profile = ?3
+          AND state NOT IN ('pending', 'queued')
+          AND (source_fingerprint IS NULL OR source_fingerprint <> ?4)
+        "#,
+        (unix_timestamp(), file_id, profile, source_fingerprint),
+    )?;
+    Ok(())
+}
+
+fn upsert_thumbnail_state_in_connection(
+    connection: &rusqlite::Connection,
+    state: ThumbnailStateUpsert,
+) -> anyhow::Result<()> {
+    connection.execute(
+        r#"
+        INSERT INTO thumbs(
+            file_id, profile, state, cache_key, width, height, byte_size,
+            short_side_px, output_format, error, source_fingerprint, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 320, 'image/webp', ?8, ?9, ?10)
+        ON CONFLICT(file_id, profile) DO UPDATE SET
+            state = excluded.state,
+            cache_key = excluded.cache_key,
+            width = excluded.width,
+            height = excluded.height,
+            byte_size = excluded.byte_size,
+            short_side_px = excluded.short_side_px,
+            output_format = excluded.output_format,
+            error = excluded.error,
+            source_fingerprint = excluded.source_fingerprint,
+            updated_at = excluded.updated_at
+        "#,
+        (
+            state.file_id,
+            &state.profile,
+            &state.state,
+            state.cache_key.as_deref(),
+            state.width,
+            state.height,
+            state.byte_size,
+            state.error.as_deref(),
+            state.source_fingerprint.as_deref(),
+            unix_timestamp(),
+        ),
+    )?;
+    Ok(())
+}
+
+fn upsert_thumbnail_state_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    state: ThumbnailStateUpsert,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        r#"
+        INSERT INTO thumbs(
+            file_id, profile, state, cache_key, width, height, byte_size,
+            short_side_px, output_format, error, source_fingerprint, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 320, 'image/webp', ?8, ?9, ?10)
+        ON CONFLICT(file_id, profile) DO UPDATE SET
+            state = excluded.state,
+            cache_key = excluded.cache_key,
+            width = excluded.width,
+            height = excluded.height,
+            byte_size = excluded.byte_size,
+            short_side_px = excluded.short_side_px,
+            output_format = excluded.output_format,
+            error = excluded.error,
+            source_fingerprint = excluded.source_fingerprint,
+            updated_at = excluded.updated_at
+        "#,
+        (
+            state.file_id,
+            &state.profile,
+            &state.state,
+            state.cache_key.as_deref(),
+            state.width,
+            state.height,
+            state.byte_size,
+            state.error.as_deref(),
+            state.source_fingerprint.as_deref(),
+            unix_timestamp(),
+        ),
+    )?;
+    Ok(())
+}
+
+fn pending_or_running_thumbnail_task_id(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT id
+        FROM tasks
+        WHERE kind = 'thumbnail'
+          AND file_id = ?1
+          AND status IN ('pending', 'running')
+        ORDER BY
+          CASE status WHEN 'running' THEN 0 ELSE 1 END,
+          priority DESC,
+          created_at ASC,
+          id ASC
+        LIMIT 1
+        "#,
+    )?;
+    let mut rows = statement.query([file_id])?;
+    Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+}
+
+fn latest_thumbnail_task_id(
+    connection: &rusqlite::Connection,
+    file_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT id
+        FROM tasks
+        WHERE kind = 'thumbnail' AND file_id = ?1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )?;
+    let mut rows = statement.query([file_id])?;
+    Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+}
+
+fn latest_thumbnail_task_id_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT id
+        FROM tasks
+        WHERE kind = 'thumbnail' AND file_id = ?1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )?;
+    let mut rows = statement.query([file_id])?;
+    Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+}
+
+fn thumbnail_for_update_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+    profile: &str,
+) -> anyhow::Result<Option<ThumbnailRecord>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT files.id, thumbs.profile, thumbs.state, thumbs.short_side_px,
+               thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+               thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.updated_at
+        FROM files
+        LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = ?2
+        WHERE files.id = ?1 AND files.status = 'active'
+        "#,
+    )?;
+    let mut rows = statement.query((file_id, profile))?;
+    Ok(rows
+        .next()?
+        .map(|row| thumbnail_from_row(row, profile))
+        .transpose()?)
+}
+
+fn thumbnail_source_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+) -> anyhow::Result<Option<ThumbnailSourceRecord>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT files.id, files.root_id, files.folder_id, files.name, files.size,
+               files.mtime, files.file_key, media.kind, media.width, media.height,
+               media.metadata_status
+        FROM files
+        JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+        LEFT JOIN media ON media.file_id = files.id
+        WHERE files.id = ?1 AND files.status = 'active'
+        "#,
+    )?;
+    let mut rows = statement.query([file_id])?;
+    Ok(rows.next()?.map(thumbnail_source_from_row).transpose()?)
+}
+
+fn reset_thumbnail_after_stale_source_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+    profile: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let now = unix_timestamp();
+    let updated = transaction.execute(
+        r#"
+        UPDATE thumbs
+        SET state = 'pending',
+            cache_key = NULL,
+            width = NULL,
+            height = NULL,
+            byte_size = NULL,
+            error = ?1,
+            source_fingerprint = NULL,
+            updated_at = ?2
+        WHERE file_id = ?3
+          AND profile = ?4
+          AND state IN ('pending', 'queued', 'failed')
+        "#,
+        (error, now, file_id, profile),
+    )?;
+    if updated == 0 {
+        transaction.execute(
+            r#"
+            INSERT OR IGNORE INTO thumbs(
+                file_id, profile, state, cache_key, width, height, byte_size,
+                short_side_px, output_format, error, source_fingerprint, updated_at
+            )
+            VALUES (?1, ?2, 'pending', NULL, NULL, NULL, NULL, 320, 'image/webp', ?3, NULL, ?4)
+            "#,
+            (file_id, profile, error, now),
+        )?;
+    }
     Ok(())
 }
 
@@ -1095,30 +1748,179 @@ fn root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RootRecord> {
 }
 
 fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRecord> {
-    let thumbnail_state: Option<String> = row.get(12)?;
-    let thumbnail_cache_key: Option<String> = row.get(13)?;
-    let thumbnail_cache_key = match (thumbnail_state.as_deref(), thumbnail_cache_key.as_deref()) {
-        (Some("ready"), Some(cache_key)) if is_safe_thumbnail_cache_key(cache_key) => {
-            thumbnail_cache_key
-        }
-        _ => None,
+    let id: i64 = row.get(0)?;
+    let root_id: i64 = row.get(1)?;
+    let folder_id: i64 = row.get(2)?;
+    let name: String = row.get(3)?;
+    let ext: String = row.get(4)?;
+    let size: i64 = row.get(5)?;
+    let mtime: i64 = row.get(6)?;
+    let kind: Option<String> = row.get(7)?;
+    let width: Option<i64> = row.get(8)?;
+    let height: Option<i64> = row.get(9)?;
+    let duration_ms: Option<i64> = row.get(10)?;
+    let codec: Option<String> = row.get(11)?;
+    let source = ThumbnailSourceRecord {
+        file_id: id,
+        root_id,
+        folder_id,
+        name: name.clone(),
+        size,
+        mtime,
+        file_key: row.get(13)?,
+        media_kind: kind.clone(),
+        width,
+        height,
+        metadata_status: row.get(12)?,
     };
+    let (thumbnail_state, thumbnail_cache_key) = media_thumbnail_summary_from_row(row, &source)?;
+
     Ok(MediaRecord {
-        id: row.get(0)?,
-        root_id: row.get(1)?,
-        folder_id: row.get(2)?,
-        name: row.get(3)?,
-        ext: row.get(4)?,
-        size: row.get(5)?,
-        mtime: row.get(6)?,
-        kind: row.get(7)?,
-        width: row.get(8)?,
-        height: row.get(9)?,
-        duration_ms: row.get(10)?,
-        codec: row.get(11)?,
+        id,
+        root_id,
+        folder_id,
+        name,
+        ext,
+        size,
+        mtime,
+        kind,
+        width,
+        height,
+        duration_ms,
+        codec,
         thumbnail_state,
         thumbnail_cache_key,
     })
+}
+
+fn media_thumbnail_summary_from_row(
+    row: &rusqlite::Row<'_>,
+    source: &ThumbnailSourceRecord,
+) -> rusqlite::Result<(Option<String>, Option<String>)> {
+    let Some(state) = row.get(15)? else {
+        return Ok((None, None));
+    };
+    let mut thumbnail = ThumbnailRecord {
+        file_id: source.file_id,
+        profile: row
+            .get::<_, Option<String>>(14)?
+            .unwrap_or_else(|| GRID_320_PROFILE.to_string()),
+        state,
+        short_side_px: row
+            .get::<_, Option<i64>>(16)?
+            .unwrap_or(GRID_320_SHORT_SIDE_PX),
+        output_format: row
+            .get::<_, Option<String>>(17)?
+            .unwrap_or_else(|| GENERATED_FORMAT.to_string()),
+        cache_key: row.get(18)?,
+        width: row.get(19)?,
+        height: row.get(20)?,
+        byte_size: row.get(21)?,
+        error: row.get(22)?,
+        source_fingerprint: row.get(23)?,
+        updated_at: row.get(24)?,
+    };
+    normalize_thumbnail_record_for_source(&mut thumbnail, source);
+    let thumbnail_cache_key = if thumbnail.state == "ready"
+        && thumbnail
+            .cache_key
+            .as_deref()
+            .is_some_and(is_safe_thumbnail_cache_key)
+    {
+        thumbnail.cache_key
+    } else {
+        None
+    };
+    Ok((Some(thumbnail.state), thumbnail_cache_key))
+}
+
+fn thumbnail_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThumbnailSourceRecord> {
+    Ok(ThumbnailSourceRecord {
+        file_id: row.get(0)?,
+        root_id: row.get(1)?,
+        folder_id: row.get(2)?,
+        name: row.get(3)?,
+        size: row.get(4)?,
+        mtime: row.get(5)?,
+        file_key: row.get(6)?,
+        media_kind: row.get(7)?,
+        width: row.get(8)?,
+        height: row.get(9)?,
+        metadata_status: row.get(10)?,
+    })
+}
+
+fn normalize_thumbnail_record_for_source(
+    thumbnail: &mut ThumbnailRecord,
+    source: &ThumbnailSourceRecord,
+) {
+    if thumbnail.state == "ready" && !thumbnail_source_fingerprint_matches(thumbnail, source) {
+        reset_thumbnail_record_to_pending(thumbnail);
+    }
+    if thumbnail.state == "failed" && !failed_is_current_for_source(thumbnail, source) {
+        reset_thumbnail_record_to_pending(thumbnail);
+    }
+    if thumbnail.state == "skipped_small" && !skipped_small_is_current_for_source(thumbnail, source)
+    {
+        reset_thumbnail_record_to_pending(thumbnail);
+    }
+}
+
+fn thumbnail_state_is_terminal_for_current_source(
+    thumbnail: &ThumbnailRecord,
+    source: &ThumbnailSourceRecord,
+    source_fingerprint: &str,
+) -> bool {
+    if thumbnail.source_fingerprint.as_deref() != Some(source_fingerprint) {
+        return false;
+    }
+    match thumbnail.state.as_str() {
+        "ready" | "failed" => true,
+        "skipped_small" => skipped_small_is_current_for_source(thumbnail, source),
+        _ => false,
+    }
+}
+
+fn failed_is_current_for_source(
+    thumbnail: &ThumbnailRecord,
+    source: &ThumbnailSourceRecord,
+) -> bool {
+    thumbnail_source_fingerprint_matches(thumbnail, source)
+}
+
+fn skipped_small_is_current_for_source(
+    thumbnail: &ThumbnailRecord,
+    source: &ThumbnailSourceRecord,
+) -> bool {
+    thumbnail_source_fingerprint_matches(thumbnail, source)
+        && source.has_reliable_dimensions()
+        && ThumbnailPolicy::grid_320().initial_state(
+            source.media_kind.as_deref(),
+            source.width,
+            source.height,
+        ) == ThumbnailDecision::SkippedSmall
+}
+
+fn thumbnail_source_fingerprint_matches(
+    thumbnail: &ThumbnailRecord,
+    source: &ThumbnailSourceRecord,
+) -> bool {
+    thumbnail.source_fingerprint.as_deref()
+        == Some(
+            source
+                .source_fingerprint(thumbnail.profile.as_str())
+                .as_str(),
+        )
+}
+
+fn reset_thumbnail_record_to_pending(thumbnail: &mut ThumbnailRecord) {
+    thumbnail.state = "pending".to_string();
+    thumbnail.cache_key = None;
+    thumbnail.width = None;
+    thumbnail.height = None;
+    thumbnail.byte_size = None;
+    thumbnail.error = None;
+    thumbnail.source_fingerprint = None;
 }
 
 fn thumbnail_from_row(
@@ -1130,14 +1932,26 @@ fn thumbnail_from_row(
     let short_side_px: Option<i64> = row.get(3)?;
     let output_format: Option<String> = row.get(4)?;
     let cache_key: Option<String> = row.get(5)?;
-    let cache_key_is_usable = state.as_deref() == Some("ready")
+    let source_fingerprint: Option<String> = row.get(10)?;
+    let state = match state {
+        Some(state)
+            if matches!(state.as_str(), "ready" | "skipped_small")
+                && source_fingerprint.is_none() =>
+        {
+            "pending".to_string()
+        }
+        Some(state) => state,
+        None => "pending".to_string(),
+    };
+    let cache_key_is_usable = state == "ready"
+        && source_fingerprint.is_some()
         && cache_key
             .as_deref()
             .is_some_and(is_safe_thumbnail_cache_key);
     Ok(ThumbnailRecord {
         file_id: row.get(0)?,
         profile: profile.unwrap_or_else(|| requested_profile.to_string()),
-        state: state.unwrap_or_else(|| "pending".to_string()),
+        state,
         short_side_px: short_side_px.unwrap_or(GRID_320_SHORT_SIDE_PX),
         output_format: output_format.unwrap_or_else(|| GENERATED_FORMAT.to_string()),
         cache_key: if cache_key_is_usable { cache_key } else { None },
@@ -1157,18 +1971,13 @@ fn thumbnail_from_row(
             None
         },
         error: row.get(9)?,
-        updated_at: row.get(10)?,
+        source_fingerprint,
+        updated_at: row.get(11)?,
     })
 }
 
 fn is_safe_thumbnail_cache_key(cache_key: &str) -> bool {
-    !cache_key.is_empty()
-        && !cache_key.starts_with('/')
-        && !cache_key.starts_with('\\')
-        && !cache_key.contains(':')
-        && !cache_key
-            .split(['/', '\\'])
-            .any(|part| part.is_empty() || part == "." || part == "..")
+    is_safe_cache_key(cache_key)
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
@@ -1186,7 +1995,8 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         folders_seen: row.get(10)?,
         media_files_seen: row.get(11)?,
         skipped_files: row.get(12)?,
-        error: row.get(13)?,
+        thumbnail_source_fingerprint: row.get(13)?,
+        error: row.get(14)?,
     })
 }
 
@@ -1553,6 +2363,125 @@ mod tests {
           (5, 'grid', 'aa/bb/ready.webp', 320, 240, 666, 'ready', 60);
     "#;
 
+    const VERSION_4_SCHEMA_WITH_READY_THUMBNAIL_WITHOUT_FINGERPRINT: &str = r#"
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE roots (
+          id INTEGER PRIMARY KEY,
+          path TEXT NOT NULL UNIQUE,
+          display_name TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL,
+          last_scan_at INTEGER
+        );
+
+        CREATE TABLE folders (
+          id INTEGER PRIMARY KEY,
+          root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+          parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          path_hash TEXT NOT NULL,
+          mtime INTEGER,
+          status TEXT NOT NULL DEFAULT 'active',
+          UNIQUE(root_id, parent_id, name)
+        );
+
+        CREATE TABLE files (
+          id INTEGER PRIMARY KEY,
+          root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+          folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          ext TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          mtime INTEGER NOT NULL,
+          ctime INTEGER,
+          file_key TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          UNIQUE(folder_id, name)
+        );
+
+        CREATE TABLE media (
+          file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL,
+          width INTEGER,
+          height INTEGER,
+          duration_ms INTEGER,
+          codec TEXT,
+          orientation INTEGER,
+          has_alpha INTEGER,
+          dominant_color TEXT,
+          phash TEXT,
+          metadata_status TEXT NOT NULL DEFAULT 'pending'
+        );
+
+        CREATE TABLE thumbs (
+          file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+          profile TEXT NOT NULL CHECK(profile IN ('grid_320')),
+          state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'queued', 'ready', 'failed', 'skipped_small')),
+          cache_key TEXT,
+          width INTEGER,
+          height INTEGER,
+          byte_size INTEGER,
+          short_side_px INTEGER NOT NULL DEFAULT 320 CHECK(short_side_px = 320),
+          output_format TEXT NOT NULL DEFAULT 'image/webp' CHECK(output_format = 'image/webp'),
+          error TEXT,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(file_id, profile)
+        );
+
+        CREATE TABLE tasks (
+          id INTEGER PRIMARY KEY,
+          kind TEXT NOT NULL,
+          priority INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          root_id INTEGER REFERENCES roots(id) ON DELETE SET NULL,
+          file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          items_seen INTEGER NOT NULL DEFAULT 0,
+          items_total INTEGER,
+          folders_seen INTEGER NOT NULL DEFAULT 0,
+          media_files_seen INTEGER NOT NULL DEFAULT 0,
+          skipped_files INTEGER NOT NULL DEFAULT 0,
+          error TEXT
+        );
+
+        INSERT INTO schema_migrations(version, name, applied_at)
+        VALUES
+          (1, 'initial', unixepoch()),
+          (2, 'task_progress', unixepoch()),
+          (3, 'browsing_indexes', unixepoch()),
+          (4, 'thumbnail_state', unixepoch());
+
+        INSERT INTO roots(id, path, display_name, enabled, created_at)
+        VALUES (1, 'D:/Pictures', 'Pictures', 1, 1);
+
+        INSERT INTO folders(id, root_id, parent_id, name, path_hash, mtime)
+        VALUES (1, 1, NULL, '', 'root-hash', 1);
+
+        INSERT INTO files(id, root_id, folder_id, name, ext, size, mtime)
+        VALUES
+          (1, 1, 1, 'legacy-ready.jpg', '.jpg', 100, 1),
+          (2, 1, 1, 'legacy-skipped.jpg', '.jpg', 100, 2);
+
+        INSERT INTO media(file_id, kind, width, height, metadata_status)
+        VALUES
+          (1, 'image', 640, 480, 'ready'),
+          (2, 'image', 128, 128, 'ready');
+
+        INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, updated_at)
+        VALUES (1, 'grid_320', 'ready', 'aa/bb/legacy.webp', 320, 320, 16, 10);
+
+        INSERT INTO thumbs(file_id, profile, state, updated_at)
+        VALUES (2, 'grid_320', 'skipped_small', 11);
+    "#;
+
     #[test]
     fn add_root_lists_and_reenables_existing_root() {
         let database = migrated_database();
@@ -1616,6 +2545,7 @@ mod tests {
             "folders_seen",
             "media_files_seen",
             "skipped_files",
+            "thumbnail_source_fingerprint",
         ] {
             assert!(columns.iter().any(|candidate| candidate == column));
         }
@@ -1627,6 +2557,7 @@ mod tests {
         assert_eq!(tasks[0].folders_seen, 0);
         assert_eq!(tasks[0].media_files_seen, 0);
         assert_eq!(tasks[0].skipped_files, 0);
+        assert_eq!(tasks[0].thumbnail_source_fingerprint, None);
     }
 
     #[test]
@@ -1672,11 +2603,12 @@ mod tests {
             .get_thumbnail(1, "grid_320")
             .expect("get explicit thumbnail")
             .expect("explicit thumbnail exists");
-        assert_eq!(explicit.state, "failed");
+        assert_eq!(explicit.state, "pending");
         assert_eq!(explicit.cache_key, None);
         assert_eq!(explicit.width, None);
         assert_eq!(explicit.height, None);
         assert_eq!(explicit.byte_size, None);
+        assert_eq!(explicit.error, None);
         assert_eq!(explicit.updated_at, Some(20));
 
         let queued = database
@@ -1701,7 +2633,7 @@ mod tests {
             .get_thumbnail(4, "grid_320")
             .expect("get absolute thumbnail")
             .expect("absolute thumbnail exists");
-        assert_eq!(absolute.state, "ready");
+        assert_eq!(absolute.state, "pending");
         assert_eq!(absolute.cache_key, None);
         assert_eq!(absolute.width, None);
         assert_eq!(absolute.height, None);
@@ -1711,11 +2643,131 @@ mod tests {
             .get_thumbnail(5, "grid_320")
             .expect("get ready thumbnail")
             .expect("ready thumbnail exists");
-        assert_eq!(ready.state, "ready");
-        assert_eq!(ready.cache_key.as_deref(), Some("aa/bb/ready.webp"));
-        assert_eq!(ready.width, Some(320));
-        assert_eq!(ready.height, Some(240));
-        assert_eq!(ready.byte_size, Some(666));
+        assert_eq!(ready.state, "pending");
+        assert_eq!(ready.cache_key, None);
+        assert_eq!(ready.width, None);
+        assert_eq!(ready.height, None);
+        assert_eq!(ready.byte_size, None);
+        assert_eq!(ready.source_fingerprint, None);
+    }
+
+    #[test]
+    fn source_fingerprint_migration_upgrades_v4_database_and_invalidates_legacy_ready_rows() {
+        let database = Database::open_in_memory().expect("open in-memory database");
+        database
+            .connection
+            .execute_batch(VERSION_4_SCHEMA_WITH_READY_THUMBNAIL_WITHOUT_FINGERPRINT)
+            .expect("apply version 4 schema");
+
+        database
+            .apply_migrations()
+            .expect("apply source fingerprint migration");
+
+        let thumb_columns: Vec<String> = {
+            let mut statement = database
+                .connection
+                .prepare("PRAGMA table_info(thumbs)")
+                .expect("inspect thumbs table");
+            statement
+                .query_map([], |row| row.get(1))
+                .expect("query columns")
+                .collect::<rusqlite::Result<Vec<String>>>()
+                .expect("collect columns")
+        };
+        assert!(thumb_columns
+            .iter()
+            .any(|candidate| candidate == "source_fingerprint"));
+        let version_5_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 5",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version 5");
+        assert_eq!(version_5_count, 1);
+        let version_6_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 6",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version 6");
+        assert_eq!(version_6_count, 1);
+
+        let thumbnail = database
+            .get_thumbnail(1, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "pending");
+        assert_eq!(thumbnail.cache_key, None);
+        assert_eq!(thumbnail.width, None);
+        assert_eq!(thumbnail.height, None);
+        assert_eq!(thumbnail.byte_size, None);
+        assert_eq!(thumbnail.source_fingerprint, None);
+
+        let skipped = database
+            .get_thumbnail(2, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get skipped thumbnail")
+            .expect("skipped thumbnail exists");
+        assert_eq!(skipped.state, "pending");
+        assert_eq!(skipped.source_fingerprint, None);
+    }
+
+    #[test]
+    fn terminal_thumbnail_without_source_fingerprint_is_not_exposed_as_current() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "legacy-null-fingerprint.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        database
+            .connection
+            .execute(
+                r#"
+                INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, updated_at)
+                VALUES (?1, 'grid_320', 'ready', 'aa/bb/legacy-null.webp', 320, 320, 16, 10)
+                "#,
+                [file_id],
+            )
+            .expect("insert legacy ready thumbnail");
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+
+        assert_eq!(thumbnail.state, "pending");
+        assert_eq!(thumbnail.cache_key, None);
+        assert_eq!(thumbnail.width, None);
+        assert_eq!(thumbnail.height, None);
+        assert_eq!(thumbnail.byte_size, None);
+
+        database
+            .connection
+            .execute(
+                "UPDATE thumbs SET state = 'skipped_small', cache_key = NULL, width = NULL, height = NULL, byte_size = NULL WHERE file_id = ?1",
+                [file_id],
+            )
+            .expect("mark legacy skipped thumbnail");
+        let skipped = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get skipped thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(skipped.state, "pending");
     }
 
     #[test]
@@ -1762,15 +2814,23 @@ mod tests {
                 [file_id],
             )
             .expect("insert media");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get thumbnail source")
+            .expect("thumbnail source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
 
         database
             .connection
             .execute(
                 r#"
-                INSERT INTO thumbs(file_id, profile, cache_key, width, height, byte_size, state, updated_at)
-                VALUES (?1, 'grid_320', 'aa/bb/key.webp', 427, 320, 4096, 'ready', 30)
+                INSERT INTO thumbs(
+                    file_id, profile, cache_key, width, height, byte_size,
+                    state, source_fingerprint, updated_at
+                )
+                VALUES (?1, 'grid_320', 'aa/bb/key.webp', 427, 320, 4096, 'ready', ?2, 30)
                 "#,
-                [file_id],
+                (file_id, source_fingerprint),
             )
             .expect("insert thumbnail");
 
@@ -1855,14 +2915,28 @@ mod tests {
             (file_ids[6], "ready", "aa//thumb.webp"),
             (file_ids[7], "ready", "aa/./thumb.webp"),
         ] {
+            let source_fingerprint = if state == "ready" {
+                Some(
+                    database
+                        .get_thumbnail_source(file_id)
+                        .expect("get thumbnail source")
+                        .expect("thumbnail source exists")
+                        .source_fingerprint(crate::thumbnails::GRID_320_PROFILE),
+                )
+            } else {
+                None
+            };
             database
                 .connection
                 .execute(
                     r#"
-                    INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, updated_at)
-                    VALUES (?1, 'grid_320', ?2, ?3, 320, 240, 1024, 100)
+                    INSERT INTO thumbs(
+                        file_id, profile, state, cache_key, width, height, byte_size,
+                        source_fingerprint, updated_at
+                    )
+                    VALUES (?1, 'grid_320', ?2, ?3, 320, 240, 1024, ?4, 100)
                     "#,
-                    (file_id, state, cache_key),
+                    (file_id, state, cache_key, source_fingerprint),
                 )
                 .expect("insert thumbnail state");
         }
@@ -1917,6 +2991,118 @@ mod tests {
             .expect("media exists");
         assert_eq!(dot_segment.thumbnail_state.as_deref(), Some("ready"));
         assert_eq!(dot_segment.thumbnail_cache_key, None);
+    }
+
+    #[test]
+    fn media_records_normalize_terminal_thumbnail_state_by_source_fingerprint() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let cases = [
+            ("current-ready.jpg", "ready", "current"),
+            ("null-ready.jpg", "ready", "null"),
+            ("stale-ready.jpg", "ready", "stale"),
+            ("null-failed.jpg", "failed", "null"),
+            ("stale-failed.jpg", "failed", "stale"),
+            ("null-skipped.jpg", "skipped_small", "null"),
+            ("stale-skipped.jpg", "skipped_small", "stale"),
+        ];
+        let mut expected = Vec::new();
+
+        for (index, (name, state, fingerprint_mode)) in cases.iter().enumerate() {
+            let file_id = database
+                .upsert_file(FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: (*name).to_string(),
+                    ext: ".jpg".to_string(),
+                    size: 900 + index as i64,
+                    mtime: 900 + index as i64,
+                    ctime: None,
+                    file_key: Some(format!("identity-{index}")),
+                })
+                .expect("insert thumbnail freshness file");
+            database
+                .upsert_media_kind(file_id, "image")
+                .expect("insert media kind");
+            database
+                .connection
+                .execute(
+                    "UPDATE media SET width = 640, height = 480, metadata_status = 'ready' WHERE file_id = ?1",
+                    [file_id],
+                )
+                .expect("set media metadata");
+            let current_source_fingerprint = database
+                .get_thumbnail_source(file_id)
+                .expect("get thumbnail source")
+                .expect("thumbnail source exists")
+                .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+            let source_fingerprint = match *fingerprint_mode {
+                "current" => Some(current_source_fingerprint),
+                "stale" => Some("stale-source-fingerprint-that-must-not-match".to_string()),
+                "null" => None,
+                other => panic!("unsupported fingerprint mode: {other}"),
+            };
+            database
+                .upsert_thumbnail_state(ThumbnailStateUpsert {
+                    file_id,
+                    profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                    state: (*state).to_string(),
+                    cache_key: Some(format!("aa/bb/{name}.webp")),
+                    width: Some(320),
+                    height: Some(320),
+                    byte_size: Some(64),
+                    error: if *state == "failed" {
+                        Some("decode failed".to_string())
+                    } else {
+                        None
+                    },
+                    source_fingerprint,
+                })
+                .expect("insert thumbnail state");
+            expected.push((file_id, *name, *fingerprint_mode));
+        }
+
+        let page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(folder_id),
+                limit: 100,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: Some("image".to_string()),
+            })
+            .expect("list media page");
+
+        for (file_id, name, fingerprint_mode) in expected {
+            let page_item = page
+                .items
+                .iter()
+                .find(|item| item.id == file_id)
+                .expect("page item exists");
+            let detail_item = database
+                .get_media(file_id)
+                .expect("get media detail")
+                .expect("media detail exists");
+            assert_eq!(page_item.name, name);
+            assert_eq!(detail_item.name, name);
+            if fingerprint_mode == "current" {
+                assert_eq!(page_item.thumbnail_state.as_deref(), Some("ready"));
+                assert_eq!(detail_item.thumbnail_state.as_deref(), Some("ready"));
+                assert_eq!(
+                    page_item.thumbnail_cache_key.as_deref(),
+                    Some("aa/bb/current-ready.jpg.webp")
+                );
+                assert_eq!(
+                    detail_item.thumbnail_cache_key.as_deref(),
+                    Some("aa/bb/current-ready.jpg.webp")
+                );
+            } else {
+                assert_eq!(page_item.thumbnail_state.as_deref(), Some("pending"));
+                assert_eq!(page_item.thumbnail_cache_key, None);
+                assert_eq!(detail_item.thumbnail_state.as_deref(), Some("pending"));
+                assert_eq!(detail_item.thumbnail_cache_key, None);
+            }
+        }
     }
 
     #[test]
@@ -2449,6 +3635,555 @@ mod tests {
             .expect("task exists");
         assert_eq!(task.status, "failed");
         assert_eq!(task.error.as_deref(), Some("scan failed"));
+    }
+
+    #[test]
+    fn thumbnail_request_coalesces_task_and_records_state_transition() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "coalesce.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 4096,
+                mtime: 123,
+                ctime: None,
+                file_key: Some("identity-1".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+
+        let first = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        let second = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail again");
+
+        assert_eq!(first.thumbnail.state, "queued");
+        assert_eq!(second.thumbnail.state, "queued");
+        let task_id = first.task_id.expect("first request task id");
+        assert_eq!(Some(task_id), second.task_id);
+        assert!(first.queued);
+        assert!(!second.queued);
+
+        let tasks = database.list_tasks().expect("list tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task_id);
+        assert_eq!(tasks[0].kind, "thumbnail");
+        assert_eq!(tasks[0].status, "pending");
+        assert_eq!(tasks[0].root_id, None);
+        assert_eq!(tasks[0].file_id, Some(file_id));
+
+        let pending = database
+            .list_pending_thumbnail_task_ids()
+            .expect("list thumbnail tasks");
+        assert_eq!(pending, vec![task_id]);
+
+        database
+            .mark_task_running(task_id)
+            .expect("mark thumbnail running");
+        let running_request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request while running");
+        assert_eq!(running_request.task_id, Some(task_id));
+        assert!(!running_request.queued);
+        assert_eq!(database.list_tasks().expect("list tasks").len(), 1);
+
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get thumbnail source")
+            .expect("thumbnail source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: Some("aa/bb/coalesce.webp".to_string()),
+                width: Some(427),
+                height: Some(320),
+                byte_size: Some(64),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("mark thumbnail ready");
+        database
+            .mark_task_succeeded(task_id)
+            .expect("mark task succeeded");
+
+        let ready = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request ready thumbnail");
+        assert_eq!(ready.thumbnail.state, "ready");
+        assert_eq!(ready.task_id, Some(task_id));
+        assert!(!ready.queued);
+        assert_eq!(database.list_tasks().expect("list tasks").len(), 1);
+    }
+
+    #[test]
+    fn thumbnail_request_invalidates_ready_state_when_source_identity_changes() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "identity.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("identity-a".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        let first = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        let first_task_id = first.task_id.expect("task id");
+        database
+            .mark_task_running(first_task_id)
+            .expect("mark running");
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: Some("aa/bb/stale.webp".to_string()),
+                width: Some(320),
+                height: Some(320),
+                byte_size: Some(64),
+                error: None,
+                source_fingerprint: Some(
+                    "stale-source-fingerprint-that-must-not-match".to_string(),
+                ),
+            })
+            .expect("mark stale ready");
+        database
+            .mark_task_succeeded(first_task_id)
+            .expect("mark succeeded");
+
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request after source change");
+
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
+        assert_ne!(request.task_id, Some(first_task_id));
+        assert!(request.thumbnail.cache_key.is_none());
+    }
+
+    #[test]
+    fn failed_thumbnail_without_source_fingerprint_is_regeneratable() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "failed-null.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("identity-a".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "failed".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: Some("decode failed".to_string()),
+                source_fingerprint: None,
+            })
+            .expect("insert failed thumbnail without fingerprint");
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "pending");
+        assert_eq!(thumbnail.error, None);
+
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
+    }
+
+    #[test]
+    fn failed_thumbnail_with_stale_source_fingerprint_is_regeneratable() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "failed-stale.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("identity-a".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "failed".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: Some("decode failed".to_string()),
+                source_fingerprint: Some(
+                    "stale-source-fingerprint-that-must-not-match".to_string(),
+                ),
+            })
+            .expect("insert stale failed thumbnail");
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "pending");
+        assert_eq!(thumbnail.error, None);
+
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
+    }
+
+    #[test]
+    fn failed_thumbnail_with_current_source_fingerprint_remains_terminal() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "failed-current.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("identity-a".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get thumbnail source")
+            .expect("thumbnail source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "failed".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: Some("decode failed".to_string()),
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("insert current failed thumbnail");
+
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request failed thumbnail");
+        assert_eq!(request.thumbnail.state, "failed");
+        assert_eq!(request.thumbnail.error.as_deref(), Some("decode failed"));
+        assert!(!request.queued);
+    }
+
+    #[test]
+    fn file_upsert_marks_non_pending_thumbnail_stale_when_source_identity_changes() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "source-change.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("source-a".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: Some("aa/bb/source-change.webp".to_string()),
+                width: Some(320),
+                height: Some(320),
+                byte_size: Some(64),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("mark ready");
+
+        database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "source-change.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 200,
+                mtime: 20,
+                ctime: None,
+                file_key: Some("source-b".to_string()),
+            })
+            .expect("update source identity");
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "pending");
+        assert_eq!(thumbnail.cache_key, None);
+        assert_eq!(thumbnail.source_fingerprint, None);
+    }
+
+    #[test]
+    fn thumbnail_request_invalidates_skipped_small_state_when_source_identity_changes() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "small-then-large.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("small-a".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        database
+            .connection
+            .execute(
+                "UPDATE media SET width = 128, height = 128, metadata_status = 'ready' WHERE file_id = ?1",
+                [file_id],
+            )
+            .expect("set ready small metadata");
+        let skipped = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request small thumbnail");
+        assert_eq!(skipped.thumbnail.state, "skipped_small");
+
+        database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "small-then-large.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 10_000,
+                mtime: 20,
+                ctime: None,
+                file_key: Some("small-b".to_string()),
+            })
+            .expect("update source identity");
+        database
+            .connection
+            .execute(
+                "UPDATE media SET width = 640, height = 480, metadata_status = 'ready' WHERE file_id = ?1",
+                [file_id],
+            )
+            .expect("set ready large metadata");
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request changed source thumbnail");
+
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
+    }
+
+    #[test]
+    fn thumbnail_request_does_not_regress_ready_state_when_worker_wins_race() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "race.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("race-a".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+
+        let first = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        let task_id = first.task_id.expect("task id");
+        database.mark_task_running(task_id).expect("mark running");
+        let fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: Some("aa/bb/race.webp".to_string()),
+                width: Some(320),
+                height: Some(320),
+                byte_size: Some(64),
+                error: None,
+                source_fingerprint: Some(fingerprint),
+            })
+            .expect("worker marks ready");
+
+        let second = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request after ready");
+
+        assert_eq!(second.thumbnail.state, "ready");
+        assert!(!second.queued);
+        assert_eq!(database.list_tasks().expect("list tasks").len(), 1);
+    }
+
+    #[test]
+    fn skipped_small_requires_ready_metadata_and_upsert_media_resets_dimensions() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "metadata.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert file");
+        database
+            .connection
+            .execute(
+                r#"
+                INSERT INTO media(file_id, kind, width, height, metadata_status)
+                VALUES (?1, 'image', 128, 128, 'ready')
+                "#,
+                [file_id],
+            )
+            .expect("insert stale metadata");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("scan upsert media kind");
+
+        let media = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists");
+        assert_eq!(media.width, None);
+        assert_eq!(media.height, None);
+        assert_ne!(media.metadata_status.as_deref(), Some("ready"));
+
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
+    }
+
+    #[test]
+    fn skipped_small_is_requeued_after_metadata_reset_even_when_file_identity_matches() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "same-source-metadata-reset.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("same-source".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        database
+            .connection
+            .execute(
+                "UPDATE media SET width = 128, height = 128, metadata_status = 'ready' WHERE file_id = ?1",
+                [file_id],
+            )
+            .expect("set ready small metadata");
+
+        let skipped = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request skipped thumbnail");
+        assert_eq!(skipped.thumbnail.state, "skipped_small");
+
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("scan resets media metadata");
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "pending");
+
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail after metadata reset");
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
     }
 
     #[test]

@@ -20,3 +20,4 @@ tools/bench/preview-switch/results/
 *.sqlite-shm
 *.sqlite-wal
 *.db
+.codex/

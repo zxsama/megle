@@ -334,12 +334,28 @@ async fn get_thumbnail(
 ) -> ApiResult<(StatusCode, Json<ThumbnailResponse>)> {
     let profile = normalize_profile(query.profile.as_deref())
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
-    let thumbnail = {
+    let (thumbnail, queued_task_id) = {
         let database = state.database.lock().expect("database mutex poisoned");
-        database
+        let thumbnail = database
             .get_thumbnail(file_id, profile)?
-            .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?
+            .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
+        if is_pending_status(&thumbnail.state) {
+            let request = database
+                .request_thumbnail_task(file_id, profile)
+                .map_err(map_thumbnail_request_error)?;
+            let queued_task_id = if request.queued {
+                request.task_id
+            } else {
+                None
+            };
+            (request.thumbnail, queued_task_id)
+        } else {
+            (thumbnail, None)
+        }
     };
+    if let Some(task_id) = queued_task_id {
+        enqueue_task(&state, task_id).await?;
+    }
     let status = if is_pending_status(&thumbnail.state) {
         StatusCode::ACCEPTED
     } else {
@@ -484,10 +500,33 @@ fn map_cursor_error(error: anyhow::Error) -> CoreError {
     error.into()
 }
 
+fn map_thumbnail_request_error(error: anyhow::Error) -> CoreError {
+    let message = error.to_string();
+    if message.contains("media item not found") {
+        return CoreError::not_found(message);
+    }
+    if message.contains("unsupported thumbnail profile") {
+        return CoreError::bad_request(message);
+    }
+    error.into()
+}
+
 async fn enqueue_task(state: &AppState, task_id: i64) -> ApiResult<()> {
     if let Err(error) = state.task_queue.send(task_id).await {
         let error = anyhow::anyhow!("background task queue is closed: {error}");
         let database = state.database.lock().expect("database mutex poisoned");
+        if let Some(task) = database.get_task(task_id)? {
+            if task.kind == "thumbnail" {
+                if let Some(file_id) = task.file_id {
+                    database.publish_thumbnail_failure_for_attempted_source(
+                        file_id,
+                        crate::thumbnails::GRID_320_PROFILE,
+                        task.thumbnail_source_fingerprint.as_deref(),
+                        &error.to_string(),
+                    )?;
+                }
+            }
+        }
         database.mark_task_failed(task_id, &error.to_string())?;
         return Err(error.into());
     }
@@ -690,14 +729,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thumbnail_route_returns_pending_state_for_missing_grid_320_row() {
+    async fn thumbnail_route_queues_missing_grid_320_row() {
         let db_dir = unique_temp_dir();
         fs::create_dir_all(&db_dir).expect("create db dir");
         let db_path = db_dir.join("megle.sqlite");
         let database = Database::open(&db_path).expect("open database");
         database.apply_migrations().expect("apply migrations");
         let file_id = seed_media_file(&database);
-        let app = router(AppState::new(database));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+        };
+        let app = router(state.clone());
 
         let response = app
             .oneshot(
@@ -713,12 +757,73 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["fileId"], file_id);
         assert_eq!(body["profile"], "grid_320");
-        assert_eq!(body["state"], "pending");
+        assert_eq!(body["state"], "queued");
         assert_eq!(body["shortSidePx"], 320);
         assert_eq!(body["outputFormat"], "image/webp");
         assert!(body["asset"].is_null());
+        let task_id = receiver.try_recv().expect("queued thumbnail task id");
+        let database = state.database.lock().expect("database mutex poisoned");
+        let tasks = database.list_tasks().expect("list tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task_id);
+        assert_eq!(tasks[0].kind, "thumbnail");
+        assert_eq!(tasks[0].file_id, Some(file_id));
 
         let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_queues_missing_thumbnail_once_on_repeated_requests() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+        };
+        let app = router(state.clone());
+
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail state");
+        assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+        let first = response_json(first_response).await;
+        assert_eq!(first["state"], "queued");
+
+        let queued_task_id = receiver
+            .try_recv()
+            .expect("first request should enqueue exactly one task");
+
+        let second_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail state again");
+        assert_eq!(second_response.status(), StatusCode::ACCEPTED);
+        let second = response_json(second_response).await;
+        assert_eq!(second["state"], "queued");
+        assert!(receiver.try_recv().is_err());
+
+        let database = state.database.lock().expect("database mutex poisoned");
+        let tasks = database.list_tasks().expect("list tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, queued_task_id);
+        assert_eq!(tasks[0].kind, "thumbnail");
+        assert_eq!(tasks[0].file_id, Some(file_id));
     }
 
     #[tokio::test]
@@ -730,6 +835,11 @@ mod tests {
         database.apply_migrations().expect("apply migrations");
         let ready_file_id = seed_media_file(&database);
         let skipped_file_id = seed_media_file_named(&database, "icon.png");
+        let ready_source_fingerprint = database
+            .get_thumbnail_source(ready_file_id)
+            .expect("get ready source")
+            .expect("ready source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
         drop(database);
 
         let conn = rusqlite::Connection::open(&db_path).expect("open seed connection");
@@ -745,10 +855,13 @@ mod tests {
         .expect("set skipped-small media dimensions");
         conn.execute(
             r#"
-            INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, updated_at)
-            VALUES (?1, 'grid_320', 'ready', 'aa/bb/key.webp', 427, 320, 4096, 10)
+            INSERT INTO thumbs(
+                file_id, profile, state, cache_key, width, height, byte_size,
+                source_fingerprint, updated_at
+            )
+            VALUES (?1, 'grid_320', 'ready', 'aa/bb/key.webp', 427, 320, 4096, ?2, 10)
             "#,
-            [ready_file_id],
+            (ready_file_id, ready_source_fingerprint),
         )
         .expect("insert ready thumbnail");
         conn.execute(
@@ -815,7 +928,12 @@ mod tests {
         let database = Database::open(&db_path).expect("open database");
         database.apply_migrations().expect("apply migrations");
         let queued_file_id = seed_media_file(&database);
-        let failed_file_id = seed_media_file_named(&database, "failed.jpg");
+        let failed_current_file_id = seed_media_file_named(&database, "failed-current.jpg");
+        let failed_current_source_fingerprint = database
+            .get_thumbnail_source(failed_current_file_id)
+            .expect("get failed source")
+            .expect("failed source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
         drop(database);
 
         let conn = rusqlite::Connection::open(&db_path).expect("open seed connection");
@@ -829,10 +947,13 @@ mod tests {
         .expect("insert queued thumbnail");
         conn.execute(
             r#"
-            INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, error, updated_at)
-            VALUES (?1, 'grid_320', 'failed', 'failed/stale.webp', 320, 240, 1024, 'decode failed', 21)
+            INSERT INTO thumbs(
+                file_id, profile, state, cache_key, width, height, byte_size,
+                error, source_fingerprint, updated_at
+            )
+            VALUES (?1, 'grid_320', 'failed', 'failed/stale.webp', 320, 240, 1024, 'decode failed', ?2, 21)
             "#,
-            [failed_file_id],
+            (failed_current_file_id, failed_current_source_fingerprint),
         )
         .expect("insert failed thumbnail");
         drop(conn);
@@ -865,7 +986,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{failed_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{failed_current_file_id}/thumbnail?profile=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -906,6 +1027,66 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_requeues_failed_thumbnail_without_current_source_fingerprint() {
+        let database = test_database();
+        let null_failed_file_id = seed_media_file_named(&database, "failed-null.jpg");
+        let stale_failed_file_id = seed_media_file_named(&database, "failed-stale.jpg");
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id: null_failed_file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "failed".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: Some("decode failed".to_string()),
+                source_fingerprint: None,
+            })
+            .expect("insert null fingerprint failed thumbnail");
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id: stale_failed_file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "failed".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: Some("decode failed".to_string()),
+                source_fingerprint: Some(
+                    "stale-source-fingerprint-that-must-not-match".to_string(),
+                ),
+            })
+            .expect("insert stale fingerprint failed thumbnail");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+        };
+        let app = router(state);
+
+        for file_id in [null_failed_file_id, stale_failed_file_id] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("get failed thumbnail state");
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = response_json(response).await;
+            assert_eq!(body["state"], "queued");
+            assert!(body["asset"].is_null());
+            receiver.try_recv().expect("queued thumbnail task id");
+        }
     }
 
     #[tokio::test]
@@ -1402,6 +1583,47 @@ mod tests {
             .expect("task error")
             .contains("background task queue is closed"));
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[tokio::test]
+    async fn thumbnail_enqueue_failure_marks_task_and_thumbnail_failed() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: _sender,
+        };
+        let app = router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let database = state.database.lock().expect("database mutex poisoned");
+        let tasks = database.list_tasks().expect("list tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, "thumbnail");
+        assert_eq!(tasks[0].status, "failed");
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "failed");
+        assert!(thumbnail
+            .error
+            .as_deref()
+            .expect("thumbnail error")
+            .contains("background task queue is closed"));
     }
 
     #[tokio::test]

@@ -33,8 +33,17 @@ function walk(directory) {
 }
 
 const useLibraryData = read("apps/web/src/core/useLibraryData.ts");
+const mediaResourcesPath = "apps/web/src/core/mediaResources.ts";
+const mediaResources = existsSync(path.join(root, mediaResourcesPath))
+  ? read(mediaResourcesPath)
+  : "";
 const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
 const librarySidebar = read("apps/web/src/features/library/LibrarySidebar.tsx");
+const previewPanelPath = "apps/web/src/features/preview/PreviewPanel.tsx";
+const previewPanel = existsSync(path.join(root, previewPanelPath))
+  ? read(previewPanelPath)
+  : "";
 const desktopAdapterPath = "apps/web/src/core/desktop.ts";
 const packageJson = readJson("package.json");
 const webPackageJson = readJson("apps/web/package.json");
@@ -129,6 +138,62 @@ if (!/const loadLibrary = useCallback\(async \(\) => \{\s*const requestGeneratio
 }
 if (!mediaGrid.includes("onRequestMore") || !mediaGrid.includes("hasMore")) {
   fail("MediaGrid must request incremental media pages near the loaded tail");
+}
+if (!existsSync(path.join(root, mediaResourcesPath))) {
+  fail("web thumbnail resource helper must live behind apps/web/src/core/mediaResources.ts");
+}
+if (!/import\s+type\s+{[\s\S]*ThumbnailResponse[\s\S]*}\s+from\s+"@megle\/core-client"/.test(mediaResources)) {
+  fail("mediaResources must use the @megle/core-client ThumbnailResponse contract");
+}
+if (!/createCoreClient\(\)[\s\S]*?getThumbnail\(/.test(mediaResources)) {
+  fail("mediaResources must request thumbnail state through @megle/core-client getThumbnail");
+}
+if (!/inFlightThumbnailRequests/.test(mediaResources) || !/thumbnailResourceCache/.test(mediaResources)) {
+  fail("mediaResources must coalesce in-flight thumbnail requests and cache state by media id");
+}
+if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
+  fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");
+}
+if (!/thumbnailResourceCache\.delete/.test(mediaResources) || !/thumbnailCacheKey/.test(mediaResources)) {
+  fail("mediaResources must drop stale cached terminal thumbnails when the media record has no matching ready cache key");
+}
+if (!/readCachedThumbnailStates\(\s*mediaRecords:\s*MediaRecord\[\]\s*\)/.test(mediaResources)) {
+  fail("mediaResources must read cached thumbnail state through media records, not bare media ids");
+}
+if (!/thumbnailRequestKey\(mediaRecord\)/.test(mediaResources) || !/inFlightThumbnailRequests\.get\(requestKey\)/.test(mediaResources)) {
+  fail("mediaResources must key in-flight thumbnail coalescing by media id plus thumbnail summary");
+}
+if (!/requestThumbnailStates:\s*\(mediaIds:\s*number\[\]\)\s*=>\s*void/.test(useLibraryData)) {
+  fail("useLibraryData must expose visible-range thumbnail state requests");
+}
+if (!/thumbnailStatesByMediaId:\s*Record<number,\s*ThumbnailResponse>/.test(useLibraryData)) {
+  fail("useLibraryData must expose thumbnail state by media id without leaking cache paths");
+}
+if (!/inFlightMediaPageKeys/.test(useLibraryData) || !/mediaPageRequestKey/.test(useLibraryData)) {
+  fail("loadMoreMedia must synchronously coalesce duplicate cursor page requests by root/folder/cursor");
+}
+if (!/inFlightFolderChildPageKeys/.test(useLibraryData) || !/folderChildPageRequestKey/.test(useLibraryData)) {
+  fail("loadMoreFolderChildren must synchronously coalesce duplicate cursor page requests by folder/cursor");
+}
+if (!/onRequestThumbnailStates/.test(mediaGrid) || !/visibleMediaIds/.test(mediaGrid)) {
+  fail("MediaGrid must report visible/near-visible media ids for incremental thumbnail requests");
+}
+if (!/visibleMedia(?:Id)?Key/.test(mediaGrid)) {
+  fail("MediaGrid immediate thumbnail requests must be keyed by the stable visible media id set");
+}
+for (const state of ["pending", "queued", "ready", "failed", "skipped_small"]) {
+  if (!mediaGrid.includes(`"${state}"`)) {
+    fail(`MediaGrid must render a stable thumbnail state branch for ${state}`);
+  }
+}
+if (!/thumbnailStatesByMediaId\[item\.id\]/.test(mediaGrid)) {
+  fail("MediaGrid tiles must receive thumbnail state from the resource map by media id");
+}
+if (!previewPanel) {
+  fail("PreviewPanel must provide a selected media preview foundation");
+}
+if (!/PreviewPanel/.test(libraryView) || !/selectedMedia/.test(previewPanel) || !/thumbnail/.test(previewPanel)) {
+  fail("LibraryView must render a PreviewPanel with selected media and thumbnail state");
 }
 if (!librarySidebar.includes("loadMoreFolderChildren") || !librarySidebar.includes("Load more")) {
   fail("LibrarySidebar must expose a load-more affordance for paginated folder children");

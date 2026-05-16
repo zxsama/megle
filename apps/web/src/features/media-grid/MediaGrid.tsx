@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MediaRecord } from "@megle/core-client";
+import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { workbenchLayout } from "../../design/tokens";
 
 interface MediaGridProps {
@@ -12,6 +12,8 @@ interface MediaGridProps {
   hasMore: boolean;
   onSelect: (mediaId: number) => void;
   onRequestMore: () => void;
+  onRequestThumbnailStates: (mediaIds: number[]) => void;
+  thumbnailStatesByMediaId: Record<number, ThumbnailResponse>;
 }
 
 export function MediaGrid({
@@ -21,7 +23,9 @@ export function MediaGrid({
   loadingMore,
   hasMore,
   onRequestMore,
-  onSelect
+  onRequestThumbnailStates,
+  onSelect,
+  thumbnailStatesByMediaId
 }: MediaGridProps) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
@@ -68,6 +72,43 @@ export function MediaGrid({
       onRequestMore();
     }
   }, [hasMore, loadingMore, onRequestMore, rows.length, virtualItems]);
+
+  const visibleMedia = useMemo(() => {
+    const mediaIdSet = new Set<number>();
+    for (const virtualRow of virtualItems) {
+      if (virtualRow.index >= rows.length) continue;
+      for (const item of rows[virtualRow.index] ?? []) {
+        mediaIdSet.add(item.id);
+      }
+    }
+    const mediaIds = [...mediaIdSet].sort((left, right) => left - right);
+    return {
+      ids: mediaIds,
+      key: mediaIds.join(":")
+    };
+  }, [rows, virtualItems]);
+  const visibleMediaIds = visibleMedia.ids;
+  const visibleMediaKey = visibleMedia.key;
+
+  useEffect(() => {
+    onRequestThumbnailStates(visibleMediaIds);
+  }, [onRequestThumbnailStates, visibleMediaKey]);
+
+  useEffect(() => {
+    const hasPendingThumbnail = virtualItems.some((virtualRow) =>
+      (rows[virtualRow.index] ?? []).some((item) =>
+        shouldRefreshThumbnailState(item, thumbnailStatesByMediaId[item.id])
+      )
+    );
+    if (!hasPendingThumbnail) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      onRequestThumbnailStates(visibleMediaIds);
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [onRequestThumbnailStates, rows, thumbnailStatesByMediaId, virtualItems, visibleMediaKey]);
 
   function moveSelection(offset: number) {
     if (items.length === 0) return;
@@ -141,15 +182,14 @@ export function MediaGrid({
                   transform: `translateY(${virtualRow.start}px)`
                 }}
               >
-                <button
+                <div
                   className="load-more-button"
-                  disabled={loadingMore}
-                  onClick={onRequestMore}
                   role="gridcell"
-                  type="button"
                 >
-                  {loadingMore ? "Loading more media" : "Load more media"}
-                </button>
+                  <button disabled={loadingMore} onClick={onRequestMore} type="button">
+                    {loadingMore ? "Loading more media" : "Load more media"}
+                  </button>
+                </div>
               </div>
             );
           }
@@ -173,6 +213,7 @@ export function MediaGrid({
                       key={item.id}
                       onSelect={onSelect}
                       selected={item.id === selectedMediaId}
+                      thumbnail={thumbnailStatesByMediaId[item.id]}
                       width={tileWidth}
                     />
                   ))}
@@ -188,30 +229,104 @@ function MediaTile({
   item,
   onSelect,
   selected,
+  thumbnail,
   width
 }: {
   item: MediaRecord;
   onSelect: (mediaId: number) => void;
   selected: boolean;
+  thumbnail?: ThumbnailResponse;
   width: number;
 }) {
   return (
-    <button
+    <div
       aria-selected={selected}
-      className={selected ? "media-tile selected" : "media-tile"}
-      onClick={() => onSelect(item.id)}
+      className="media-gridcell"
       role="gridcell"
       style={{ width }}
-      type="button"
     >
-      <div className="tile-thumb">
+      <button
+        aria-label={`Select ${item.name}`}
+        className={selected ? "media-tile selected" : "media-tile"}
+        onClick={() => onSelect(item.id)}
+        type="button"
+      >
+        <ThumbnailStateView item={item} thumbnail={thumbnail} />
+        <div className="tile-label" title={item.name}>
+          {item.name}
+        </div>
+      </button>
+    </div>
+  );
+}
+
+function ThumbnailStateView({
+  item,
+  thumbnail
+}: {
+  item: MediaRecord;
+  thumbnail?: ThumbnailResponse;
+}) {
+  const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
+
+  if (state === "ready") {
+    return (
+      <div className="tile-thumb tile-thumb-ready">
+        <span>{thumbnail?.asset ? `${thumbnail.asset.width}x${thumbnail.asset.height}` : "ready"}</span>
+      </div>
+    );
+  }
+
+  if (state === "failed") {
+    return (
+      <div className="tile-thumb tile-thumb-failed">
+        <span>failed</span>
+      </div>
+    );
+  }
+
+  if (state === "skipped_small") {
+    return (
+      <div className="tile-thumb tile-thumb-skipped">
         <span>{item.kind ?? "file"}</span>
       </div>
-      <div className="tile-label" title={item.name}>
-        {item.name}
+    );
+  }
+
+  if (state === "queued") {
+    return (
+      <div className="tile-thumb tile-thumb-loading">
+        <span>queued</span>
       </div>
-    </button>
+    );
+  }
+
+  return (
+    <div className="tile-thumb tile-thumb-loading">
+      <span>pending</span>
+    </div>
   );
+}
+
+function normalizeMediaThumbnailState(value: string | null | undefined): ThumbnailResponse["state"] {
+  if (
+    value === "pending" ||
+    value === "queued" ||
+    value === "ready" ||
+    value === "failed" ||
+    value === "skipped_small"
+  ) {
+    return value;
+  }
+  return "pending";
+}
+
+function shouldRefreshThumbnailState(
+  item: MediaRecord,
+  thumbnail: ThumbnailResponse | undefined
+): boolean {
+  const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
+  return state === "pending" || state === "queued";
 }
 
 function skeletonCells(count: number, width: number) {

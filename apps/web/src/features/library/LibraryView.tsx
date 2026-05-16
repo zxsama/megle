@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import type { LibraryState } from "../../core/useLibraryData";
 import { MediaGrid } from "../media-grid/MediaGrid";
+import { PreviewPanel } from "../preview/PreviewPanel";
 
 interface LibraryViewProps {
   library: LibraryState;
@@ -39,34 +40,19 @@ export function LibraryView({ library }: LibraryViewProps) {
           loading={library.loading}
           loadingMore={library.loadingMoreMedia}
           onRequestMore={library.loadMoreMedia}
+          onRequestThumbnailStates={library.requestThumbnailStates}
           onSelect={library.setSelectedMediaId}
           selectedMediaId={library.selectedMediaId}
+          thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
         />
       </div>
 
-      <section className="inspector-panel" aria-label="Metadata">
-        <div className="panel-title">Metadata</div>
-        {library.selectedMedia ? (
-          <dl className="metadata-list">
-            <dt>Name</dt>
-            <dd>{library.selectedMedia.name}</dd>
-            <dt>Kind</dt>
-            <dd>{library.selectedMedia.kind ?? "unknown"}</dd>
-            <dt>Size</dt>
-            <dd>{formatBytes(library.selectedMedia.size)}</dd>
-            <dt>Thumbnail</dt>
-            <dd>{library.selectedMedia.thumbnailState ?? "pending"}</dd>
-          </dl>
-        ) : (
-          <div className="empty-panel">No selection</div>
-        )}
-      </section>
+      <PreviewPanel
+        selectedMedia={library.selectedMedia}
+        thumbnail={
+          library.selectedMedia ? library.thumbnailStatesByMediaId[library.selectedMedia.id] : undefined
+        }
+      />
     </section>
   );
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
