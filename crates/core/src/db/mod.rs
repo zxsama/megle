@@ -6,6 +6,8 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection};
 use serde::Serialize;
 
+use crate::thumbnails::{GENERATED_FORMAT, GRID_320_SHORT_SIDE_PX};
+
 #[allow(dead_code)]
 pub const WAL_MODE: &str = "WAL";
 
@@ -76,6 +78,18 @@ pub struct ScanFileUpsert {
     pub media_kind: String,
 }
 
+#[allow(dead_code)]
+pub struct ThumbnailStateUpsert {
+    pub file_id: i64,
+    pub profile: String,
+    pub state: String,
+    pub cache_key: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub byte_size: Option<i64>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct ScanWriteBatchResult {
     pub folder_ids: Vec<i64>,
@@ -109,6 +123,22 @@ pub struct MediaRecord {
     pub codec: Option<String>,
     pub thumbnail_state: Option<String>,
     pub thumbnail_cache_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailRecord {
+    pub file_id: i64,
+    pub profile: String,
+    pub state: String,
+    pub short_side_px: i64,
+    pub output_format: String,
+    pub cache_key: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub byte_size: Option<i64>,
+    pub error: Option<String>,
+    pub updated_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +203,13 @@ impl Database {
         if !self.migration_applied(3)? {
             self.connection
                 .execute_batch(migrations::BROWSING_INDEXES_MIGRATION)?;
+        }
+        if !self.migration_applied(4)? {
+            let result = self
+                .connection
+                .execute_batch(migrations::THUMBNAIL_STATE_MIGRATION);
+            self.connection.pragma_update(None, "foreign_keys", "ON")?;
+            result?;
         }
         Ok(())
     }
@@ -500,10 +537,21 @@ impl Database {
             SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
                    files.size, files.mtime, media.kind, media.width, media.height,
                    media.duration_ms, media.codec,
-                   thumbs.state, thumbs.cache_key
+                   thumbs.state,
+                   CASE
+                     WHEN thumbs.state = 'ready'
+                      AND thumbs.cache_key IS NOT NULL
+                      AND thumbs.cache_key NOT LIKE '/%'
+                      AND thumbs.cache_key NOT LIKE '\%'
+                      AND thumbs.cache_key NOT LIKE '%\%'
+                      AND thumbs.cache_key NOT LIKE '%:%'
+                      AND thumbs.cache_key NOT LIKE '%..%'
+                     THEN thumbs.cache_key
+                     ELSE NULL
+                   END
             FROM files
             LEFT JOIN media ON media.file_id = files.id
-            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid'
+            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
             JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
             WHERE {where_clause}
             ORDER BY {sort_clause}
@@ -534,10 +582,21 @@ impl Database {
             r#"
             SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
                    files.size, files.mtime, media.kind, media.width, media.height,
-                   media.duration_ms, media.codec, thumbs.state, thumbs.cache_key
+                   media.duration_ms, media.codec, thumbs.state,
+                   CASE
+                     WHEN thumbs.state = 'ready'
+                      AND thumbs.cache_key IS NOT NULL
+                      AND thumbs.cache_key NOT LIKE '/%'
+                      AND thumbs.cache_key NOT LIKE '\%'
+                      AND thumbs.cache_key NOT LIKE '%\%'
+                      AND thumbs.cache_key NOT LIKE '%:%'
+                      AND thumbs.cache_key NOT LIKE '%..%'
+                     THEN thumbs.cache_key
+                     ELSE NULL
+                   END
             FROM files
             LEFT JOIN media ON media.file_id = files.id
-            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid'
+            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
             JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
             WHERE files.id = ?1 AND files.status = 'active'
             "#,
@@ -547,6 +606,29 @@ impl Database {
             return Ok(None);
         };
         Ok(Some(media_from_row(row)?))
+    }
+
+    pub fn get_thumbnail(
+        &self,
+        file_id: i64,
+        profile: &str,
+    ) -> anyhow::Result<Option<ThumbnailRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT files.id, thumbs.profile, thumbs.state, thumbs.short_side_px,
+                   thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+                   thumbs.byte_size, thumbs.error, thumbs.updated_at
+            FROM files
+            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = ?2
+            WHERE files.id = ?1 AND files.status = 'active'
+            "#,
+        )?;
+        let mut rows = statement.query((file_id, profile))?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(thumbnail_from_row(row, profile)?))
     }
 
     pub fn list_folder_children_page(
@@ -736,6 +818,41 @@ impl Database {
             folder_ids,
             file_ids,
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn upsert_thumbnail_state(&self, state: ThumbnailStateUpsert) -> anyhow::Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO thumbs(
+                file_id, profile, state, cache_key, width, height, byte_size,
+                short_side_px, output_format, error, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 320, 'image/webp', ?8, ?9)
+            ON CONFLICT(file_id, profile) DO UPDATE SET
+                state = excluded.state,
+                cache_key = excluded.cache_key,
+                width = excluded.width,
+                height = excluded.height,
+                byte_size = excluded.byte_size,
+                short_side_px = excluded.short_side_px,
+                output_format = excluded.output_format,
+                error = excluded.error,
+                updated_at = excluded.updated_at
+            "#,
+            (
+                state.file_id,
+                &state.profile,
+                &state.state,
+                state.cache_key.as_deref(),
+                state.width,
+                state.height,
+                state.byte_size,
+                state.error.as_deref(),
+                unix_timestamp(),
+            ),
+        )?;
+        Ok(())
     }
 
     pub fn mark_root_scanned(&self, root_id: i64) -> anyhow::Result<()> {
@@ -978,6 +1095,14 @@ fn root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RootRecord> {
 }
 
 fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRecord> {
+    let thumbnail_state: Option<String> = row.get(12)?;
+    let thumbnail_cache_key: Option<String> = row.get(13)?;
+    let thumbnail_cache_key = match (thumbnail_state.as_deref(), thumbnail_cache_key.as_deref()) {
+        (Some("ready"), Some(cache_key)) if is_safe_thumbnail_cache_key(cache_key) => {
+            thumbnail_cache_key
+        }
+        _ => None,
+    };
     Ok(MediaRecord {
         id: row.get(0)?,
         root_id: row.get(1)?,
@@ -991,9 +1116,59 @@ fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRecord> {
         height: row.get(9)?,
         duration_ms: row.get(10)?,
         codec: row.get(11)?,
-        thumbnail_state: row.get(12)?,
-        thumbnail_cache_key: row.get(13)?,
+        thumbnail_state,
+        thumbnail_cache_key,
     })
+}
+
+fn thumbnail_from_row(
+    row: &rusqlite::Row<'_>,
+    requested_profile: &str,
+) -> rusqlite::Result<ThumbnailRecord> {
+    let profile: Option<String> = row.get(1)?;
+    let state: Option<String> = row.get(2)?;
+    let short_side_px: Option<i64> = row.get(3)?;
+    let output_format: Option<String> = row.get(4)?;
+    let cache_key: Option<String> = row.get(5)?;
+    let cache_key_is_usable = state.as_deref() == Some("ready")
+        && cache_key
+            .as_deref()
+            .is_some_and(is_safe_thumbnail_cache_key);
+    Ok(ThumbnailRecord {
+        file_id: row.get(0)?,
+        profile: profile.unwrap_or_else(|| requested_profile.to_string()),
+        state: state.unwrap_or_else(|| "pending".to_string()),
+        short_side_px: short_side_px.unwrap_or(GRID_320_SHORT_SIDE_PX),
+        output_format: output_format.unwrap_or_else(|| GENERATED_FORMAT.to_string()),
+        cache_key: if cache_key_is_usable { cache_key } else { None },
+        width: if cache_key_is_usable {
+            row.get(6)?
+        } else {
+            None
+        },
+        height: if cache_key_is_usable {
+            row.get(7)?
+        } else {
+            None
+        },
+        byte_size: if cache_key_is_usable {
+            row.get(8)?
+        } else {
+            None
+        },
+        error: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn is_safe_thumbnail_cache_key(cache_key: &str) -> bool {
+    !cache_key.is_empty()
+        && !cache_key.starts_with('/')
+        && !cache_key.starts_with('\\')
+        && !cache_key.contains(':')
+        && !cache_key
+            .split(['/', '\\'])
+            .any(|part| part.is_empty() || part == "." || part == "..")
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
@@ -1269,6 +1444,115 @@ mod tests {
         VALUES (1, 'initial', unixepoch());
     "#;
 
+    const OLD_SCHEMA_WITH_LEGACY_THUMBS: &str = r#"
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE roots (
+          id INTEGER PRIMARY KEY,
+          path TEXT NOT NULL UNIQUE,
+          display_name TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL,
+          last_scan_at INTEGER
+        );
+
+        CREATE TABLE folders (
+          id INTEGER PRIMARY KEY,
+          root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+          parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          path_hash TEXT NOT NULL,
+          mtime INTEGER,
+          status TEXT NOT NULL DEFAULT 'active',
+          UNIQUE(root_id, parent_id, name)
+        );
+
+        CREATE TABLE files (
+          id INTEGER PRIMARY KEY,
+          root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+          folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          ext TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          mtime INTEGER NOT NULL,
+          ctime INTEGER,
+          file_key TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          UNIQUE(folder_id, name)
+        );
+
+        CREATE TABLE media (
+          file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL,
+          width INTEGER,
+          height INTEGER,
+          duration_ms INTEGER,
+          codec TEXT,
+          orientation INTEGER,
+          has_alpha INTEGER,
+          dominant_color TEXT,
+          phash TEXT,
+          metadata_status TEXT NOT NULL DEFAULT 'pending'
+        );
+
+        CREATE TABLE thumbs (
+          file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+          profile TEXT NOT NULL,
+          cache_key TEXT,
+          width INTEGER,
+          height INTEGER,
+          byte_size INTEGER,
+          state TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(file_id, profile)
+        );
+
+        CREATE TABLE thumbs_new(stale TEXT);
+
+        INSERT INTO schema_migrations(version, name, applied_at)
+        VALUES
+          (1, 'initial', unixepoch()),
+          (2, 'task_progress', unixepoch()),
+          (3, 'browsing_indexes', unixepoch());
+
+        INSERT INTO roots(id, path, display_name, enabled, created_at)
+        VALUES (1, 'D:/Pictures', 'Pictures', 1, 1);
+
+        INSERT INTO folders(id, root_id, parent_id, name, path_hash, mtime)
+        VALUES (1, 1, NULL, '', 'root-hash', 1);
+
+        INSERT INTO files(id, root_id, folder_id, name, ext, size, mtime)
+        VALUES
+          (1, 1, 1, 'explicit.jpg', '.jpg', 100, 1),
+          (2, 1, 1, 'queued.jpg', '.jpg', 100, 2),
+          (3, 1, 1, 'tiny.jpg', '.jpg', 100, 3),
+          (4, 1, 1, 'absolute.jpg', '.jpg', 100, 4),
+          (5, 1, 1, 'ready.jpg', '.jpg', 100, 5);
+
+        INSERT INTO media(file_id, kind, width, height, metadata_status)
+        VALUES
+          (1, 'image', 640, 480, 'ready'),
+          (2, 'image', 640, 480, 'ready'),
+          (3, 'image', 640, 480, 'ready'),
+          (4, 'image', 640, 480, 'ready'),
+          (5, 'image', 640, 480, 'ready');
+
+        INSERT INTO thumbs(file_id, profile, cache_key, width, height, byte_size, state, updated_at)
+        VALUES
+          (1, 'grid', 'legacy/grid.webp', 320, 240, 111, 'ready', 10),
+          (1, 'grid_320', 'explicit/stale.webp', 320, 240, 222, 'failed', 20),
+          (2, 'grid', 'queued/stale.webp', 320, 240, 333, 'queued', 30),
+          (3, 'tiny', 'tiny.webp', 80, 60, 444, 'ready', 40),
+          (4, 'grid', 'C:\absolute\thumb.webp', 320, 240, 555, 'ready', 50),
+          (5, 'grid', 'aa/bb/ready.webp', 320, 240, 666, 'ready', 60);
+    "#;
+
     #[test]
     fn add_root_lists_and_reenables_existing_root() {
         let database = migrated_database();
@@ -1346,6 +1630,95 @@ mod tests {
     }
 
     #[test]
+    fn thumbnails_state_migration_is_rerunnable_and_prefers_explicit_grid_320_rows() {
+        let database = Database::open_in_memory().expect("open in-memory database");
+        database
+            .connection
+            .execute_batch(OLD_SCHEMA_WITH_LEGACY_THUMBS)
+            .expect("apply old thumbnail schema");
+
+        database
+            .apply_migrations()
+            .expect("apply thumbnail state migration");
+        database
+            .apply_migrations()
+            .expect("rerun migrations after thumbnail state migration");
+
+        let stale_table_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thumbs_new'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count stale temp tables");
+        assert_eq!(stale_table_count, 0);
+
+        let foreign_keys_enabled: i64 = database
+            .connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign_keys pragma");
+        assert_eq!(foreign_keys_enabled, 1);
+
+        let foreign_key_violations: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("foreign key check");
+        assert_eq!(foreign_key_violations, 0);
+
+        let explicit = database
+            .get_thumbnail(1, "grid_320")
+            .expect("get explicit thumbnail")
+            .expect("explicit thumbnail exists");
+        assert_eq!(explicit.state, "failed");
+        assert_eq!(explicit.cache_key, None);
+        assert_eq!(explicit.width, None);
+        assert_eq!(explicit.height, None);
+        assert_eq!(explicit.byte_size, None);
+        assert_eq!(explicit.updated_at, Some(20));
+
+        let queued = database
+            .get_thumbnail(2, "grid_320")
+            .expect("get queued thumbnail")
+            .expect("queued thumbnail exists");
+        assert_eq!(queued.state, "queued");
+        assert_eq!(queued.cache_key, None);
+        assert_eq!(queued.width, None);
+        assert_eq!(queued.height, None);
+        assert_eq!(queued.byte_size, None);
+
+        let unsupported_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM thumbs WHERE file_id = 3", [], |row| {
+                row.get(0)
+            })
+            .expect("count unsupported profile rows");
+        assert_eq!(unsupported_count, 0);
+
+        let absolute = database
+            .get_thumbnail(4, "grid_320")
+            .expect("get absolute thumbnail")
+            .expect("absolute thumbnail exists");
+        assert_eq!(absolute.state, "ready");
+        assert_eq!(absolute.cache_key, None);
+        assert_eq!(absolute.width, None);
+        assert_eq!(absolute.height, None);
+        assert_eq!(absolute.byte_size, None);
+
+        let ready = database
+            .get_thumbnail(5, "grid_320")
+            .expect("get ready thumbnail")
+            .expect("ready thumbnail exists");
+        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.cache_key.as_deref(), Some("aa/bb/ready.webp"));
+        assert_eq!(ready.width, Some(320));
+        assert_eq!(ready.height, Some(240));
+        assert_eq!(ready.byte_size, Some(666));
+    }
+
+    #[test]
     fn list_media_page_returns_media_and_grid_thumbnail_state() {
         let database = migrated_database();
         let root_id = database
@@ -1395,7 +1768,7 @@ mod tests {
             .execute(
                 r#"
                 INSERT INTO thumbs(file_id, profile, cache_key, width, height, byte_size, state, updated_at)
-                VALUES (?1, 'grid', 'aa/bb/key.webp', 427, 320, 4096, 'ready', 30)
+                VALUES (?1, 'grid_320', 'aa/bb/key.webp', 427, 320, 4096, 'ready', 30)
                 "#,
                 [file_id],
             )
@@ -1432,6 +1805,220 @@ mod tests {
             .get_media(file_id + 10)
             .expect("get missing")
             .is_none());
+    }
+
+    #[test]
+    fn media_records_expose_thumbnail_cache_key_only_for_ready_safe_relative_keys() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        for (index, name) in [
+            "empty-cache.jpg",
+            "dot-slash.jpg",
+            "double-slash.jpg",
+            "dot-segment.jpg",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let file_id = database
+                .upsert_file(FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: (*name).to_string(),
+                    ext: ".jpg".to_string(),
+                    size: 200 + index as i64,
+                    mtime: 200 + index as i64,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("insert invalid cache-key file");
+            database
+                .upsert_media_kind(file_id, "image")
+                .expect("insert media kind");
+        }
+        let file_ids: Vec<i64> = database
+            .connection
+            .prepare("SELECT id FROM files WHERE root_id = ?1 ORDER BY name ASC")
+            .expect("prepare expanded file ids")
+            .query_map([root_id], |row| row.get(0))
+            .expect("query expanded file ids")
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .expect("collect expanded file ids");
+
+        for (file_id, state, cache_key) in [
+            (file_ids[0], "ready", "aa/bb/ready.webp"),
+            (file_ids[1], "queued", "queued/stale.webp"),
+            (file_ids[2], "ready", "C:\\absolute\\thumb.webp"),
+            (file_ids[3], "ready", "../escape.webp"),
+            (file_ids[4], "ready", ""),
+            (file_ids[5], "ready", "./thumb.webp"),
+            (file_ids[6], "ready", "aa//thumb.webp"),
+            (file_ids[7], "ready", "aa/./thumb.webp"),
+        ] {
+            database
+                .connection
+                .execute(
+                    r#"
+                    INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, updated_at)
+                    VALUES (?1, 'grid_320', ?2, ?3, 320, 240, 1024, 100)
+                    "#,
+                    (file_id, state, cache_key),
+                )
+                .expect("insert thumbnail state");
+        }
+
+        let page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(folder_id),
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: Some("image".to_string()),
+            })
+            .expect("list media page");
+        assert_eq!(
+            media_names(&page.items),
+            vec![
+                "alpha.jpg",
+                "bravo.jpg",
+                "charlie.jpg",
+                "delta.jpg",
+                "dot-segment.jpg",
+                "dot-slash.jpg",
+                "double-slash.jpg",
+                "empty-cache.jpg"
+            ]
+        );
+        assert_eq!(
+            page.items[0].thumbnail_cache_key.as_deref(),
+            Some("aa/bb/ready.webp")
+        );
+        assert_eq!(page.items[1].thumbnail_state.as_deref(), Some("queued"));
+        assert_eq!(page.items[1].thumbnail_cache_key, None);
+        assert_eq!(page.items[2].thumbnail_state.as_deref(), Some("ready"));
+        assert_eq!(page.items[2].thumbnail_cache_key, None);
+        assert_eq!(page.items[3].thumbnail_state.as_deref(), Some("ready"));
+        assert_eq!(page.items[3].thumbnail_cache_key, None);
+        for item in &page.items[4..] {
+            assert_eq!(item.thumbnail_state.as_deref(), Some("ready"));
+            assert_eq!(item.thumbnail_cache_key, None);
+        }
+
+        let absolute = database
+            .get_media(file_ids[2])
+            .expect("get media")
+            .expect("media exists");
+        assert_eq!(absolute.thumbnail_state.as_deref(), Some("ready"));
+        assert_eq!(absolute.thumbnail_cache_key, None);
+        let dot_segment = database
+            .get_media(file_ids[7])
+            .expect("get dot segment media")
+            .expect("media exists");
+        assert_eq!(dot_segment.thumbnail_state.as_deref(), Some("ready"));
+        assert_eq!(dot_segment.thumbnail_cache_key, None);
+    }
+
+    #[test]
+    fn thumbnails_persist_grid_320_webp_state_and_reject_unknown_values() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id: i64 = database
+            .connection
+            .query_row(
+                "SELECT id FROM files WHERE root_id = ?1 AND folder_id = ?2 ORDER BY id LIMIT 1",
+                (root_id, folder_id),
+                |row| row.get(0),
+            )
+            .expect("seeded file id");
+
+        database
+            .connection
+            .execute(
+                r#"
+                INSERT INTO thumbs(
+                    file_id, profile, state, cache_key, width, height, byte_size,
+                    short_side_px, output_format, updated_at
+                )
+                VALUES (?1, 'grid_320', 'pending', NULL, NULL, NULL, NULL, 320, 'image/webp', 100)
+                "#,
+                [file_id],
+            )
+            .expect("insert pending thumbnail state");
+
+        for state in ["queued", "ready", "failed", "skipped_small"] {
+            database
+                .connection
+                .execute(
+                    r#"
+                    UPDATE thumbs
+                    SET state = ?1,
+                        cache_key = CASE WHEN ?1 = 'ready' THEN 'aa/bb/key.webp' ELSE NULL END,
+                        width = CASE WHEN ?1 = 'ready' THEN 427 ELSE NULL END,
+                        height = CASE WHEN ?1 = 'ready' THEN 320 ELSE NULL END,
+                        byte_size = CASE WHEN ?1 = 'ready' THEN 4096 ELSE NULL END,
+                        error = CASE WHEN ?1 = 'failed' THEN 'decode failed' ELSE NULL END
+                    WHERE file_id = ?2 AND profile = 'grid_320'
+                    "#,
+                    (state, file_id),
+                )
+                .expect("update thumbnail state");
+        }
+
+        let row: (String, i64, String, Option<String>) = database
+            .connection
+            .query_row(
+                r#"
+                SELECT state, short_side_px, output_format, cache_key
+                FROM thumbs
+                WHERE file_id = ?1 AND profile = 'grid_320'
+                "#,
+                [file_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("thumbnail state row");
+        assert_eq!(row.0, "skipped_small");
+        assert_eq!(row.1, 320);
+        assert_eq!(row.2, "image/webp");
+        assert_eq!(row.3, None);
+
+        let invalid_status = database
+            .connection
+            .execute(
+                r#"
+                UPDATE OR IGNORE thumbs
+                SET state = 'unknown'
+                WHERE file_id = ?1 AND profile = 'grid_320'
+                "#,
+                [file_id],
+            )
+            .expect("invalid thumbnail status is ignored by check constraint");
+        assert_eq!(invalid_status, 0);
+
+        let invalid_profile = database
+            .connection
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO thumbs(file_id, profile, state, short_side_px, output_format, updated_at)
+                VALUES (?1, 'grid', 'pending', 320, 'image/webp', 101)
+                "#,
+                [file_id],
+            )
+            .expect("invalid thumbnail profile is ignored by check constraint");
+        assert_eq!(invalid_profile, 0);
+
+        let invalid_format = database
+            .connection
+            .execute(
+                r#"
+                UPDATE OR IGNORE thumbs
+                SET output_format = 'image/jpeg'
+                WHERE file_id = ?1 AND profile = 'grid_320'
+                "#,
+                [file_id],
+            )
+            .expect("invalid thumbnail format is ignored by check constraint");
+        assert_eq!(invalid_format, 0);
     }
 
     #[test]

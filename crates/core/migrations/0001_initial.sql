@@ -77,12 +77,15 @@ CREATE TABLE IF NOT EXISTS file_tags (
 
 CREATE TABLE IF NOT EXISTS thumbs (
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  profile TEXT NOT NULL,
+  profile TEXT NOT NULL CHECK(profile IN ('grid_320')),
+  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'queued', 'ready', 'failed', 'skipped_small')),
   cache_key TEXT,
   width INTEGER,
   height INTEGER,
   byte_size INTEGER,
-  state TEXT NOT NULL,
+  short_side_px INTEGER NOT NULL DEFAULT 320 CHECK(short_side_px = 320),
+  output_format TEXT NOT NULL DEFAULT 'image/webp' CHECK(output_format = 'image/webp'),
+  error TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(file_id, profile)
 );
@@ -139,6 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_user_metadata_rating ON user_metadata(rating, fil
 CREATE INDEX IF NOT EXISTS idx_user_metadata_favorite ON user_metadata(favorite, file_id);
 CREATE INDEX IF NOT EXISTS idx_file_tags_tag_file ON file_tags(tag_id, file_id);
 CREATE INDEX IF NOT EXISTS idx_thumbs_profile_state ON thumbs(profile, state);
+CREATE INDEX IF NOT EXISTS idx_thumbs_state_updated ON thumbs(state, updated_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority, created_at);
 CREATE INDEX IF NOT EXISTS idx_file_operations_status_created ON file_operations(status, created_at);
 

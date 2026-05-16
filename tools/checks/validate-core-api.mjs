@@ -21,6 +21,7 @@ const tasksRs = read("crates/core/src/tasks.rs");
 const dbMigrationsRs = read("crates/core/src/db/migrations.rs");
 const mainRs = read("crates/core/src/main.rs");
 const migrationSql = read("crates/core/migrations/0001_initial.sql");
+const thumbnailMigrationSql = read("crates/core/migrations/0004_thumbnail_state.sql");
 const thumbnailsRs = read("crates/core/src/thumbnails/mod.rs");
 const pluginsRs = read("crates/core/src/plugins/mod.rs");
 const fsopsRs = read("crates/core/src/fsops/mod.rs");
@@ -61,7 +62,7 @@ const expectedAxumRoutes = [
   "/api/folders/:folder_id/children",
   "/api/media",
   "/api/media/:file_id",
-  "/api/media/:file_id/thumbnail/:profile",
+  "/api/media/:file_id/thumbnail",
   "/api/media/:file_id/preview",
   "/api/tasks",
   "/api/tasks/scan",
@@ -111,6 +112,12 @@ if (!dbMigrationsRs.includes('include_str!("../../migrations/0001_initial.sql")'
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0002_task_progress.sql")')) {
   fail("db task progress migration include path changed or missing");
 }
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0003_browsing_indexes.sql")')) {
+  fail("db browsing indexes migration include path changed or missing");
+}
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0004_thumbnail_state.sql")')) {
+  fail("db thumbnail state migration include path changed or missing");
+}
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");
 }
@@ -151,9 +158,35 @@ for (const value of ["image", "video", "other"]) {
   }
 }
 
-for (const value of ["tiny", "grid", "retina", "preview"]) {
-  if (!openApi.includes(value) || !thumbnailsRs.includes(value)) {
+for (const value of ["grid_320"]) {
+  if (!openApi.includes(value) || !routesRs.includes(value) || !thumbnailsRs.includes(value)) {
     fail(`thumbnail profile value is not aligned: ${value}`);
+  }
+}
+for (const value of ["pending", "queued", "ready", "failed", "skipped_small"]) {
+  if (!openApi.includes(value) || !routesRs.includes(value) || !thumbnailsRs.includes(value)) {
+    fail(`thumbnail status value is not aligned: ${value}`);
+  }
+}
+for (const value of ["image/webp", "shortSidePx", "outputFormat", "ThumbnailResponse"]) {
+  if (!openApi.includes(value)) {
+    fail(`OpenAPI thumbnail contract missing ${value}`);
+  }
+}
+for (const value of ["short_side_px", "output_format", "skipped_small", "image/webp"]) {
+  if (!migrationSql.includes(value) || !thumbnailMigrationSql.includes(value)) {
+    fail(`thumbnail schema migration missing ${value}`);
+  }
+}
+for (const value of [
+  "DROP TABLE IF EXISTS thumbs_new",
+  "BEGIN IMMEDIATE",
+  "COMMIT",
+  "pragma_foreign_key_check",
+  "grid_320_explicit"
+]) {
+  if (!thumbnailMigrationSql.includes(value)) {
+    fail(`thumbnail state migration hardening missing ${value}`);
   }
 }
 
@@ -312,12 +345,31 @@ const mediaOperation = operationBlock("/media", "get");
 if (!mediaOperation.includes('"400"') || !mediaOperation.includes("ErrorResponse")) {
   fail("OpenAPI GET /media must document invalid query/cursor 400 ErrorResponse");
 }
+const thumbnailOperation = operationBlock("/media/{fileId}/thumbnail", "get");
+for (const value of [
+  "ThumbnailResponse",
+  "profile",
+  '"200"',
+  '"202"',
+  '"404"',
+  "ErrorResponse"
+]) {
+  if (!thumbnailOperation.includes(value)) {
+    fail(`OpenAPI GET /media/{fileId}/thumbnail missing ${value}`);
+  }
+}
 const folderChildrenOperation = operationBlock("/folders/{folderId}/children", "get");
 if (!folderChildrenOperation.includes('"400"') || !folderChildrenOperation.includes("ErrorResponse")) {
   fail("OpenAPI GET /folders/{folderId}/children must document invalid cursor 400 ErrorResponse");
 }
 if (!functionBody("list_tasks").includes("database.list_tasks")) {
   fail("GET /api/tasks must return persisted task rows");
+}
+const thumbnailBody = functionBody("get_thumbnail");
+for (const value of ["Json<ThumbnailResponse>", "get_thumbnail", "StatusCode::OK", "StatusCode::ACCEPTED"]) {
+  if (!thumbnailBody.includes(value)) {
+    fail(`GET /api/media/{fileId}/thumbnail implementation missing ${value}`);
+  }
 }
 if (dbModRs.includes("OFFSET")) {
   fail("Core browsing pagination must use keyset cursors, not OFFSET");

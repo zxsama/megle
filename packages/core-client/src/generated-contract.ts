@@ -75,6 +75,24 @@ export interface MediaRecord {
   thumbnailCacheKey?: string | null;
 }
 
+export interface ThumbnailAsset {
+  cacheKey: string;
+  width: number;
+  height: number;
+  byteSize: number;
+}
+
+export interface ThumbnailResponse {
+  fileId: number;
+  profile: "grid_320";
+  state: "pending" | "queued" | "ready" | "failed" | "skipped_small";
+  shortSidePx: number;
+  outputFormat: "image/webp";
+  asset: ThumbnailAsset | null;
+  error: string | null;
+  updatedAt: number | null;
+}
+
 export interface ListFolderChildrenParams {
   limit?: number;
   cursor?: string;

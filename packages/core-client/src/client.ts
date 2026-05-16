@@ -7,7 +7,8 @@ import type {
   Page,
   RootRecord,
   ScanTaskRequest,
-  TaskRecord
+  TaskRecord,
+  ThumbnailResponse
 } from "./generated-contract";
 
 export interface CoreClientConfig {
@@ -26,6 +27,10 @@ export class CoreApiError extends Error {
     this.body = body;
   }
 }
+
+type QueryParams = Partial<ListMediaParams & ListFolderChildrenParams> & {
+  profile?: "grid_320";
+};
 
 export function createCoreClient(config: CoreClientConfig) {
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -69,7 +74,9 @@ export function createCoreClient(config: CoreClientConfig) {
     listFolderChildren: (folderId: number, params: ListFolderChildrenParams = {}) =>
       request<Page<FolderRecord>>(`/folders/${folderId}/children${query(params)}`),
     listMedia: (params: ListMediaParams = {}) => request<Page<MediaRecord>>(`/media${query(params)}`),
-    getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`)
+    getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`),
+    getThumbnail: (fileId: number, profile: "grid_320" = "grid_320") =>
+      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ profile })}`)
   };
 }
 
@@ -79,7 +86,7 @@ function resolveUrl(baseUrl: string, path: string): string {
   return new URL(normalizedPath, normalizedBase).toString();
 }
 
-function query(params: ListMediaParams | ListFolderChildrenParams): string {
+function query(params: QueryParams): string {
   const search = new URLSearchParams();
   if ("rootId" in params && params.rootId) search.set("rootId", String(params.rootId));
   if ("folderId" in params && params.folderId) search.set("folderId", String(params.folderId));
@@ -87,6 +94,7 @@ function query(params: ListMediaParams | ListFolderChildrenParams): string {
   if (params.cursor) search.set("cursor", params.cursor);
   if ("sort" in params && params.sort) search.set("sort", params.sort);
   if ("kind" in params && params.kind) search.set("kind", params.kind);
+  if ("profile" in params && params.profile) search.set("profile", params.profile);
   const value = search.toString();
   return value ? `?${value}` : "";
 }

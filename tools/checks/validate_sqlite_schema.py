@@ -9,6 +9,7 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0001_initial.sql",
     ROOT / "crates" / "core" / "migrations" / "0002_task_progress.sql",
     ROOT / "crates" / "core" / "migrations" / "0003_browsing_indexes.sql",
+    ROOT / "crates" / "core" / "migrations" / "0004_thumbnail_state.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -55,9 +56,14 @@ REQUIRED_INDEXES = {
     "idx_user_metadata_favorite",
     "idx_file_tags_tag_file",
     "idx_thumbs_profile_state",
+    "idx_thumbs_state_updated",
     "idx_tasks_status_priority",
     "idx_file_operations_status_created",
 }
+
+THUMBNAIL_STATUSES = {"pending", "queued", "ready", "failed", "skipped_small"}
+THUMBNAIL_PROFILE = "grid_320"
+THUMBNAIL_FORMAT = "image/webp"
 
 
 def fail(message: str) -> None:
@@ -112,6 +118,11 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 3 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 4"
+            ).fetchone()
+            if version is None:
+                fail("migration version 4 was not recorded")
 
             task_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
@@ -119,6 +130,26 @@ def main() -> None:
             missing_task_columns = TASK_PROGRESS_COLUMNS - task_columns
             if missing_task_columns:
                 fail(f"missing task progress columns: {sorted(missing_task_columns)}")
+
+            thumb_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(thumbs)").fetchall()
+            }
+            required_thumb_columns = {
+                "file_id",
+                "profile",
+                "state",
+                "cache_key",
+                "width",
+                "height",
+                "byte_size",
+                "short_side_px",
+                "output_format",
+                "error",
+                "updated_at",
+            }
+            missing_thumb_columns = required_thumb_columns - thumb_columns
+            if missing_thumb_columns:
+                fail(f"missing thumbnail columns: {sorted(missing_thumb_columns)}")
 
             conn.execute(
                 """
@@ -153,11 +184,53 @@ def main() -> None:
             )
             conn.execute(
                 """
-                INSERT INTO thumbs(file_id, profile, cache_key, width, height, byte_size, state, updated_at)
-                VALUES (?, 'grid', 'aa/bb/key.webp', 427, 320, 4096, 'ready', 11)
+                INSERT INTO thumbs(
+                    file_id, profile, state, cache_key, width, height, byte_size,
+                    short_side_px, output_format, updated_at
+                )
+                VALUES (?, ?, 'ready', 'aa/bb/key.webp', 427, 320, 4096, 320, ?, 11)
                 """,
-                (file_id,),
+                (file_id, THUMBNAIL_PROFILE, THUMBNAIL_FORMAT),
             )
+            for status in THUMBNAIL_STATUSES - {"ready"}:
+                conn.execute(
+                    """
+                    UPDATE thumbs
+                    SET state = ?, cache_key = NULL, width = NULL, height = NULL,
+                        byte_size = NULL, error = CASE WHEN ? = 'failed' THEN 'decode failed' ELSE NULL END
+                    WHERE file_id = ? AND profile = ?
+                    """,
+                    (status, status, file_id, THUMBNAIL_PROFILE),
+                )
+            invalid_status = conn.execute(
+                """
+                UPDATE OR IGNORE thumbs
+                SET state = 'unknown'
+                WHERE file_id = ? AND profile = ?
+                """,
+                (file_id, THUMBNAIL_PROFILE),
+            ).rowcount
+            if invalid_status != 0:
+                fail("thumbnail state must reject unsupported status values")
+            invalid_profile = conn.execute(
+                """
+                INSERT OR IGNORE INTO thumbs(file_id, profile, state, short_side_px, output_format, updated_at)
+                VALUES (?, 'grid', 'pending', 320, ?, 12)
+                """,
+                (file_id, THUMBNAIL_FORMAT),
+            ).rowcount
+            if invalid_profile != 0:
+                fail("thumbnail profile must reject unsupported profile values")
+            invalid_format = conn.execute(
+                """
+                UPDATE OR IGNORE thumbs
+                SET output_format = 'image/jpeg'
+                WHERE file_id = ? AND profile = ?
+                """,
+                (file_id, THUMBNAIL_PROFILE),
+            ).rowcount
+            if invalid_format != 0:
+                fail("thumbnail output format must reject unsupported values")
             page = conn.execute(
                 """
                 SELECT files.id, files.name

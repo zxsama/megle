@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 use crate::api::AppState;
-use crate::db::{FolderRecord, MediaPageQuery, MediaRecord, NewRoot, RootRecord, TaskRecord};
+use crate::db::{
+    FolderRecord, MediaPageQuery, MediaRecord, NewRoot, RootRecord, TaskRecord, ThumbnailRecord,
+};
 use crate::scan::ScanSummary;
+use crate::thumbnails::{is_pending_status, normalize_profile};
 
 #[allow(dead_code)]
 pub const MEDIA_SORT_VALUES: &[&str] = &["mtime_desc", "mtime_asc", "name_asc", "name_desc"];
@@ -50,7 +53,7 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/folders/{folderId}/children",
     "/api/media",
     "/api/media/{fileId}",
-    "/api/media/{fileId}/thumbnail/{profile}",
+    "/api/media/{fileId}/thumbnail",
     "/api/media/{fileId}/preview",
     "/api/tasks",
     "/api/tasks/scan",
@@ -120,9 +123,36 @@ struct ListMediaQuery {
     kind: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ThumbnailQuery {
+    profile: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailAsset {
+    cache_key: String,
+    width: i64,
+    height: i64,
+    byte_size: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailResponse {
+    file_id: i64,
+    profile: String,
+    state: String,
+    short_side_px: i64,
+    output_format: String,
+    asset: Option<ThumbnailAsset>,
+    error: Option<String>,
+    updated_at: Option<i64>,
 }
 
 struct CoreError {
@@ -164,7 +194,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/media", get(list_media))
         .route("/api/media/:file_id", get(get_media))
-        .route("/api/media/:file_id/thumbnail/:profile", get(get_thumbnail))
+        .route("/api/media/:file_id/thumbnail", get(get_thumbnail))
         .route("/api/media/:file_id/preview", get(get_preview))
         .route("/api/tasks", get(list_tasks))
         .route("/api/tasks/scan", post(enqueue_scan))
@@ -298,9 +328,24 @@ async fn get_media(
 }
 
 async fn get_thumbnail(
-    Path((_file_id, _profile)): Path<(i64, String)>,
-) -> (StatusCode, Json<AcceptedResponse>) {
-    (StatusCode::ACCEPTED, Json(accepted()))
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+    Query(query): Query<ThumbnailQuery>,
+) -> ApiResult<(StatusCode, Json<ThumbnailResponse>)> {
+    let profile = normalize_profile(query.profile.as_deref())
+        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
+    let thumbnail = {
+        let database = state.database.lock().expect("database mutex poisoned");
+        database
+            .get_thumbnail(file_id, profile)?
+            .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?
+    };
+    let status = if is_pending_status(&thumbnail.state) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(thumbnail_response(thumbnail))))
 }
 
 async fn get_preview(Path(_file_id): Path<i64>) -> (StatusCode, Json<AcceptedResponse>) {
@@ -374,6 +419,36 @@ fn accepted() -> AcceptedResponse {
         task_id: None,
         root_id: None,
         scan: None,
+    }
+}
+
+fn thumbnail_response(thumbnail: ThumbnailRecord) -> ThumbnailResponse {
+    let asset = match (
+        thumbnail.state.as_str(),
+        thumbnail.cache_key,
+        thumbnail.width,
+        thumbnail.height,
+        thumbnail.byte_size,
+    ) {
+        ("ready", Some(cache_key), Some(width), Some(height), Some(byte_size)) => {
+            Some(ThumbnailAsset {
+                cache_key,
+                width,
+                height,
+                byte_size,
+            })
+        }
+        _ => None,
+    };
+    ThumbnailResponse {
+        file_id: thumbnail.file_id,
+        profile: thumbnail.profile,
+        state: thumbnail.state,
+        short_side_px: thumbnail.short_side_px,
+        output_format: thumbnail.output_format,
+        asset,
+        error: thumbnail.error,
+        updated_at: thumbnail.updated_at,
     }
 }
 
@@ -611,6 +686,225 @@ mod tests {
         drop(app);
         drop(state);
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_returns_pending_state_for_missing_grid_320_row() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let file_id = seed_media_file(&database);
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail state");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_json(response).await;
+        assert_eq!(body["fileId"], file_id);
+        assert_eq!(body["profile"], "grid_320");
+        assert_eq!(body["state"], "pending");
+        assert_eq!(body["shortSidePx"], 320);
+        assert_eq!(body["outputFormat"], "image/webp");
+        assert!(body["asset"].is_null());
+
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_distinguishes_ready_and_skipped_small_states() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let ready_file_id = seed_media_file(&database);
+        let skipped_file_id = seed_media_file_named(&database, "icon.png");
+        drop(database);
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open seed connection");
+        conn.execute(
+            "UPDATE media SET width = 640, height = 480, metadata_status = 'ready' WHERE file_id = ?1",
+            [ready_file_id],
+        )
+        .expect("set ready media dimensions");
+        conn.execute(
+            "UPDATE media SET width = 128, height = 128, metadata_status = 'ready' WHERE file_id = ?1",
+            [skipped_file_id],
+        )
+        .expect("set skipped-small media dimensions");
+        conn.execute(
+            r#"
+            INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, updated_at)
+            VALUES (?1, 'grid_320', 'ready', 'aa/bb/key.webp', 427, 320, 4096, 10)
+            "#,
+            [ready_file_id],
+        )
+        .expect("insert ready thumbnail");
+        conn.execute(
+            r#"
+            INSERT INTO thumbs(file_id, profile, state, updated_at)
+            VALUES (?1, 'grid_320', 'skipped_small', 11)
+            "#,
+            [skipped_file_id],
+        )
+        .expect("insert skipped thumbnail");
+        drop(conn);
+
+        let database = Database::open(&db_path).expect("reopen database");
+        database.apply_migrations().expect("apply migrations");
+        let app = router(AppState::new(database));
+
+        let ready_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{ready_file_id}/thumbnail?profile=grid_320"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get ready thumbnail state");
+        assert_eq!(ready_response.status(), StatusCode::OK);
+        let ready = response_json(ready_response).await;
+        assert_eq!(ready["state"], "ready");
+        assert_eq!(ready["asset"]["cacheKey"], "aa/bb/key.webp");
+        assert_eq!(ready["asset"]["width"], 427);
+        assert_eq!(ready["asset"]["height"], 320);
+        assert_eq!(ready["asset"]["byteSize"], 4096);
+
+        let skipped_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{skipped_file_id}/thumbnail?profile=grid_320"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get skipped thumbnail state");
+        assert_eq!(skipped_response.status(), StatusCode::OK);
+        let skipped = response_json(skipped_response).await;
+        assert_eq!(skipped["state"], "skipped_small");
+        assert_eq!(skipped["profile"], "grid_320");
+        assert!(skipped["asset"].is_null());
+
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_handles_queued_failed_bad_profile_and_missing_media() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let queued_file_id = seed_media_file(&database);
+        let failed_file_id = seed_media_file_named(&database, "failed.jpg");
+        drop(database);
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open seed connection");
+        conn.execute(
+            r#"
+            INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, updated_at)
+            VALUES (?1, 'grid_320', 'queued', 'queued/stale.webp', 320, 240, 1024, 20)
+            "#,
+            [queued_file_id],
+        )
+        .expect("insert queued thumbnail");
+        conn.execute(
+            r#"
+            INSERT INTO thumbs(file_id, profile, state, cache_key, width, height, byte_size, error, updated_at)
+            VALUES (?1, 'grid_320', 'failed', 'failed/stale.webp', 320, 240, 1024, 'decode failed', 21)
+            "#,
+            [failed_file_id],
+        )
+        .expect("insert failed thumbnail");
+        drop(conn);
+
+        let database = Database::open(&db_path).expect("reopen database");
+        database.apply_migrations().expect("apply migrations");
+        let app = router(AppState::new(database));
+
+        let queued_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{queued_file_id}/thumbnail?profile=grid_320"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get queued thumbnail state");
+        assert_eq!(queued_response.status(), StatusCode::ACCEPTED);
+        let queued = response_json(queued_response).await;
+        assert_eq!(queued["state"], "queued");
+        assert!(queued["asset"].is_null());
+
+        let failed_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{failed_file_id}/thumbnail?profile=grid_320"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get failed thumbnail state");
+        assert_eq!(failed_response.status(), StatusCode::OK);
+        let failed = response_json(failed_response).await;
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"], "decode failed");
+        assert!(failed["asset"].is_null());
+
+        let bad_profile = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{queued_file_id}/thumbnail?profile=grid"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail with bad profile");
+        assert_eq!(bad_profile.status(), StatusCode::BAD_REQUEST);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/media/999999/thumbnail?profile=grid_320")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get missing thumbnail");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
         let _ = fs::remove_dir_all(db_dir);
     }
 
@@ -1312,6 +1606,44 @@ mod tests {
         database.apply_migrations().expect("apply migrations");
         let worker_database = Database::open(&path).expect("open worker database");
         (database, worker_database)
+    }
+
+    fn seed_media_file(database: &Database) -> i64 {
+        seed_media_file_named(database, "image.jpg")
+    }
+
+    fn seed_media_file_named(database: &Database, name: &str) -> i64 {
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: format!("D:/Pictures/{name}"),
+                display_name: format!("Pictures {name}"),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: format!("root-hash-{name}"),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let file_id = database
+            .upsert_file(crate::db::FileUpsert {
+                root_id,
+                folder_id,
+                name: name.to_string(),
+                ext: ".jpg".to_string(),
+                size: 1000,
+                mtime: 2,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media kind");
+        file_id
     }
 
     fn unique_temp_dir() -> PathBuf {

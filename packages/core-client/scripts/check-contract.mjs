@@ -171,6 +171,8 @@ for (const name of [
   "FolderListResponse",
   "MediaRecord",
   "MediaListResponse",
+  "ThumbnailAsset",
+  "ThumbnailResponse",
   "TaskRecord",
   "TaskListResponse"
 ]) {
@@ -183,6 +185,8 @@ assertInterfaceMatchesSchema("ScanTaskRequest");
 assertInterfaceMatchesSchema("RootRecord");
 assertInterfaceMatchesSchema("FolderRecord");
 assertInterfaceMatchesSchema("MediaRecord");
+assertInterfaceMatchesSchema("ThumbnailAsset");
+assertInterfaceMatchesSchema("ThumbnailResponse");
 assertInterfaceMatchesSchema("TaskRecord");
 
 const pageBody = interfaceBody("Page");
@@ -216,11 +220,34 @@ for (const [name, line] of [
 assertOperationParameters("listFolderChildren", ["folderId", "limit", "cursor"]);
 assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor", "sort", "kind"]);
 assertOperationParameters("getMedia", ["fileId"]);
+assertOperationParameters("getThumbnail", ["fileId", "profile"]);
 
-for (const method of ["listRoots", "addRoot", "removeRoot", "enqueueScan", "listFolderChildren", "listMedia", "getMedia", "listTasks"]) {
+for (const method of ["listRoots", "addRoot", "removeRoot", "enqueueScan", "listFolderChildren", "listMedia", "getMedia", "getThumbnail", "listTasks"]) {
   if (!client.includes(`${method}:`)) {
     fail(`client.ts missing operation ${method}`);
   }
+}
+
+const thumbnailBody = interfaceBody("ThumbnailResponse");
+for (const line of [
+  'profile: "grid_320";',
+  'state: "pending" | "queued" | "ready" | "failed" | "skipped_small";',
+  'shortSidePx: number;',
+  'outputFormat: "image/webp";',
+  "asset: ThumbnailAsset | null;",
+  "error: string | null;"
+]) {
+  requireLine(thumbnailBody, line, "generated-contract.ts ThumbnailResponse");
+}
+
+const thumbnailAssetBody = interfaceBody("ThumbnailAsset");
+for (const line of [
+  "cacheKey: string;",
+  "width: number;",
+  "height: number;",
+  "byteSize: number;"
+]) {
+  requireLine(thumbnailAssetBody, line, "generated-contract.ts ThumbnailAsset");
 }
 
 const taskBody = interfaceBody("TaskRecord");
@@ -244,6 +271,10 @@ if (!/listFolderChildren:\s*\(folderId:\s*number,\s*params:\s*ListFolderChildren
 
 if (!/listMedia:\s*\(params:\s*ListMediaParams\s*=\s*{}\)\s*=>\s*request<Page<MediaRecord>>\(`\/media\$\{query\(params\)\}`\)/.test(client)) {
   fail("client.ts listMedia must serialize typed query params");
+}
+
+if (!/getThumbnail:\s*\(fileId:\s*number,\s*profile:\s*"grid_320"\s*=\s*"grid_320"\)\s*=>\s*request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*profile\s*}\)\}`\)/.test(client)) {
+  fail("client.ts getThumbnail must request typed thumbnail state with default grid_320 profile");
 }
 
 if (!/removeRoot:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/roots\/\$\{rootId\}`,\s*{\s*method:\s*"DELETE"\s*}\)/.test(client)) {

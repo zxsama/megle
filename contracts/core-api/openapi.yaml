@@ -141,7 +141,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-  /media/{fileId}/thumbnail/{profile}:
+  /media/{fileId}/thumbnail:
     get:
       operationId: getThumbnail
       parameters:
@@ -149,9 +149,29 @@ paths:
         - $ref: "#/components/parameters/profile"
       responses:
         "200":
-          description: Thumbnail bytes or redirect to safe local media serving path.
+          description: Thumbnail state is ready or terminal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThumbnailResponse"
         "202":
-          description: Thumbnail queued.
+          description: Thumbnail is pending or queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThumbnailResponse"
+        "400":
+          description: Unsupported thumbnail profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Media item not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /media/{fileId}/preview:
     get:
       operationId: getPreview
@@ -279,11 +299,11 @@ components:
         type: string
     profile:
       name: profile
-      in: path
-      required: true
+      in: query
       schema:
         type: string
-        enum: [tiny, grid, retina, preview]
+        enum: [grid_320]
+        default: grid_320
   schemas:
     ErrorResponse:
       type: object
@@ -499,6 +519,51 @@ components:
           nullable: true
         thumbnailCacheKey:
           type: string
+          nullable: true
+    ThumbnailAsset:
+      type: object
+      required: [cacheKey, width, height, byteSize]
+      properties:
+        cacheKey:
+          type: string
+        width:
+          type: integer
+          minimum: 1
+        height:
+          type: integer
+          minimum: 1
+        byteSize:
+          type: integer
+          minimum: 1
+    ThumbnailResponse:
+      type: object
+      required: [fileId, profile, state, shortSidePx, outputFormat, asset, error, updatedAt]
+      properties:
+        fileId:
+          type: integer
+          minimum: 1
+        profile:
+          type: string
+          enum: [grid_320]
+        state:
+          type: string
+          enum: [pending, queued, ready, failed, skipped_small]
+        shortSidePx:
+          type: integer
+          minimum: 320
+          maximum: 320
+        outputFormat:
+          type: string
+          enum: [image/webp]
+        asset:
+          anyOf:
+            - $ref: "#/components/schemas/ThumbnailAsset"
+            - type: "null"
+        error:
+          type: string
+          nullable: true
+        updatedAt:
+          type: integer
           nullable: true
     MediaListResponse:
       type: object
