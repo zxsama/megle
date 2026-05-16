@@ -43,6 +43,7 @@ const duplicateCoreContractNames = [
   "MediaRecord",
   "AcceptedRootResponse",
   "ScanSummary",
+  "TaskRecord",
   "ListMediaParams",
   "CoreClientConfig",
   "CoreApiError"
@@ -68,10 +69,18 @@ if (webPackageJson.dependencies?.["@megle/core-client"] !== "*") {
   fail("apps/web must depend on @megle/core-client through the root workspace");
 }
 
-for (const value of ["listRoots", "listFolderChildren", "listMedia", "addRoot"]) {
+for (const value of ["listRoots", "listFolderChildren", "listMedia", "addRoot", "listTasks"]) {
   if (!useLibraryData.includes(value)) {
     fail(`useLibraryData must call ${value}`);
   }
+}
+for (const value of ["addingRoot", "scanActive"]) {
+  if (!useLibraryData.includes(value)) {
+    fail(`useLibraryData must keep separate ${value} state`);
+  }
+}
+if (!/setInterval[\s\S]*?\.catch\(/.test(useLibraryData)) {
+  fail("task polling interval must catch listTasks/load failures");
 }
 
 if (!packageJson.scripts?.["check:web"]) {

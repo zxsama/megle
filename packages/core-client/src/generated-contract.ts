@@ -29,6 +29,23 @@ export interface RootRecord {
   rootFolderId: number | null;
 }
 
+export interface TaskRecord {
+  id: number;
+  kind: string;
+  priority: number;
+  status: "pending" | "running" | "succeeded" | "failed";
+  rootId: number | null;
+  fileId: number | null;
+  createdAt: number;
+  updatedAt: number;
+  itemsSeen: number;
+  itemsTotal: number | null;
+  foldersSeen: number;
+  mediaFilesSeen: number;
+  skippedFiles: number;
+  error: string | null;
+}
+
 export interface FolderRecord {
   id: number;
   rootId: number;

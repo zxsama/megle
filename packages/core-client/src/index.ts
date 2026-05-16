@@ -8,5 +8,6 @@ export type {
   MediaRecord,
   Page,
   RootRecord,
-  ScanSummary
+  ScanSummary,
+  TaskRecord
 } from "./generated-contract";

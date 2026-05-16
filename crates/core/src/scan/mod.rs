@@ -6,7 +6,12 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::db::{Database, FileUpsert, FolderUpsert, RootRecord};
+use crate::db::{
+    Database, FileUpsert, FolderUpsert, RootRecord, ScanFileUpsert, ScanWriteBatch,
+    TaskScanProgress,
+};
+
+pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 1_000;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,77 +28,198 @@ pub struct ScanSummary {
     pub skipped_files: usize,
 }
 
-pub fn scan_root(database: &Database, root: &RootRecord) -> anyhow::Result<ScanSummary> {
+pub struct ScanOptions<'a> {
+    pub write_batch_size: usize,
+    pub progress_callback: Option<&'a mut dyn FnMut(TaskScanProgress)>,
+    #[cfg(test)]
+    pub batch_observer: Option<std::rc::Rc<dyn Fn(ScanBatchStats)>>,
+}
+
+impl Default for ScanOptions<'_> {
+    fn default() -> Self {
+        Self {
+            write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
+            progress_callback: None,
+            #[cfg(test)]
+            batch_observer: None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanBatchStats {
+    pub folders: usize,
+    pub files: usize,
+}
+
+pub fn scan_root(database: &mut Database, root: &RootRecord) -> anyhow::Result<ScanSummary> {
+    scan_root_with_options(database, root, ScanOptions::default())
+}
+
+pub fn scan_root_with_progress(
+    database: &mut Database,
+    root: &RootRecord,
+    progress_callback: &mut dyn FnMut(TaskScanProgress),
+) -> anyhow::Result<ScanSummary> {
+    scan_root_with_options(
+        database,
+        root,
+        ScanOptions {
+            write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
+            progress_callback: Some(progress_callback),
+            #[cfg(test)]
+            batch_observer: None,
+        },
+    )
+}
+
+pub fn scan_root_with_options(
+    database: &mut Database,
+    root: &RootRecord,
+    mut options: ScanOptions<'_>,
+) -> anyhow::Result<ScanSummary> {
     let root_path = PathBuf::from(&root.path);
-    let root_folder_id = database.upsert_folder(FolderUpsert {
-        root_id: root.id,
-        parent_id: None,
-        name: String::new(),
-        path_hash: hash_path(&root_path),
-        mtime: metadata_time(root_path.metadata().ok().as_ref(), TimeField::Modified),
-    })?;
+    let root_batch = ScanWriteBatch {
+        folders: vec![FolderUpsert {
+            root_id: root.id,
+            parent_id: None,
+            name: String::new(),
+            path_hash: hash_path(&root_path),
+            mtime: metadata_time(root_path.metadata().ok().as_ref(), TimeField::Modified),
+        }],
+        files: Vec::new(),
+    };
+    observe_scan_batch(&options, root_batch.folders.len(), root_batch.files.len());
+    let root_result = database.commit_scan_batch(root_batch)?;
+    let root_folder_id = root_result.folder_ids[0];
 
     let mut folder_ids = HashMap::new();
     folder_ids.insert(root_path.clone(), root_folder_id);
+    let mut pending_files = Vec::new();
+    let write_batch_size = options.write_batch_size.max(1);
 
     let mut summary = ScanSummary {
         folders_seen: 1,
         media_files_seen: 0,
         skipped_files: 0,
     };
+    let mut items_seen = 0_i64;
+    emit_progress(&mut options, items_seen, &summary);
 
     for entry in WalkDir::new(&root_path).min_depth(1) {
         let entry = entry?;
         let path = entry.path();
         let metadata = entry.metadata()?;
+        items_seen += 1;
 
         if metadata.is_dir() {
-            let parent_id = path
-                .parent()
-                .and_then(|parent| folder_ids.get(parent).copied())
-                .unwrap_or(root_folder_id);
-            let folder_id = database.upsert_folder(FolderUpsert {
-                root_id: root.id,
-                parent_id: Some(parent_id),
-                name: file_name(path),
-                path_hash: hash_path(path),
-                mtime: metadata_time(Some(&metadata), TimeField::Modified),
-            })?;
+            let parent_id = parent_folder_id(path, &folder_ids)?;
+            let batch = ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id: root.id,
+                    parent_id: Some(parent_id),
+                    name: file_name(path),
+                    path_hash: hash_path(path),
+                    mtime: metadata_time(Some(&metadata), TimeField::Modified),
+                }],
+                files: Vec::new(),
+            };
+            observe_scan_batch(&options, batch.folders.len(), batch.files.len());
+            let result = database.commit_scan_batch(batch)?;
+            let folder_id = result.folder_ids[0];
             folder_ids.insert(path.to_path_buf(), folder_id);
             summary.folders_seen += 1;
+            emit_progress(&mut options, items_seen, &summary);
             continue;
         }
 
         if !metadata.is_file() {
             summary.skipped_files += 1;
+            emit_progress(&mut options, items_seen, &summary);
             continue;
         }
 
         let Some(kind) = media_kind(path) else {
             summary.skipped_files += 1;
+            emit_progress(&mut options, items_seen, &summary);
             continue;
         };
 
-        let folder_id = path
-            .parent()
-            .and_then(|parent| folder_ids.get(parent).copied())
-            .unwrap_or(root_folder_id);
-        let file_id = database.upsert_file(FileUpsert {
-            root_id: root.id,
-            folder_id,
-            name: file_name(path),
-            ext: extension(path),
-            size: metadata.len() as i64,
-            mtime: metadata_time(Some(&metadata), TimeField::Modified).unwrap_or(0),
-            ctime: metadata_time(Some(&metadata), TimeField::Created),
-            file_key: None,
-        })?;
-        database.upsert_media_kind(file_id, kind)?;
+        let folder_id = parent_folder_id(path, &folder_ids)?;
+        pending_files.push(ScanFileUpsert {
+            file: FileUpsert {
+                root_id: root.id,
+                folder_id,
+                name: file_name(path),
+                ext: extension(path),
+                size: metadata.len() as i64,
+                mtime: metadata_time(Some(&metadata), TimeField::Modified).unwrap_or(0),
+                ctime: metadata_time(Some(&metadata), TimeField::Created),
+                file_key: None,
+            },
+            media_kind: kind.to_string(),
+        });
         summary.media_files_seen += 1;
+        emit_progress(&mut options, items_seen, &summary);
+
+        if pending_files.len() >= write_batch_size {
+            flush_scan_files(database, &options, &mut pending_files)?;
+        }
     }
 
+    flush_scan_files(database, &options, &mut pending_files)?;
     database.mark_root_scanned(root.id)?;
     Ok(summary)
+}
+
+fn parent_folder_id(path: &Path, folder_ids: &HashMap<PathBuf, i64>) -> anyhow::Result<i64> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("scan path has no parent: {}", path.display()))?;
+    folder_ids
+        .get(parent)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("missing scanned parent folder id for {}", parent.display()))
+}
+
+fn flush_scan_files(
+    database: &mut Database,
+    options: &ScanOptions,
+    pending_files: &mut Vec<ScanFileUpsert>,
+) -> anyhow::Result<()> {
+    if pending_files.is_empty() {
+        return Ok(());
+    }
+
+    observe_scan_batch(options, 0, pending_files.len());
+    database.commit_scan_batch(ScanWriteBatch {
+        folders: Vec::new(),
+        files: std::mem::take(pending_files),
+    })?;
+    Ok(())
+}
+
+fn observe_scan_batch(options: &ScanOptions, folders: usize, files: usize) {
+    #[cfg(test)]
+    if let Some(observer) = &options.batch_observer {
+        observer(ScanBatchStats { folders, files });
+    }
+
+    #[cfg(not(test))]
+    let _ = (options, folders, files);
+}
+
+fn emit_progress(options: &mut ScanOptions<'_>, items_seen: i64, summary: &ScanSummary) {
+    if let Some(callback) = options.progress_callback.as_deref_mut() {
+        callback(TaskScanProgress {
+            items_seen,
+            items_total: None,
+            folders_seen: summary.folders_seen as i64,
+            media_files_seen: summary.media_files_seen as i64,
+            skipped_files: summary.skipped_files as i64,
+        });
+    }
 }
 
 fn media_kind(path: &Path) -> Option<&'static str> {
@@ -158,7 +284,7 @@ mod tests {
         fs::write(temp_root.join("clip.mp4"), b"fake mp4").expect("write video");
         fs::write(temp_root.join("notes.txt"), b"not media").expect("write notes");
 
-        let database = Database::open_in_memory().expect("open database");
+        let mut database = Database::open_in_memory().expect("open database");
         database.apply_migrations().expect("apply migrations");
         let root_id = database
             .add_root(NewRoot {
@@ -173,7 +299,7 @@ mod tests {
             .find(|item| item.id == root_id)
             .expect("find root");
 
-        let summary = scan_root(&database, &root).expect("scan root");
+        let summary = scan_root(&mut database, &root).expect("scan root");
         assert_eq!(summary.folders_seen, 2);
         assert_eq!(summary.media_files_seen, 2);
         assert_eq!(summary.skipped_files, 1);
@@ -191,6 +317,232 @@ mod tests {
         assert_eq!(page.len(), 2);
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn scan_root_with_tiny_write_batch_preserves_summary_and_media_rows() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(temp_root.join("photos").join("raw")).expect("create photos dir");
+        fs::write(temp_root.join("photos").join("image.JPG"), b"fake jpg").expect("write image");
+        fs::write(
+            temp_root.join("photos").join("raw").join("scan.png"),
+            b"fake png",
+        )
+        .expect("write png");
+        fs::write(temp_root.join("clip.mp4"), b"fake mp4").expect("write video");
+        fs::write(temp_root.join("notes.txt"), b"not media").expect("write notes");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().to_string(),
+                display_name: "tiny-batch-scan-test".to_string(),
+            })
+            .expect("add root");
+        let root = database
+            .list_roots()
+            .expect("list roots")
+            .into_iter()
+            .find(|item| item.id == root_id)
+            .expect("find root");
+
+        let summary = scan_root_with_options(
+            &mut database,
+            &root,
+            ScanOptions {
+                write_batch_size: 2,
+                progress_callback: None,
+                batch_observer: None,
+            },
+        )
+        .expect("scan root");
+        assert_eq!(summary.folders_seen, 3);
+        assert_eq!(summary.media_files_seen, 3);
+        assert_eq!(summary.skipped_files, 1);
+
+        let root = database
+            .get_root(root_id)
+            .expect("get root")
+            .expect("root exists");
+        assert!(root.last_scan_at.is_some());
+
+        let page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert_eq!(page.len(), 3);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn scan_root_places_nested_files_under_nested_folder_ids() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(temp_root.join("photos").join("raw")).expect("create raw dir");
+        fs::write(
+            temp_root.join("photos").join("raw").join("scan.png"),
+            b"fake png",
+        )
+        .expect("write png");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "nested-folder-scan-test");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("scan root");
+
+        let root = database
+            .get_root(root_id)
+            .expect("get root")
+            .expect("root exists");
+        let root_folder_id = root.root_folder_id.expect("root folder id");
+        let photos_folder = only_child_named(&database, root_folder_id, "photos");
+        let raw_folder = only_child_named(&database, photos_folder.id, "raw");
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(raw_folder.id),
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].name, "scan.png");
+        assert_eq!(media[0].folder_id, raw_folder.id);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn repeated_scan_root_does_not_duplicate_folder_file_or_media_rows() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(temp_root.join("photos").join("raw")).expect("create raw dir");
+        fs::write(temp_root.join("clip.mp4"), b"fake mp4").expect("write mp4");
+        fs::write(
+            temp_root.join("photos").join("raw").join("scan.png"),
+            b"fake png",
+        )
+        .expect("write png");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "repeat-scan-test");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("first scan");
+        scan_root(&mut database, &root).expect("second scan");
+
+        let root = database
+            .get_root(root_id)
+            .expect("get root")
+            .expect("root exists");
+        let root_folder_id = root.root_folder_id.expect("root folder id");
+        let root_children = database
+            .list_folder_children(root_folder_id)
+            .expect("list root children");
+        assert_eq!(root_children.len(), 1);
+        let raw_children = database
+            .list_folder_children(root_children[0].id)
+            .expect("list photos children");
+        assert_eq!(raw_children.len(), 1);
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert_eq!(media.len(), 2);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn folder_boundaries_do_not_flush_pending_files_before_batch_threshold() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(temp_root.join("after-file")).expect("create after-file dir");
+        fs::create_dir_all(temp_root.join("after-file-2")).expect("create after-file-2 dir");
+        fs::write(temp_root.join("a.mp4"), b"fake mp4").expect("write first video");
+        fs::write(temp_root.join("b.mp4"), b"fake mp4").expect("write second video");
+        let observed = Rc::new(RefCell::new(Vec::new()));
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "batch-boundary-scan-test");
+        let root = test_root(&database, root_id);
+
+        let observed_batches = Rc::clone(&observed);
+        scan_root_with_options(
+            &mut database,
+            &root,
+            ScanOptions {
+                write_batch_size: 10,
+                progress_callback: None,
+                batch_observer: Some(Rc::new(move |stats| {
+                    observed_batches.borrow_mut().push(stats);
+                })),
+            },
+        )
+        .expect("scan root");
+
+        let file_commit_sizes: Vec<usize> = observed
+            .borrow()
+            .iter()
+            .filter_map(|stats| (stats.files > 0).then_some(stats.files))
+            .collect();
+        assert_eq!(file_commit_sizes, vec![2]);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    fn add_test_root(database: &Database, temp_root: &Path, display_name: &str) -> i64 {
+        database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().to_string(),
+                display_name: display_name.to_string(),
+            })
+            .expect("add root")
+    }
+
+    fn test_root(database: &Database, root_id: i64) -> RootRecord {
+        database
+            .list_roots()
+            .expect("list roots")
+            .into_iter()
+            .find(|item| item.id == root_id)
+            .expect("find root")
+    }
+
+    fn only_child_named(
+        database: &Database,
+        folder_id: i64,
+        name: &str,
+    ) -> crate::db::FolderRecord {
+        let children = database
+            .list_folder_children(folder_id)
+            .expect("list folder children");
+        children
+            .into_iter()
+            .find(|folder| folder.name == name)
+            .unwrap_or_else(|| panic!("missing child folder {name} under {folder_id}"))
     }
 
     fn unique_temp_dir() -> PathBuf {

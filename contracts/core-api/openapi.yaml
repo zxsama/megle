@@ -303,7 +303,23 @@ components:
           minimum: 1
     TaskRecord:
       type: object
-      required: [id, kind, priority, status, rootId, fileId, createdAt, updatedAt, error]
+      required:
+        [
+          id,
+          kind,
+          priority,
+          status,
+          rootId,
+          fileId,
+          createdAt,
+          updatedAt,
+          itemsSeen,
+          itemsTotal,
+          foldersSeen,
+          mediaFilesSeen,
+          skippedFiles,
+          error
+        ]
       properties:
         id:
           type: integer
@@ -324,6 +340,22 @@ components:
           type: integer
         updatedAt:
           type: integer
+        itemsSeen:
+          type: integer
+          minimum: 0
+        itemsTotal:
+          type: integer
+          nullable: true
+          minimum: 0
+        foldersSeen:
+          type: integer
+          minimum: 0
+        mediaFilesSeen:
+          type: integer
+          minimum: 0
+        skippedFiles:
+          type: integer
+          minimum: 0
         error:
           type: string
           nullable: true

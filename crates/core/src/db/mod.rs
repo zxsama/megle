@@ -59,6 +59,22 @@ pub struct FileUpsert {
     pub file_key: Option<String>,
 }
 
+pub struct ScanWriteBatch {
+    pub folders: Vec<FolderUpsert>,
+    pub files: Vec<ScanFileUpsert>,
+}
+
+pub struct ScanFileUpsert {
+    pub file: FileUpsert,
+    pub media_kind: String,
+}
+
+#[derive(Debug)]
+pub struct ScanWriteBatchResult {
+    pub folder_ids: Vec<i64>,
+    pub file_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderRecord {
@@ -99,7 +115,21 @@ pub struct TaskRecord {
     pub file_id: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub items_seen: i64,
+    pub items_total: Option<i64>,
+    pub folders_seen: i64,
+    pub media_files_seen: i64,
+    pub skipped_files: i64,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskScanProgress {
+    pub items_seen: i64,
+    pub items_total: Option<i64>,
+    pub folders_seen: i64,
+    pub media_files_seen: i64,
+    pub skipped_files: i64,
 }
 
 impl Database {
@@ -129,7 +159,20 @@ impl Database {
     pub fn apply_migrations(&self) -> anyhow::Result<()> {
         self.connection
             .execute_batch(migrations::INITIAL_MIGRATION)?;
+        if !self.migration_applied(2)? {
+            self.connection
+                .execute_batch(migrations::TASK_PROGRESS_MIGRATION)?;
+        }
         Ok(())
+    }
+
+    fn migration_applied(&self, version: i64) -> anyhow::Result<bool> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+            [version],
+            |row| row.get(0),
+        )?;
+        Ok(count != 0)
     }
 
     pub fn list_roots(&self) -> anyhow::Result<Vec<RootRecord>> {
@@ -208,10 +251,41 @@ impl Database {
         Ok(self.connection.last_insert_rowid())
     }
 
+    pub fn reset_running_root_scan_tasks_for_recovery(&self) -> anyhow::Result<usize> {
+        let updated = self.connection.execute(
+            r#"
+            UPDATE tasks
+            SET status = 'pending', updated_at = ?1, error = NULL
+            WHERE kind = 'root_scan' AND status = 'running'
+            "#,
+            [unix_timestamp()],
+        )?;
+        Ok(updated)
+    }
+
+    pub fn list_pending_root_scan_task_ids(&self) -> anyhow::Result<Vec<i64>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id
+            FROM tasks
+            WHERE kind = 'root_scan' AND status = 'pending'
+            ORDER BY priority DESC, created_at ASC, id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+
+        let mut task_ids = Vec::new();
+        for row in rows {
+            task_ids.push(row?);
+        }
+        Ok(task_ids)
+    }
+
     pub fn list_tasks(&self) -> anyhow::Result<Vec<TaskRecord>> {
         let mut statement = self.connection.prepare(
             r#"
-            SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at, error
+            SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at,
+                   items_seen, items_total, folders_seen, media_files_seen, skipped_files, error
             FROM tasks
             ORDER BY id ASC
             "#,
@@ -228,7 +302,8 @@ impl Database {
     pub fn get_task(&self, task_id: i64) -> anyhow::Result<Option<TaskRecord>> {
         let mut statement = self.connection.prepare(
             r#"
-            SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at, error
+            SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at,
+                   items_seen, items_total, folders_seen, media_files_seen, skipped_files, error
             FROM tasks
             WHERE id = ?1
             "#,
@@ -263,6 +338,36 @@ impl Database {
         if updated == 0 {
             return self.ensure_one_task_updated(task_id, updated, "pending or running");
         }
+        Ok(())
+    }
+
+    pub fn update_task_scan_progress(
+        &self,
+        task_id: i64,
+        progress: TaskScanProgress,
+    ) -> anyhow::Result<()> {
+        let updated = self.connection.execute(
+            r#"
+            UPDATE tasks
+            SET updated_at = ?1,
+                items_seen = ?2,
+                items_total = ?3,
+                folders_seen = ?4,
+                media_files_seen = ?5,
+                skipped_files = ?6
+            WHERE id = ?7 AND status = 'running'
+            "#,
+            (
+                unix_timestamp(),
+                progress.items_seen,
+                progress.items_total,
+                progress.folders_seen,
+                progress.media_files_seen,
+                progress.skipped_files,
+                task_id,
+            ),
+        )?;
+        self.ensure_one_task_updated(task_id, updated, "running")?;
         Ok(())
     }
 
@@ -363,6 +468,7 @@ impl Database {
         Ok(exists != 0)
     }
 
+    #[allow(dead_code)]
     pub fn upsert_folder(&self, folder: FolderUpsert) -> anyhow::Result<i64> {
         if let Some(existing_id) =
             self.find_folder_id(folder.root_id, folder.parent_id, &folder.name)?
@@ -394,6 +500,7 @@ impl Database {
         Ok(self.connection.last_insert_rowid())
     }
 
+    #[allow(dead_code)]
     pub fn upsert_file(&self, file: FileUpsert) -> anyhow::Result<i64> {
         self.connection.execute(
             r#"
@@ -426,6 +533,7 @@ impl Database {
         Ok(id)
     }
 
+    #[allow(dead_code)]
     pub fn upsert_media_kind(&self, file_id: i64, kind: &str) -> anyhow::Result<()> {
         self.connection.execute(
             r#"
@@ -439,6 +547,31 @@ impl Database {
         Ok(())
     }
 
+    pub fn commit_scan_batch(
+        &mut self,
+        batch: ScanWriteBatch,
+    ) -> anyhow::Result<ScanWriteBatchResult> {
+        let transaction = self.connection.transaction()?;
+        let mut folder_ids = Vec::with_capacity(batch.folders.len());
+        let mut file_ids = Vec::with_capacity(batch.files.len());
+
+        for folder in batch.folders {
+            folder_ids.push(upsert_folder_in_transaction(&transaction, folder)?);
+        }
+
+        for file in batch.files {
+            let file_id = upsert_file_in_transaction(&transaction, file.file)?;
+            upsert_media_kind_in_transaction(&transaction, file_id, &file.media_kind)?;
+            file_ids.push(file_id);
+        }
+
+        transaction.commit()?;
+        Ok(ScanWriteBatchResult {
+            folder_ids,
+            file_ids,
+        })
+    }
+
     pub fn mark_root_scanned(&self, root_id: i64) -> anyhow::Result<()> {
         self.connection.execute(
             "UPDATE roots SET last_scan_at = ?1 WHERE id = ?2",
@@ -447,6 +580,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn find_folder_id(
         &self,
         root_id: i64,
@@ -494,6 +628,119 @@ impl Database {
     }
 }
 
+fn upsert_folder_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    folder: FolderUpsert,
+) -> anyhow::Result<i64> {
+    if let Some(existing_id) =
+        find_folder_id_in_transaction(transaction, folder.root_id, folder.parent_id, &folder.name)?
+    {
+        transaction.execute(
+            r#"
+            UPDATE folders
+            SET path_hash = ?1, mtime = ?2, status = 'active'
+            WHERE id = ?3
+            "#,
+            (&folder.path_hash, folder.mtime, existing_id),
+        )?;
+        return Ok(existing_id);
+    }
+
+    transaction.execute(
+        r#"
+        INSERT INTO folders(root_id, parent_id, name, path_hash, mtime, status)
+        VALUES (?1, ?2, ?3, ?4, ?5, 'active')
+        "#,
+        (
+            folder.root_id,
+            folder.parent_id,
+            &folder.name,
+            &folder.path_hash,
+            folder.mtime,
+        ),
+    )?;
+    Ok(transaction.last_insert_rowid())
+}
+
+fn upsert_file_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    file: FileUpsert,
+) -> anyhow::Result<i64> {
+    transaction.execute(
+        r#"
+        INSERT INTO files(root_id, folder_id, name, ext, size, mtime, ctime, file_key, status)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active')
+        ON CONFLICT(folder_id, name) DO UPDATE SET
+          ext = excluded.ext,
+          size = excluded.size,
+          mtime = excluded.mtime,
+          ctime = excluded.ctime,
+          file_key = excluded.file_key,
+          status = 'active'
+        "#,
+        (
+            file.root_id,
+            file.folder_id,
+            &file.name,
+            &file.ext,
+            file.size,
+            file.mtime,
+            file.ctime,
+            &file.file_key,
+        ),
+    )?;
+    let id = transaction.query_row(
+        "SELECT id FROM files WHERE folder_id = ?1 AND name = ?2",
+        (file.folder_id, &file.name),
+        |row| row.get(0),
+    )?;
+    Ok(id)
+}
+
+fn upsert_media_kind_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+    kind: &str,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        r#"
+        INSERT INTO media(file_id, kind, metadata_status)
+        VALUES (?1, ?2, 'pending')
+        ON CONFLICT(file_id) DO UPDATE SET
+          kind = excluded.kind
+        "#,
+        (file_id, kind),
+    )?;
+    Ok(())
+}
+
+fn find_folder_id_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    root_id: i64,
+    parent_id: Option<i64>,
+    name: &str,
+) -> anyhow::Result<Option<i64>> {
+    if let Some(parent_id) = parent_id {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT id FROM folders
+            WHERE root_id = ?1 AND parent_id = ?2 AND name = ?3
+            "#,
+        )?;
+        let mut rows = statement.query((root_id, parent_id, name))?;
+        Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+    } else {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT id FROM folders
+            WHERE root_id = ?1 AND parent_id IS NULL AND name = ?2
+            "#,
+        )?;
+        let mut rows = statement.query((root_id, name))?;
+        Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+    }
+}
+
 fn root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RootRecord> {
     Ok(RootRecord {
         id: row.get(0)?,
@@ -535,7 +782,12 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         file_id: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
-        error: row.get(8)?,
+        items_seen: row.get(8)?,
+        items_total: row.get(9)?,
+        folders_seen: row.get(10)?,
+        media_files_seen: row.get(11)?,
+        skipped_files: row.get(12)?,
+        error: row.get(13)?,
     })
 }
 
@@ -555,6 +807,65 @@ mod tests {
         database.apply_migrations().expect("apply migrations");
         database
     }
+
+    const OLD_INITIAL_MIGRATION_WITHOUT_TASK_PROGRESS: &str = r#"
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS roots (
+          id INTEGER PRIMARY KEY,
+          path TEXT NOT NULL UNIQUE,
+          display_name TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL,
+          last_scan_at INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS folders (
+          id INTEGER PRIMARY KEY,
+          root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+          parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          path_hash TEXT NOT NULL,
+          mtime INTEGER,
+          status TEXT NOT NULL DEFAULT 'active',
+          UNIQUE(root_id, parent_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS files (
+          id INTEGER PRIMARY KEY,
+          root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+          folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          ext TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          mtime INTEGER NOT NULL,
+          ctime INTEGER,
+          file_key TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          UNIQUE(folder_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS tasks (
+          id INTEGER PRIMARY KEY,
+          kind TEXT NOT NULL,
+          priority INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          root_id INTEGER REFERENCES roots(id) ON DELETE SET NULL,
+          file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          error TEXT
+        );
+
+        INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+        VALUES (1, 'initial', unixepoch());
+    "#;
 
     #[test]
     fn add_root_lists_and_reenables_existing_root() {
@@ -579,6 +890,57 @@ mod tests {
         assert_eq!(roots[0].path, "D:/Pictures");
         assert_eq!(roots[0].display_name, "Photos");
         assert!(roots[0].enabled);
+    }
+
+    #[test]
+    fn migrations_upgrade_old_initial_tasks_table_with_progress_columns() {
+        let database = Database::open_in_memory().expect("open in-memory database");
+        database
+            .connection
+            .execute_batch(OLD_INITIAL_MIGRATION_WITHOUT_TASK_PROGRESS)
+            .expect("apply old initial migration");
+
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root on old schema");
+        database
+            .create_root_scan_task(root_id)
+            .expect("create task on old schema");
+
+        database
+            .apply_migrations()
+            .expect("apply current migrations");
+        let columns: Vec<String> = {
+            let mut statement = database
+                .connection
+                .prepare("PRAGMA table_info(tasks)")
+                .expect("inspect tasks table");
+            statement
+                .query_map([], |row| row.get(1))
+                .expect("query columns")
+                .collect::<rusqlite::Result<Vec<String>>>()
+                .expect("collect columns")
+        };
+        for column in [
+            "items_seen",
+            "items_total",
+            "folders_seen",
+            "media_files_seen",
+            "skipped_files",
+        ] {
+            assert!(columns.iter().any(|candidate| candidate == column));
+        }
+
+        let tasks = database.list_tasks().expect("list upgraded tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].items_seen, 0);
+        assert_eq!(tasks[0].items_total, None);
+        assert_eq!(tasks[0].folders_seen, 0);
+        assert_eq!(tasks[0].media_files_seen, 0);
+        assert_eq!(tasks[0].skipped_files, 0);
     }
 
     #[test]
@@ -671,6 +1033,178 @@ mod tests {
     }
 
     #[test]
+    fn commit_scan_batch_commits_folders_files_and_media_and_upserts_without_duplicates() {
+        let mut database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+
+        let first_result = database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: None,
+                    name: String::new(),
+                    path_hash: "root-hash".to_string(),
+                    mtime: Some(10),
+                }],
+                files: Vec::new(),
+            })
+            .expect("commit root folder");
+
+        let root_folder_id = first_result.folder_ids[0];
+        let photos_result = database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: Some(root_folder_id),
+                    name: "photos".to_string(),
+                    path_hash: "photos-hash".to_string(),
+                    mtime: Some(20),
+                }],
+                files: Vec::new(),
+            })
+            .expect("commit child folder");
+        let photos_folder_id = photos_result.folder_ids[0];
+        let second_result = database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: Vec::new(),
+                files: vec![
+                    ScanFileUpsert {
+                        file: FileUpsert {
+                            root_id,
+                            folder_id: root_folder_id,
+                            name: "clip.mp4".to_string(),
+                            ext: ".mp4".to_string(),
+                            size: 100,
+                            mtime: 30,
+                            ctime: None,
+                            file_key: None,
+                        },
+                        media_kind: "video".to_string(),
+                    },
+                    ScanFileUpsert {
+                        file: FileUpsert {
+                            root_id,
+                            folder_id: photos_folder_id,
+                            name: "image.jpg".to_string(),
+                            ext: ".jpg".to_string(),
+                            size: 200,
+                            mtime: 40,
+                            ctime: None,
+                            file_key: None,
+                        },
+                        media_kind: "image".to_string(),
+                    },
+                ],
+            })
+            .expect("commit files");
+        assert_eq!(second_result.file_ids.len(), 2);
+
+        database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: Some(root_folder_id),
+                    name: "photos".to_string(),
+                    path_hash: "photos-hash-updated".to_string(),
+                    mtime: Some(50),
+                }],
+                files: vec![ScanFileUpsert {
+                    file: FileUpsert {
+                        root_id,
+                        folder_id: photos_folder_id,
+                        name: "image.jpg".to_string(),
+                        ext: ".jpg".to_string(),
+                        size: 300,
+                        mtime: 60,
+                        ctime: None,
+                        file_key: None,
+                    },
+                    media_kind: "image".to_string(),
+                }],
+            })
+            .expect("upsert same rows");
+
+        let folder_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM folders", [], |row| row.get(0))
+            .expect("count folders");
+        let file_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .expect("count files");
+        let media_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM media", [], |row| row.get(0))
+            .expect("count media");
+        let updated_size: i64 = database
+            .connection
+            .query_row(
+                "SELECT size FROM files WHERE folder_id = ?1 AND name = 'image.jpg'",
+                [photos_folder_id],
+                |row| row.get(0),
+            )
+            .expect("updated file size");
+
+        assert_eq!(folder_count, 2);
+        assert_eq!(file_count, 2);
+        assert_eq!(media_count, 2);
+        assert_eq!(updated_size, 300);
+    }
+
+    #[test]
+    fn commit_scan_batch_rolls_back_when_file_folder_is_invalid() {
+        let mut database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+
+        let error = database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: None,
+                    name: String::new(),
+                    path_hash: "root-hash".to_string(),
+                    mtime: Some(10),
+                }],
+                files: vec![ScanFileUpsert {
+                    file: FileUpsert {
+                        root_id,
+                        folder_id: 123456,
+                        name: "orphan.jpg".to_string(),
+                        ext: ".jpg".to_string(),
+                        size: 100,
+                        mtime: 20,
+                        ctime: None,
+                        file_key: None,
+                    },
+                    media_kind: "image".to_string(),
+                }],
+            })
+            .expect_err("invalid folder id should rollback");
+
+        assert!(error.to_string().contains("FOREIGN KEY"));
+        let folder_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM folders", [], |row| row.get(0))
+            .expect("count folders");
+        let file_count: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .expect("count files");
+        assert_eq!(folder_count, 0);
+        assert_eq!(file_count, 0);
+    }
+
+    #[test]
     fn task_lifecycle_records_pending_running_success_and_failure() {
         let database = migrated_database();
         let root_id = database
@@ -726,6 +1260,72 @@ mod tests {
             .expect("task exists");
         assert_eq!(task.status, "failed");
         assert_eq!(task.error.as_deref(), Some("scan failed"));
+    }
+
+    #[test]
+    fn task_scan_progress_defaults_updates_and_rejects_finished_tasks() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create task");
+
+        let pending_task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(pending_task.items_seen, 0);
+        assert_eq!(pending_task.items_total, None);
+        assert_eq!(pending_task.folders_seen, 0);
+        assert_eq!(pending_task.media_files_seen, 0);
+        assert_eq!(pending_task.skipped_files, 0);
+
+        database.mark_task_running(task_id).expect("mark running");
+        database
+            .update_task_scan_progress(
+                task_id,
+                TaskScanProgress {
+                    items_seen: 6,
+                    items_total: None,
+                    folders_seen: 2,
+                    media_files_seen: 3,
+                    skipped_files: 1,
+                },
+            )
+            .expect("update progress");
+
+        let running_task = database
+            .get_task(task_id)
+            .expect("get running task")
+            .expect("running task exists");
+        assert_eq!(running_task.items_seen, 6);
+        assert_eq!(running_task.items_total, None);
+        assert_eq!(running_task.folders_seen, 2);
+        assert_eq!(running_task.media_files_seen, 3);
+        assert_eq!(running_task.skipped_files, 1);
+
+        database
+            .mark_task_succeeded(task_id)
+            .expect("mark succeeded");
+        let late_update = database.update_task_scan_progress(
+            task_id,
+            TaskScanProgress {
+                items_seen: 7,
+                items_total: None,
+                folders_seen: 2,
+                media_files_seen: 4,
+                skipped_files: 1,
+            },
+        );
+        assert!(late_update
+            .expect_err("finished task should reject progress updates")
+            .to_string()
+            .contains("running"));
     }
 
     #[test]
@@ -794,5 +1394,103 @@ mod tests {
             .mark_task_failed(failed_task_id, "second failure")
             .expect_err("failed task should not be marked failed again");
         assert!(failed_error.to_string().contains("not pending or running"));
+    }
+
+    #[test]
+    fn recovery_resets_running_root_scans_and_lists_pending_root_scans_in_scheduler_order() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+
+        let low_priority_pending = database
+            .create_root_scan_task(root_id)
+            .expect("create low priority pending");
+        let stale_running = database
+            .create_root_scan_task(root_id)
+            .expect("create stale running");
+        let failed = database
+            .create_root_scan_task(root_id)
+            .expect("create failed");
+        let succeeded = database
+            .create_root_scan_task(root_id)
+            .expect("create succeeded");
+        let high_priority_pending = database
+            .create_root_scan_task(root_id)
+            .expect("create high priority pending");
+
+        database
+            .connection
+            .execute(
+                r#"
+                INSERT INTO tasks(kind, priority, status, root_id, file_id, created_at, updated_at, error)
+                VALUES ('thumbnail', 100, 'pending', NULL, NULL, 1, 1, NULL)
+                "#,
+                [],
+            )
+            .expect("insert non-root pending task");
+
+        database
+            .mark_task_running(stale_running)
+            .expect("mark stale running");
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET error = 'interrupted' WHERE id = ?1",
+                [stale_running],
+            )
+            .expect("set stale running error");
+        database
+            .mark_task_failed(failed, "scan failed")
+            .expect("mark failed");
+        database
+            .mark_task_running(succeeded)
+            .expect("mark succeeded running");
+        database
+            .mark_task_succeeded(succeeded)
+            .expect("mark succeeded");
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET priority = 10, created_at = 0 WHERE id = ?1",
+                [high_priority_pending],
+            )
+            .expect("raise pending priority");
+
+        let reset_count = database
+            .reset_running_root_scan_tasks_for_recovery()
+            .expect("reset running root scan tasks");
+        assert_eq!(reset_count, 1);
+
+        let stale_task = database
+            .get_task(stale_running)
+            .expect("get stale task")
+            .expect("stale task exists");
+        assert_eq!(stale_task.status, "pending");
+        assert_eq!(stale_task.error, None);
+
+        let failed_task = database
+            .get_task(failed)
+            .expect("get failed task")
+            .expect("failed task exists");
+        assert_eq!(failed_task.status, "failed");
+        assert_eq!(failed_task.error.as_deref(), Some("scan failed"));
+
+        let succeeded_task = database
+            .get_task(succeeded)
+            .expect("get succeeded task")
+            .expect("succeeded task exists");
+        assert_eq!(succeeded_task.status, "succeeded");
+
+        let pending_ids = database
+            .list_pending_root_scan_task_ids()
+            .expect("list pending root scan task ids");
+        assert_eq!(
+            pending_ids,
+            vec![high_priority_pending, low_priority_pending, stale_running]
+        );
     }
 }

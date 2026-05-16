@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FolderRecord, MediaRecord, RootRecord, ScanSummary } from "@megle/core-client";
+import type {
+  FolderRecord,
+  MediaRecord,
+  RootRecord,
+  ScanSummary,
+  TaskRecord
+} from "@megle/core-client";
 import { createCoreClient } from "./client";
 
 export interface LibraryState {
@@ -11,7 +17,9 @@ export interface LibraryState {
   selectedMediaId: number | null;
   selectedMedia: MediaRecord | null;
   loading: boolean;
-  scanning: boolean;
+  addingRoot: boolean;
+  scanActive: boolean;
+  tasks: TaskRecord[];
   error: string | null;
   lastScan: ScanSummary | null;
   setSelectedRootId: (rootId: number) => void;
@@ -30,12 +38,15 @@ export function useLibraryData(): LibraryState {
   const [selectedFolderId, selectFolder] = useState<number | null>(null);
   const [selectedMediaId, selectMedia] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [scanning, setScanning] = useState(false);
+  const [addingRoot, setAddingRoot] = useState(false);
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [taskPollFailures, setTaskPollFailures] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<ScanSummary | null>(null);
 
   const selectedRoot = roots.find((root) => root.id === selectedRootId) ?? null;
   const selectedMedia = media.find((item) => item.id === selectedMediaId) ?? null;
+  const scanActive = tasks.some((task) => task.status === "pending" || task.status === "running");
 
   const loadRoots = useCallback(async () => {
     const response = await client.listRoots();
@@ -47,11 +58,19 @@ export function useLibraryData(): LibraryState {
     return { roots: response.items, selectedRoot: nextRoot ?? null };
   }, [client, selectedRootId]);
 
+  const loadTasks = useCallback(async () => {
+    const response = await client.listTasks();
+    setTasks(response.items);
+    setTaskPollFailures(0);
+    return response.items;
+  }, [client]);
+
   const loadLibrary = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const result = await loadRoots();
+      await loadTasks();
       const root = roots.find((item) => item.id === selectedRootId) ?? result.selectedRoot;
       const folderId = selectedFolderId ?? root?.rootFolderId ?? null;
 
@@ -84,11 +103,33 @@ export function useLibraryData(): LibraryState {
     } finally {
       setLoading(false);
     }
-  }, [client, loadRoots, roots, selectedFolderId, selectedRootId]);
+  }, [client, loadRoots, loadTasks, roots, selectedFolderId, selectedRootId]);
 
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary]);
+
+  useEffect(() => {
+    if (!scanActive || taskPollFailures >= 3) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadTasks()
+        .then((nextTasks) => {
+          if (
+            !nextTasks.some((task) => task.status === "pending" || task.status === "running")
+          ) {
+            void loadLibrary();
+          }
+        })
+        .catch((cause) => {
+          setTaskPollFailures((failures) => failures + 1);
+          setError(errorMessage(cause));
+        });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [loadLibrary, loadTasks, scanActive, taskPollFailures]);
 
   const refresh = useCallback(async () => {
     await loadLibrary();
@@ -99,7 +140,7 @@ export function useLibraryData(): LibraryState {
       const trimmedPath = path.trim();
       if (!trimmedPath) return;
 
-      setScanning(true);
+      setAddingRoot(true);
       setError(null);
       try {
         const response = await client.addRoot(trimmedPath);
@@ -108,14 +149,15 @@ export function useLibraryData(): LibraryState {
           selectRoot(response.rootId);
           selectFolder(null);
         }
+        await loadTasks();
         await loadLibrary();
       } catch (cause) {
         setError(errorMessage(cause));
       } finally {
-        setScanning(false);
+        setAddingRoot(false);
       }
     },
-    [client, loadLibrary]
+    [client, loadLibrary, loadTasks]
   );
 
   return {
@@ -127,7 +169,9 @@ export function useLibraryData(): LibraryState {
     selectedMediaId,
     selectedMedia,
     loading,
-    scanning,
+    addingRoot,
+    scanActive,
+    tasks,
     error,
     lastScan,
     setSelectedRootId: (rootId: number) => {

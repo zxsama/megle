@@ -598,6 +598,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_startup_processes_persisted_pending_root_scan_task() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("image.jpg"), b"fake jpg").expect("write image");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Recovered Pending Root".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        drop(database);
+
+        let database = Database::open(&db_path).expect("reopen database");
+        let worker_database = Database::open(&db_path).expect("reopen worker database");
+        let state = AppState::new_with_worker(database, worker_database);
+        let app = router(state);
+
+        wait_for_task_status(&app, task_id, "succeeded").await;
+        wait_for_media_count(&app, root_id, 1).await;
+
+        drop(app);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn root_scan_task_lists_final_progress_counters_after_worker_completes() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(temp_root.join("photos")).expect("create photos dir");
+        fs::write(temp_root.join("photos").join("image.jpg"), b"fake jpg").expect("write image");
+        fs::write(temp_root.join("clip.mp4"), b"fake mp4").expect("write video");
+        fs::write(temp_root.join("notes.txt"), b"not media").expect("write skipped file");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let (database, worker_database) = test_database_pair(db_dir.join("megle.sqlite"));
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Progress Root".to_string(),
+            })
+            .expect("add root");
+        let state = AppState::new_with_worker(database, worker_database);
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "rootId": root_id }).to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("enqueue scan");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let task_id = response_json(response).await["taskId"]
+            .as_i64()
+            .expect("task id");
+
+        let task = wait_for_task_status(&app, task_id, "succeeded").await;
+        assert_eq!(task["itemsSeen"], 4);
+        assert!(task["itemsTotal"].is_null());
+        assert_eq!(task["foldersSeen"], 2);
+        assert_eq!(task["mediaFilesSeen"], 2);
+        assert_eq!(task["skippedFiles"], 1);
+
+        drop(app);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn worker_startup_resets_and_processes_stale_running_root_scan_task() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("image.jpg"), b"fake jpg").expect("write image");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Recovered Running Root".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        database
+            .mark_task_running(task_id)
+            .expect("mark task running");
+        drop(database);
+
+        let database = Database::open(&db_path).expect("reopen database");
+        let worker_database = Database::open(&db_path).expect("reopen worker database");
+        let state = AppState::new_with_worker(database, worker_database);
+        let app = router(state);
+
+        wait_for_task_status(&app, task_id, "succeeded").await;
+        wait_for_media_count(&app, root_id, 1).await;
+
+        drop(app);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
     async fn tasks_scan_returns_not_found_for_missing_root() {
         let app = router(AppState::new(test_database()));
 
@@ -788,7 +914,11 @@ mod tests {
         serde_json::from_slice(&bytes).expect("parse json response")
     }
 
-    async fn wait_for_task_status(app: &axum::Router, task_id: i64, expected_status: &str) {
+    async fn wait_for_task_status(
+        app: &axum::Router,
+        task_id: i64,
+        expected_status: &str,
+    ) -> serde_json::Value {
         for _ in 0..50 {
             let response = app
                 .clone()
@@ -803,19 +933,46 @@ mod tests {
                 .expect("list tasks");
             assert_eq!(response.status(), StatusCode::OK);
             let body = response_json(response).await;
-            let status = body["items"]
+            let task = body["items"]
                 .as_array()
                 .expect("task items")
                 .iter()
                 .find(|task| task["id"] == task_id)
+                .cloned();
+            let status = task
+                .as_ref()
                 .and_then(|task| task["status"].as_str())
                 .map(str::to_string);
             if status.as_deref() == Some(expected_status) {
-                return;
+                return task.expect("task exists");
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("task {task_id} did not reach status {expected_status}");
+    }
+
+    async fn wait_for_media_count(app: &axum::Router, root_id: i64, expected_count: usize) {
+        for _ in 0..50 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(format!("/api/media?rootId={root_id}&sort=name_asc"))
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("list media");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            let count = body["items"].as_array().expect("media items").len();
+            if count == expected_count {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("root {root_id} did not reach media count {expected_count}");
     }
 
     fn test_database() -> Database {

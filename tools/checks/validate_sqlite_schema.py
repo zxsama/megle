@@ -5,7 +5,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = ROOT / "crates" / "core" / "migrations" / "0001_initial.sql"
+MIGRATIONS = [
+    ROOT / "crates" / "core" / "migrations" / "0001_initial.sql",
+    ROOT / "crates" / "core" / "migrations" / "0002_task_progress.sql",
+]
+
+TASK_PROGRESS_COLUMNS = {
+    "items_seen",
+    "items_total",
+    "folders_seen",
+    "media_files_seen",
+    "skipped_files",
+}
 
 REQUIRED_TABLES = {
     "schema_migrations",
@@ -45,14 +56,16 @@ def fail(message: str) -> None:
 
 
 def main() -> None:
-    if not MIGRATION.exists():
-        fail(f"missing migration: {MIGRATION}")
+    for migration in MIGRATIONS:
+        if not migration.exists():
+            fail(f"missing migration: {migration}")
 
     with tempfile.TemporaryDirectory(prefix="megle_schema_") as temp_dir:
         db_path = Path(temp_dir) / "schema.sqlite"
         conn = sqlite3.connect(db_path)
         try:
-            conn.executescript(MIGRATION.read_text(encoding="utf-8"))
+            for migration in MIGRATIONS:
+                conn.executescript(migration.read_text(encoding="utf-8"))
             conn.execute("PRAGMA foreign_keys = ON")
 
             tables = {
@@ -79,6 +92,18 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 1 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 2"
+            ).fetchone()
+            if version is None:
+                fail("migration version 2 was not recorded")
+
+            task_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            missing_task_columns = TASK_PROGRESS_COLUMNS - task_columns
+            if missing_task_columns:
+                fail(f"missing task progress columns: {sorted(missing_task_columns)}")
 
             conn.execute(
                 """

@@ -108,6 +108,9 @@ if (!apiModRs.includes("router_with_config")) {
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0001_initial.sql")')) {
   fail("db migration include path changed or missing");
 }
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0002_task_progress.sql")')) {
+  fail("db task progress migration include path changed or missing");
+}
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");
 }
@@ -253,6 +256,11 @@ for (const value of [
   "TaskRecord",
   "TaskListResponse",
   "ScanTaskRequest",
+  "itemsSeen",
+  "itemsTotal",
+  "foldersSeen",
+  "mediaFilesSeen",
+  "skippedFiles",
   "$ref: \"#/components/schemas/ScanTaskRequest\"",
   "$ref: \"#/components/schemas/TaskListResponse\""
 ]) {
@@ -285,6 +293,7 @@ if (!routesRs.includes("mark_task_failed(task_id, &error.to_string())")) {
 for (const value of [
   "WHERE id = ?2 AND status = 'pending'",
   "WHERE id = ?2 AND status = 'running'",
+  "update_task_scan_progress",
   "WHERE id = ?3 AND status IN ('pending', 'running')",
   'ensure_one_task_updated(task_id, updated, "pending or running")',
   "ensure_one_task_updated"

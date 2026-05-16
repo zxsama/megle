@@ -169,7 +169,9 @@ for (const name of [
   "FolderRecord",
   "FolderListResponse",
   "MediaRecord",
-  "MediaListResponse"
+  "MediaListResponse",
+  "TaskRecord",
+  "TaskListResponse"
 ]) {
   schema(name);
 }
@@ -179,6 +181,7 @@ assertInterfaceMatchesSchema("AcceptedRootResponse");
 assertInterfaceMatchesSchema("RootRecord");
 assertInterfaceMatchesSchema("FolderRecord");
 assertInterfaceMatchesSchema("MediaRecord");
+assertInterfaceMatchesSchema("TaskRecord");
 
 const pageBody = interfaceBody("Page");
 for (const line of ["items: T[];", "nextCursor: string | null;"]) {
@@ -212,10 +215,25 @@ assertOperationParameters("listFolderChildren", ["folderId", "limit", "cursor"])
 assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor", "sort", "kind"]);
 assertOperationParameters("getMedia", ["fileId"]);
 
-for (const method of ["listRoots", "addRoot", "listFolderChildren", "listMedia", "getMedia"]) {
+for (const method of ["listRoots", "addRoot", "listFolderChildren", "listMedia", "getMedia", "listTasks"]) {
   if (!client.includes(`${method}:`)) {
     fail(`client.ts missing operation ${method}`);
   }
+}
+
+const taskBody = interfaceBody("TaskRecord");
+for (const line of [
+  "itemsSeen: number;",
+  "itemsTotal: number | null;",
+  "foldersSeen: number;",
+  "mediaFilesSeen: number;",
+  "skippedFiles: number;"
+]) {
+  requireLine(taskBody, line, "generated-contract.ts TaskRecord");
+}
+
+if (!/listTasks:\s*\(\)\s*=>\s*request<Page<TaskRecord>>\("\/tasks"\)/.test(client)) {
+  fail("client.ts listTasks must request typed task pages");
 }
 
 if (!/listFolderChildren:\s*\(folderId:\s*number,\s*params:\s*ListFolderChildrenParams\s*=\s*{}\)\s*=>\s*request<Page<FolderRecord>>\(`\/folders\/\$\{folderId\}\/children\$\{query\(params\)\}`\)/.test(client)) {

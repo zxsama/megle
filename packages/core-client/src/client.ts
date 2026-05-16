@@ -5,7 +5,8 @@ import type {
   ListMediaParams,
   MediaRecord,
   Page,
-  RootRecord
+  RootRecord,
+  TaskRecord
 } from "./generated-contract";
 
 export interface CoreClientConfig {
@@ -49,6 +50,7 @@ export function createCoreClient(config: CoreClientConfig) {
 
   return {
     listRoots: () => request<Page<RootRecord>>("/roots"),
+    listTasks: () => request<Page<TaskRecord>>("/tasks"),
     addRoot: (path: string, displayName?: string) =>
       request<AcceptedRootResponse>("/roots", {
         method: "POST",

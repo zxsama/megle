@@ -173,6 +173,17 @@ button {
   background: rgba(213, 92, 87, 0.16);
 }
 
+.scan-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.scan-row + .scan-row {
+  margin-top: 5px;
+}
+
 .grid-surface {
   min-width: 0;
   padding: 16px;

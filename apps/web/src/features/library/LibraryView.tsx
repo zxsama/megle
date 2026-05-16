@@ -7,6 +7,11 @@ export function LibraryView() {
   const library = useLibraryData();
   const [rootPath, setRootPath] = useState("");
   const selectedRoot = library.roots.find((root) => root.id === library.selectedRootId) ?? null;
+  const visibleScanTasks = library.tasks
+    .filter((task) => task.kind === "root_scan")
+    .filter((task) => task.status === "pending" || task.status === "running" || task.itemsSeen > 0)
+    .slice(-3)
+    .reverse();
 
   async function submitRoot(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -21,12 +26,12 @@ export function LibraryView() {
         <form className="root-form" onSubmit={submitRoot}>
           <input
             aria-label="Root path"
-            disabled={library.scanning}
+            disabled={library.addingRoot}
             onChange={(event) => setRootPath(event.target.value)}
             placeholder="D:\\Pictures"
             value={rootPath}
           />
-          <button disabled={library.scanning || rootPath.trim().length === 0} type="submit">
+          <button disabled={library.addingRoot || rootPath.trim().length === 0} type="submit">
             Add
           </button>
         </form>
@@ -68,7 +73,19 @@ export function LibraryView() {
           </button>
         </header>
         {library.error ? <div className="error-strip">{library.error}</div> : null}
-        {library.lastScan ? (
+        {visibleScanTasks.length > 0 ? (
+          <div className="scan-strip" aria-label="Scan progress">
+            {visibleScanTasks.map((task) => (
+              <div className="scan-row" key={task.id}>
+                <span>{task.status === "running" ? "Scanning" : task.status}</span>
+                <span>{task.itemsSeen} entries seen</span>
+                <span>{task.foldersSeen} folders</span>
+                <span>{task.mediaFilesSeen} media</span>
+                <span>{task.skippedFiles} skipped</span>
+              </div>
+            ))}
+          </div>
+        ) : library.lastScan ? (
           <div className="scan-strip">
             {library.lastScan.mediaFilesSeen} media, {library.lastScan.foldersSeen} folders
           </div>
