@@ -33,6 +33,9 @@ function walk(directory) {
 }
 
 const useLibraryData = read("apps/web/src/core/useLibraryData.ts");
+const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const librarySidebar = read("apps/web/src/features/library/LibrarySidebar.tsx");
+const desktopAdapterPath = "apps/web/src/core/desktop.ts";
 const packageJson = readJson("package.json");
 const webPackageJson = readJson("apps/web/package.json");
 const coreClientPackagePath = "packages/core-client/package.json";
@@ -69,10 +72,72 @@ if (webPackageJson.dependencies?.["@megle/core-client"] !== "*") {
   fail("apps/web must depend on @megle/core-client through the root workspace");
 }
 
-for (const value of ["listRoots", "listFolderChildren", "listMedia", "addRoot", "listTasks"]) {
+if (!existsSync(path.join(root, desktopAdapterPath))) {
+  fail("web desktop bridge access must be isolated in apps/web/src/core/desktop.ts");
+}
+
+if (!mediaGrid.includes("@tanstack/react-virtual") || !mediaGrid.includes("useVirtualizer")) {
+  fail("MediaGrid must use @tanstack/react-virtual for scalable media layout");
+}
+
+if (/Loading library/.test(mediaGrid)) {
+  fail("MediaGrid tiles must keep stable dimensions without loading text layout shifts");
+}
+if (!mediaGrid.includes("scrollToIndex")) {
+  fail("MediaGrid keyboard navigation must scroll the selected row into view");
+}
+if (!mediaGrid.includes('role="row"')) {
+  fail("MediaGrid role=grid must expose row roles around grid cells");
+}
+
+for (const value of ["listRoots", "listFolderChildren", "listMedia", "addRoot", "listTasks", "enqueueScan"]) {
   if (!useLibraryData.includes(value)) {
     fail(`useLibraryData must call ${value}`);
   }
+}
+if (!/setSelectedFolder:\s*\(folder:\s*FolderRecord\)\s*=>\s*void/.test(useLibraryData)) {
+  fail("useLibraryData must select folders by FolderRecord so rootId and folderId stay in sync");
+}
+if (!/setSelectedFolder\(folder\)/.test(librarySidebar)) {
+  fail("LibrarySidebar must pass the full FolderRecord when selecting folders");
+}
+if (/loadAllPages/.test(useLibraryData)) {
+  fail("useLibraryData must not exhaust all cursor pages into React state");
+}
+for (const value of [
+  "mediaNextCursor",
+  "mediaHasMore",
+  "mediaPageGeneration",
+  "requestGeneration",
+  "loadingMoreMedia",
+  "loadMoreMedia",
+  "folderChildNextCursorByParent",
+  "loadMoreFolderChildren"
+]) {
+  if (!useLibraryData.includes(value)) {
+    fail(`useLibraryData must keep bounded pagination state/action ${value}`);
+  }
+}
+if (!/cursor:\s*cursor\s*\?\?\s*undefined/.test(useLibraryData)) {
+  fail("useLibraryData must request one cursor page at a time");
+}
+if (!/requestGeneration\s*!==\s*mediaPageGeneration\.current/.test(useLibraryData)) {
+  fail("loadMoreMedia must discard stale page responses after media context changes");
+}
+if (!/const loadLibrary = useCallback\(async \(\) => \{\s*const requestGeneration = \+\+mediaPageGeneration\.current;[\s\S]*?await loadRoots/.test(useLibraryData)) {
+  fail("loadLibrary must invalidate media page generation before awaited reload work starts");
+}
+if (!mediaGrid.includes("onRequestMore") || !mediaGrid.includes("hasMore")) {
+  fail("MediaGrid must request incremental media pages near the loaded tail");
+}
+if (!librarySidebar.includes("loadMoreFolderChildren") || !librarySidebar.includes("Load more")) {
+  fail("LibrarySidebar must expose a load-more affordance for paginated folder children");
+}
+if (!/rescanRoot:\s*\(rootId:\s*number\)\s*=>\s*Promise<void>/.test(useLibraryData)) {
+  fail("useLibraryData must expose a typed rescanRoot action");
+}
+if (!librarySidebar.includes("rescanRoot") || librarySidebar.includes("Rescan is not available from the current Core API")) {
+  fail("LibrarySidebar must wire rescan to the supported Core enqueueScan capability");
 }
 for (const value of ["addingRoot", "scanActive"]) {
   if (!useLibraryData.includes(value)) {
@@ -96,6 +161,12 @@ for (const filePath of walk(webSrc)) {
   }
   if (contents.includes("node:fs") || contents.includes("electron")) {
     fail(`web source must not import filesystem/electron APIs: ${relative}`);
+  }
+  if (
+    contents.includes("window.megleDesktop") &&
+    relative !== desktopAdapterPath
+  ) {
+    fail(`desktop preload bridge access must stay in ${desktopAdapterPath}: ${relative}`);
   }
   if (contents.includes("thumbnailCacheKey") && !relative.startsWith("apps/web/src/core/")) {
     fail(`UI must not consume thumbnailCacheKey directly: ${relative}`);

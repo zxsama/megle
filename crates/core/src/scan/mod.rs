@@ -80,6 +80,7 @@ pub fn scan_root_with_options(
     mut options: ScanOptions<'_>,
 ) -> anyhow::Result<ScanSummary> {
     let root_path = PathBuf::from(&root.path);
+    ensure_root_enabled(database, root.id)?;
     let root_batch = ScanWriteBatch {
         folders: vec![FolderUpsert {
             root_id: root.id,
@@ -91,6 +92,7 @@ pub fn scan_root_with_options(
         files: Vec::new(),
     };
     observe_scan_batch(&options, root_batch.folders.len(), root_batch.files.len());
+    ensure_root_enabled(database, root.id)?;
     let root_result = database.commit_scan_batch(root_batch)?;
     let root_folder_id = root_result.folder_ids[0];
 
@@ -126,6 +128,7 @@ pub fn scan_root_with_options(
                 files: Vec::new(),
             };
             observe_scan_batch(&options, batch.folders.len(), batch.files.len());
+            ensure_root_enabled(database, root.id)?;
             let result = database.commit_scan_batch(batch)?;
             let folder_id = result.folder_ids[0];
             folder_ids.insert(path.to_path_buf(), folder_id);
@@ -164,11 +167,12 @@ pub fn scan_root_with_options(
         emit_progress(&mut options, items_seen, &summary);
 
         if pending_files.len() >= write_batch_size {
-            flush_scan_files(database, &options, &mut pending_files)?;
+            flush_scan_files(database, root.id, &options, &mut pending_files)?;
         }
     }
 
-    flush_scan_files(database, &options, &mut pending_files)?;
+    flush_scan_files(database, root.id, &options, &mut pending_files)?;
+    ensure_root_enabled(database, root.id)?;
     database.mark_root_scanned(root.id)?;
     Ok(summary)
 }
@@ -185,6 +189,7 @@ fn parent_folder_id(path: &Path, folder_ids: &HashMap<PathBuf, i64>) -> anyhow::
 
 fn flush_scan_files(
     database: &mut Database,
+    root_id: i64,
     options: &ScanOptions,
     pending_files: &mut Vec<ScanFileUpsert>,
 ) -> anyhow::Result<()> {
@@ -193,11 +198,19 @@ fn flush_scan_files(
     }
 
     observe_scan_batch(options, 0, pending_files.len());
+    ensure_root_enabled(database, root_id)?;
     database.commit_scan_batch(ScanWriteBatch {
         folders: Vec::new(),
         files: std::mem::take(pending_files),
     })?;
     Ok(())
+}
+
+fn ensure_root_enabled(database: &Database, root_id: i64) -> anyhow::Result<()> {
+    if database.root_enabled(root_id)? {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!("root is disabled: {root_id}"))
 }
 
 fn observe_scan_batch(options: &ScanOptions, folders: usize, files: usize) {
@@ -314,7 +327,7 @@ mod tests {
                 kind: None,
             })
             .expect("list media");
-        assert_eq!(page.len(), 2);
+        assert_eq!(page.items.len(), 2);
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
@@ -377,7 +390,7 @@ mod tests {
                 kind: None,
             })
             .expect("list media");
-        assert_eq!(page.len(), 3);
+        assert_eq!(page.items.len(), 3);
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
@@ -417,9 +430,9 @@ mod tests {
             })
             .expect("list media");
 
-        assert_eq!(media.len(), 1);
-        assert_eq!(media[0].name, "scan.png");
-        assert_eq!(media[0].folder_id, raw_folder.id);
+        assert_eq!(media.items.len(), 1);
+        assert_eq!(media.items[0].name, "scan.png");
+        assert_eq!(media.items[0].folder_id, raw_folder.id);
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
@@ -467,7 +480,7 @@ mod tests {
                 kind: None,
             })
             .expect("list media");
-        assert_eq!(media.len(), 2);
+        assert_eq!(media.items.len(), 2);
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
@@ -513,6 +526,62 @@ mod tests {
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
 
+    #[test]
+    fn scan_root_stops_before_writing_next_batch_when_root_is_disabled() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("a.jpg"), b"fake jpg").expect("write first image");
+        fs::write(temp_root.join("b.jpg"), b"fake jpg").expect("write second image");
+        fs::write(temp_root.join("c.jpg"), b"fake jpg").expect("write third image");
+
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("scan-cancel.sqlite");
+        let mut database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "disable-during-scan-test");
+        let root = test_root(&database, root_id);
+
+        let disable_db_path = db_path.clone();
+        let mut disabled = false;
+        let mut progress_callback = move |progress: TaskScanProgress| {
+            if !disabled && progress.media_files_seen >= 1 {
+                let disable_database = Database::open(&disable_db_path).expect("open disable db");
+                disable_database
+                    .disable_root(root_id)
+                    .expect("disable root");
+                disabled = true;
+            }
+        };
+
+        let error = scan_root_with_options(
+            &mut database,
+            &root,
+            ScanOptions {
+                write_batch_size: 2,
+                progress_callback: Some(&mut progress_callback),
+                batch_observer: None,
+            },
+        )
+        .expect_err("disabled root should stop scan");
+        assert!(error.to_string().contains("disabled"));
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert!(media.items.is_empty());
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
     fn add_test_root(database: &Database, temp_root: &Path, display_name: &str) -> i64 {
         database
             .add_root(NewRoot {
@@ -546,13 +615,16 @@ mod tests {
     }
 
     fn unique_temp_dir() -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         std::env::temp_dir().join(format!(
-            "megle_scan_test_{}_{}",
+            "megle_scan_test_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time")
-                .as_nanos()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
 }

@@ -6,6 +6,7 @@ import type {
   MediaRecord,
   Page,
   RootRecord,
+  ScanTaskRequest,
   TaskRecord
 } from "./generated-contract";
 
@@ -55,6 +56,15 @@ export function createCoreClient(config: CoreClientConfig) {
       request<AcceptedRootResponse>("/roots", {
         method: "POST",
         body: JSON.stringify({ path, displayName })
+      }),
+    removeRoot: (rootId: number) =>
+      request<AcceptedRootResponse>(`/roots/${rootId}`, {
+        method: "DELETE"
+      }),
+    enqueueScan: (rootId: number) =>
+      request<AcceptedRootResponse>("/tasks/scan", {
+        method: "POST",
+        body: JSON.stringify({ rootId } satisfies ScanTaskRequest)
       }),
     listFolderChildren: (folderId: number, params: ListFolderChildrenParams = {}) =>
       request<Page<FolderRecord>>(`/folders/${folderId}/children${query(params)}`),

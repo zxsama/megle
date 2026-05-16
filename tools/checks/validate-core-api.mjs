@@ -228,6 +228,28 @@ function functionBody(name) {
   return match?.[0] ?? "";
 }
 
+function operationBlock(pathName, methodName) {
+  const pathIndex = openApi.indexOf(`  ${pathName}:`);
+  if (pathIndex === -1) {
+    fail(`OpenAPI path missing ${pathName}`);
+    return "";
+  }
+  const nextPathIndex = openApi.slice(pathIndex + 1).search(/\n  \/[^:\n]+:/);
+  const pathBlock =
+    nextPathIndex === -1
+      ? openApi.slice(pathIndex)
+      : openApi.slice(pathIndex, pathIndex + 1 + nextPathIndex);
+  const methodIndex = pathBlock.indexOf(`    ${methodName}:`);
+  if (methodIndex === -1) {
+    fail(`OpenAPI operation missing ${methodName.toUpperCase()} ${pathName}`);
+    return "";
+  }
+  const nextMethodIndex = pathBlock.slice(methodIndex + 1).search(/\n    [a-z]+:/);
+  return nextMethodIndex === -1
+    ? pathBlock.slice(methodIndex)
+    : pathBlock.slice(methodIndex, methodIndex + 1 + nextMethodIndex);
+}
+
 for (const name of [
   "remove_root",
   "get_thumbnail",
@@ -250,6 +272,10 @@ for (const value of ["create_root_scan_task", "enqueue_task", "task_id: Some", "
   if (!addRootBody.includes(value)) {
     fail(`POST /api/roots queued response missing ${value}`);
   }
+}
+const addRootOperation = operationBlock("/roots", "post");
+if (!addRootOperation.includes('"400"') || !addRootOperation.includes("ErrorResponse")) {
+  fail("OpenAPI POST /roots must document bad-root-path 400 ErrorResponse");
 }
 
 for (const value of [
@@ -278,8 +304,43 @@ for (const value of ["Json(payload): Json<ScanTaskRequest>", "get_root", "create
     fail(`POST /api/tasks/scan implementation missing ${value}`);
   }
 }
+const enqueueScanOperation = operationBlock("/tasks/scan", "post");
+if (!enqueueScanOperation.includes('"409"') || !enqueueScanOperation.includes("ErrorResponse")) {
+  fail("OpenAPI POST /tasks/scan must document disabled-root 409 ErrorResponse");
+}
+const mediaOperation = operationBlock("/media", "get");
+if (!mediaOperation.includes('"400"') || !mediaOperation.includes("ErrorResponse")) {
+  fail("OpenAPI GET /media must document invalid query/cursor 400 ErrorResponse");
+}
+const folderChildrenOperation = operationBlock("/folders/{folderId}/children", "get");
+if (!folderChildrenOperation.includes('"400"') || !folderChildrenOperation.includes("ErrorResponse")) {
+  fail("OpenAPI GET /folders/{folderId}/children must document invalid cursor 400 ErrorResponse");
+}
 if (!functionBody("list_tasks").includes("database.list_tasks")) {
   fail("GET /api/tasks must return persisted task rows");
+}
+if (dbModRs.includes("OFFSET")) {
+  fail("Core browsing pagination must use keyset cursors, not OFFSET");
+}
+for (const value of ["?2 IS NULL OR files.root_id", "?3 IS NULL OR files.folder_id", "?4 IS NULL OR media.kind"]) {
+  if (dbModRs.includes(value)) {
+    fail(`media browsing query must build dynamic predicates instead of optional OR predicate ${value}`);
+  }
+}
+for (const value of ["next_cursor", "decode_media_cursor", "encode_media_cursor", "disable_root"]) {
+  if (!dbModRs.includes(value)) {
+    fail(`Core browsing hardening missing ${value}`);
+  }
+}
+for (const value of ["canonicalize", "StatusCode::BAD_REQUEST", "StatusCode::CONFLICT", "parse_media_sort", "parse_media_kind"]) {
+  if (!routesRs.includes(value)) {
+    fail(`Core root validation/removal routes missing ${value}`);
+  }
+}
+for (const value of ["cancel_root_scan_tasks", "root_enabled", "fail_pending_root_scan_tasks_for_disabled_roots"]) {
+  if (!dbModRs.includes(value) && !tasksRs.includes(value)) {
+    fail(`Core scan cancellation hardening missing ${value}`);
+  }
 }
 if (tasksRs.includes("Arc<Mutex<Database>>")) {
   fail("background scan worker must not hold the API Arc<Mutex<Database>> during scans");

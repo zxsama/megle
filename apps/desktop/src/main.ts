@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from "electron";
 import { fileURLToPath } from "node:url";
 import { startCoreProcess, waitForCoreHealth, type CoreProcessHandle } from "./core-process.js";
 import { createCoreSession, type CoreSession } from "./core-session.js";
@@ -8,6 +8,15 @@ let coreProcess: CoreProcessHandle | null = null;
 let pendingCoreProcess: CoreProcessHandle | null = null;
 let coreSession: CoreSession | null = null;
 let coreReadyPromise: Promise<CoreSession> | null = null;
+
+ipcMain.handle("megle:pick-folder", async () => {
+  const options: OpenDialogOptions = { properties: ["openDirectory"] };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+
+  return result.canceled ? null : result.filePaths[0] ?? null;
+});
 
 async function createWindow(): Promise<void> {
   const session = await ensureCoreReady();

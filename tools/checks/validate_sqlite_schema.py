@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0001_initial.sql",
     ROOT / "crates" / "core" / "migrations" / "0002_task_progress.sql",
+    ROOT / "crates" / "core" / "migrations" / "0003_browsing_indexes.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -38,7 +39,16 @@ REQUIRED_INDEXES = {
     "idx_folders_root_parent_name",
     "idx_files_folder_name",
     "idx_files_folder_mtime_id",
+    "idx_files_folder_name_id_desc",
+    "idx_files_folder_mtime_id_asc",
     "idx_files_root_mtime_id",
+    "idx_files_root_name_id",
+    "idx_files_root_name_id_desc",
+    "idx_files_root_mtime_id_asc",
+    "idx_files_global_mtime_id",
+    "idx_files_global_mtime_id_asc",
+    "idx_files_global_name_id",
+    "idx_files_global_name_id_desc",
     "idx_files_ext",
     "idx_media_kind_file",
     "idx_user_metadata_rating",
@@ -97,6 +107,11 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 2 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 3"
+            ).fetchone()
+            if version is None:
+                fail("migration version 3 was not recorded")
 
             task_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()

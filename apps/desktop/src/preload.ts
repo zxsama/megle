@@ -1,4 +1,4 @@
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 
 function readArg(prefix: string): string | undefined {
   const arg = process.argv.find((item) => item.startsWith(prefix));
@@ -7,5 +7,6 @@ function readArg(prefix: string): string | undefined {
 
 contextBridge.exposeInMainWorld("megleDesktop", {
   coreUrl: readArg("--megle-core-url="),
-  sessionToken: readArg("--megle-session-token=")
+  sessionToken: readArg("--megle-session-token="),
+  pickFolder: () => ipcRenderer.invoke("megle:pick-folder")
 });

@@ -19,6 +19,10 @@ export interface AcceptedRootResponse {
   scan: ScanSummary | null;
 }
 
+export interface ScanTaskRequest {
+  rootId: number;
+}
+
 export interface RootRecord {
   id: number;
   path: string;

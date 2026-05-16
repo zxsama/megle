@@ -5,6 +5,7 @@ export type {
   MediaRecord,
   Page,
   RootRecord,
+  ScanTaskRequest,
   ScanSummary,
   TaskRecord
 } from "@megle/core-client";

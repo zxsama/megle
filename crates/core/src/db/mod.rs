@@ -2,7 +2,8 @@ pub mod migrations;
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::types::Value;
+use rusqlite::{params_from_iter, Connection};
 use serde::Serialize;
 
 #[allow(dead_code)]
@@ -38,6 +39,12 @@ pub struct MediaPageQuery {
     pub cursor: Option<String>,
     pub sort: String,
     pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
 }
 
 pub struct FolderUpsert {
@@ -163,6 +170,10 @@ impl Database {
             self.connection
                 .execute_batch(migrations::TASK_PROGRESS_MIGRATION)?;
         }
+        if !self.migration_applied(3)? {
+            self.connection
+                .execute_batch(migrations::BROWSING_INDEXES_MIGRATION)?;
+        }
         Ok(())
     }
 
@@ -186,6 +197,7 @@ impl Database {
               ON root_folder.root_id = roots.id
              AND root_folder.parent_id IS NULL
              AND root_folder.name = ''
+            WHERE roots.enabled = 1
             ORDER BY roots.id ASC
             "#,
         )?;
@@ -221,25 +233,70 @@ impl Database {
 
     pub fn add_root(&self, root: NewRoot) -> anyhow::Result<i64> {
         let now = unix_timestamp();
-        self.connection.execute(
-            r#"
-            INSERT INTO roots(path, display_name, enabled, created_at)
-            VALUES (?1, ?2, 1, ?3)
-            ON CONFLICT(path) DO UPDATE SET
-              display_name = excluded.display_name,
-              enabled = 1
-            "#,
-            (&root.path, &root.display_name, now),
-        )?;
-        let id = self.connection.query_row(
-            "SELECT id FROM roots WHERE path = ?1",
-            [&root.path],
-            |row| row.get(0),
-        )?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let existing = {
+            let mut statement =
+                transaction.prepare("SELECT id, enabled FROM roots WHERE path = ?1")?;
+            let mut rows = statement.query([&root.path])?;
+            rows.next()?
+                .map(|row| {
+                    Ok::<(i64, bool), rusqlite::Error>((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)? != 0,
+                    ))
+                })
+                .transpose()?
+        };
+        let id = if let Some((id, enabled)) = existing {
+            if !enabled {
+                transaction.execute("DELETE FROM folders WHERE root_id = ?1", [id])?;
+                transaction.execute("DELETE FROM files WHERE root_id = ?1", [id])?;
+            }
+            transaction.execute(
+                r#"
+                UPDATE roots
+                SET display_name = ?1,
+                    enabled = 1,
+                    last_scan_at = CASE WHEN ?2 = 0 THEN NULL ELSE last_scan_at END
+                WHERE id = ?3
+                "#,
+                (&root.display_name, enabled as i64, id),
+            )?;
+            id
+        } else {
+            transaction.execute(
+                r#"
+                INSERT INTO roots(path, display_name, enabled, created_at)
+                VALUES (?1, ?2, 1, ?3)
+                "#,
+                (&root.path, &root.display_name, now),
+            )?;
+            transaction.last_insert_rowid()
+        };
+        transaction.commit()?;
         Ok(id)
     }
 
+    pub fn disable_root(&self, root_id: i64) -> anyhow::Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let updated = transaction.execute(
+            "UPDATE roots SET enabled = 0 WHERE id = ?1 AND enabled = 1",
+            [root_id],
+        )?;
+        if updated != 0 {
+            cancel_root_scan_tasks_in_transaction(&transaction, root_id)?;
+        }
+        transaction.commit()?;
+        Ok(updated != 0)
+    }
+
     pub fn create_root_scan_task(&self, root_id: i64) -> anyhow::Result<i64> {
+        let root = self
+            .get_root(root_id)?
+            .ok_or_else(|| anyhow::anyhow!("root not found: {root_id}"))?;
+        if !root.enabled {
+            return Err(anyhow::anyhow!("root is disabled: {root_id}"));
+        }
         let now = unix_timestamp();
         self.connection.execute(
             r#"
@@ -266,10 +323,11 @@ impl Database {
     pub fn list_pending_root_scan_task_ids(&self) -> anyhow::Result<Vec<i64>> {
         let mut statement = self.connection.prepare(
             r#"
-            SELECT id
+            SELECT tasks.id
             FROM tasks
-            WHERE kind = 'root_scan' AND status = 'pending'
-            ORDER BY priority DESC, created_at ASC, id ASC
+            JOIN roots ON roots.id = tasks.root_id AND roots.enabled = 1
+            WHERE tasks.kind = 'root_scan' AND tasks.status = 'pending'
+            ORDER BY tasks.priority DESC, tasks.created_at ASC, tasks.id ASC
             "#,
         )?;
         let rows = statement.query_map([], |row| row.get(0))?;
@@ -279,6 +337,22 @@ impl Database {
             task_ids.push(row?);
         }
         Ok(task_ids)
+    }
+
+    pub fn fail_pending_root_scan_tasks_for_disabled_roots(&self) -> anyhow::Result<usize> {
+        let updated = self.connection.execute(
+            r#"
+            UPDATE tasks
+            SET status = 'failed',
+                updated_at = ?1,
+                error = 'root is disabled'
+            WHERE kind = 'root_scan'
+              AND status = 'pending'
+              AND root_id IN (SELECT id FROM roots WHERE enabled = 0)
+            "#,
+            [unix_timestamp()],
+        )?;
+        Ok(updated)
     }
 
     pub fn list_tasks(&self) -> anyhow::Result<Vec<TaskRecord>> {
@@ -371,14 +445,55 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_media_page(&self, query: MediaPageQuery) -> anyhow::Result<Vec<MediaRecord>> {
+    pub fn list_media_page(&self, query: MediaPageQuery) -> anyhow::Result<Page<MediaRecord>> {
         let limit = query.limit.clamp(1, 500);
-        let sort_clause = match query.sort.as_str() {
+        let sort = normalize_media_sort(&query.sort);
+        let cursor = query
+            .cursor
+            .as_deref()
+            .map(|cursor| decode_media_cursor(cursor, sort))
+            .transpose()?;
+        let sort_clause = match sort {
             "mtime_asc" => "files.mtime ASC, files.id ASC",
             "name_asc" => "files.name ASC, files.id ASC",
             "name_desc" => "files.name DESC, files.id DESC",
             _ => "files.mtime DESC, files.id DESC",
         };
+        let mut predicates = vec!["files.status = 'active'".to_string()];
+        let mut parameters = Vec::new();
+        if let Some(root_id) = query.root_id {
+            predicates.push("files.root_id = ?".to_string());
+            parameters.push(Value::Integer(root_id));
+        }
+        if let Some(folder_id) = query.folder_id {
+            predicates.push("files.folder_id = ?".to_string());
+            parameters.push(Value::Integer(folder_id));
+        }
+        if let Some(kind) = query.kind.as_deref() {
+            predicates.push("media.kind = ?".to_string());
+            parameters.push(Value::Text(kind.to_string()));
+        }
+        if let Some(cursor) = &cursor {
+            let predicate = match sort {
+                "name_asc" => "files.name > ? OR (files.name = ? AND files.id > ?)",
+                "name_desc" => "files.name < ? OR (files.name = ? AND files.id < ?)",
+                "mtime_asc" => "files.mtime > ? OR (files.mtime = ? AND files.id > ?)",
+                _ => "files.mtime < ? OR (files.mtime = ? AND files.id < ?)",
+            };
+            predicates.push(format!("({predicate})"));
+            match &cursor.key {
+                MediaCursorKey::Name(name) => {
+                    parameters.push(Value::Text(name.clone()));
+                    parameters.push(Value::Text(name.clone()));
+                }
+                MediaCursorKey::Mtime(mtime) => {
+                    parameters.push(Value::Integer(*mtime));
+                    parameters.push(Value::Integer(*mtime));
+                }
+            }
+            parameters.push(Value::Integer(cursor.id));
+        }
+        parameters.push(Value::Integer(limit + 1));
 
         let sql = format!(
             r#"
@@ -389,29 +504,29 @@ impl Database {
             FROM files
             LEFT JOIN media ON media.file_id = files.id
             LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid'
-            WHERE files.status = 'active'
-              AND (?2 IS NULL OR files.root_id = ?2)
-              AND (?3 IS NULL OR files.folder_id = ?3)
-              AND (?4 IS NULL OR media.kind = ?4)
+            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+            WHERE {where_clause}
             ORDER BY {sort_clause}
-            LIMIT ?1
+            LIMIT ?
             "#,
+            where_clause = predicates.join(" AND "),
             sort_clause = sort_clause,
         );
 
-        let _cursor = query.cursor;
-
         let mut statement = self.connection.prepare(&sql)?;
-        let rows = statement.query_map(
-            rusqlite::params![limit, query.root_id, query.folder_id, query.kind],
-            media_from_row,
-        )?;
+        let rows = statement.query_map(params_from_iter(parameters), media_from_row)?;
 
         let mut items = Vec::new();
         for row in rows {
             items.push(row?);
         }
-        Ok(items)
+        let next_cursor = if items.len() > limit as usize {
+            items.pop();
+            items.last().map(|item| encode_media_cursor(sort, item))
+        } else {
+            None
+        };
+        Ok(Page { items, next_cursor })
     }
 
     pub fn get_media(&self, file_id: i64) -> anyhow::Result<Option<MediaRecord>> {
@@ -423,6 +538,7 @@ impl Database {
             FROM files
             LEFT JOIN media ON media.file_id = files.id
             LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid'
+            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
             WHERE files.id = ?1 AND files.status = 'active'
             "#,
         )?;
@@ -433,16 +549,42 @@ impl Database {
         Ok(Some(media_from_row(row)?))
     }
 
-    pub fn list_folder_children(&self, folder_id: i64) -> anyhow::Result<Vec<FolderRecord>> {
-        let mut statement = self.connection.prepare(
+    pub fn list_folder_children_page(
+        &self,
+        folder_id: i64,
+        limit: i64,
+        cursor: Option<String>,
+    ) -> anyhow::Result<Page<FolderRecord>> {
+        let limit = limit.clamp(1, 500);
+        let cursor = cursor.as_deref().map(decode_folder_cursor).transpose()?;
+        let cursor_clause = if cursor.is_some() {
+            "AND (folders.name > ?2 OR (folders.name = ?2 AND folders.id > ?3))"
+        } else {
+            ""
+        };
+        let sql = format!(
             r#"
-            SELECT id, root_id, parent_id, name, status
+            SELECT folders.id, folders.root_id, folders.parent_id, folders.name, folders.status
             FROM folders
-            WHERE parent_id = ?1 AND status = 'active'
-            ORDER BY name ASC, id ASC
+            JOIN roots ON roots.id = folders.root_id AND roots.enabled = 1
+            WHERE folders.parent_id = ?1 AND folders.status = 'active'
+              {cursor_clause}
+            ORDER BY folders.name ASC, folders.id ASC
+            LIMIT ?4
             "#,
-        )?;
-        let rows = statement.query_map([folder_id], |row| {
+            cursor_clause = cursor_clause,
+        );
+        let mut parameters = vec![Value::Integer(folder_id)];
+        if let Some(cursor) = &cursor {
+            parameters.push(Value::Text(cursor.name.clone()));
+            parameters.push(Value::Integer(cursor.id));
+        } else {
+            parameters.push(Value::Null);
+            parameters.push(Value::Null);
+        }
+        parameters.push(Value::Integer(limit + 1));
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(parameters), |row| {
             Ok(FolderRecord {
                 id: row.get(0)?,
                 root_id: row.get(1)?,
@@ -456,12 +598,32 @@ impl Database {
         for row in rows {
             folders.push(row?);
         }
-        Ok(folders)
+        let next_cursor = if folders.len() > limit as usize {
+            folders.pop();
+            folders.last().map(encode_folder_cursor)
+        } else {
+            None
+        };
+        Ok(Page {
+            items: folders,
+            next_cursor,
+        })
+    }
+
+    pub fn list_folder_children(&self, folder_id: i64) -> anyhow::Result<Vec<FolderRecord>> {
+        Ok(self.list_folder_children_page(folder_id, 500, None)?.items)
     }
 
     pub fn folder_exists(&self, folder_id: i64) -> anyhow::Result<bool> {
         let exists: i64 = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM folders WHERE id = ?1 AND status = 'active')",
+            r#"
+            SELECT EXISTS(
+              SELECT 1
+              FROM folders
+              JOIN roots ON roots.id = folders.root_id AND roots.enabled = 1
+              WHERE folders.id = ?1 AND folders.status = 'active'
+            )
+            "#,
             [folder_id],
             |row| row.get(0),
         )?;
@@ -552,6 +714,10 @@ impl Database {
         batch: ScanWriteBatch,
     ) -> anyhow::Result<ScanWriteBatchResult> {
         let transaction = self.connection.transaction()?;
+        let root_ids = scan_batch_root_ids(&batch);
+        for root_id in root_ids {
+            ensure_root_enabled_in_transaction(&transaction, root_id)?;
+        }
         let mut folder_ids = Vec::with_capacity(batch.folders.len());
         let mut file_ids = Vec::with_capacity(batch.files.len());
 
@@ -574,10 +740,19 @@ impl Database {
 
     pub fn mark_root_scanned(&self, root_id: i64) -> anyhow::Result<()> {
         self.connection.execute(
-            "UPDATE roots SET last_scan_at = ?1 WHERE id = ?2",
+            "UPDATE roots SET last_scan_at = ?1 WHERE id = ?2 AND enabled = 1",
             (unix_timestamp(), root_id),
         )?;
         Ok(())
+    }
+
+    pub fn root_enabled(&self, root_id: i64) -> anyhow::Result<bool> {
+        let enabled: i64 = self.connection.query_row(
+            "SELECT enabled FROM roots WHERE id = ?1",
+            [root_id],
+            |row| row.get(0),
+        )?;
+        Ok(enabled != 0)
     }
 
     #[allow(dead_code)]
@@ -660,6 +835,55 @@ fn upsert_folder_in_transaction(
         ),
     )?;
     Ok(transaction.last_insert_rowid())
+}
+
+fn scan_batch_root_ids(batch: &ScanWriteBatch) -> Vec<i64> {
+    let mut root_ids = Vec::new();
+    for root_id in batch
+        .folders
+        .iter()
+        .map(|folder| folder.root_id)
+        .chain(batch.files.iter().map(|file| file.file.root_id))
+    {
+        if !root_ids.contains(&root_id) {
+            root_ids.push(root_id);
+        }
+    }
+    root_ids
+}
+
+fn ensure_root_enabled_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    root_id: i64,
+) -> anyhow::Result<()> {
+    let enabled: i64 = transaction.query_row(
+        "SELECT enabled FROM roots WHERE id = ?1",
+        [root_id],
+        |row| row.get(0),
+    )?;
+    if enabled != 0 {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!("root is disabled: {root_id}"))
+}
+
+fn cancel_root_scan_tasks_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    root_id: i64,
+) -> anyhow::Result<usize> {
+    let updated = transaction.execute(
+        r#"
+        UPDATE tasks
+        SET status = 'failed',
+            updated_at = ?1,
+            error = 'root is disabled'
+        WHERE kind = 'root_scan'
+          AND root_id = ?2
+          AND status IN ('pending', 'running')
+        "#,
+        (unix_timestamp(), root_id),
+    )?;
+    Ok(updated)
 }
 
 fn upsert_file_in_transaction(
@@ -791,6 +1015,135 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     })
 }
 
+#[derive(Debug)]
+struct MediaCursor {
+    key: MediaCursorKey,
+    id: i64,
+}
+
+#[derive(Debug)]
+enum MediaCursorKey {
+    Name(String),
+    Mtime(i64),
+}
+
+#[derive(Debug)]
+struct FolderCursor {
+    name: String,
+    id: i64,
+}
+
+fn normalize_media_sort(sort: &str) -> &'static str {
+    match sort {
+        "mtime_asc" => "mtime_asc",
+        "name_asc" => "name_asc",
+        "name_desc" => "name_desc",
+        _ => "mtime_desc",
+    }
+}
+
+fn encode_media_cursor(sort: &str, item: &MediaRecord) -> String {
+    match sort {
+        "name_asc" | "name_desc" => {
+            format!(
+                "v1:media:{sort}:{}:{}",
+                item.id,
+                hex_encode(item.name.as_bytes())
+            )
+        }
+        "mtime_asc" | "mtime_desc" => format!("v1:media:{sort}:{}:{}", item.id, item.mtime),
+        _ => format!("v1:media:mtime_desc:{}:{}", item.id, item.mtime),
+    }
+}
+
+fn decode_media_cursor(cursor: &str, expected_sort: &str) -> anyhow::Result<MediaCursor> {
+    let mut parts = cursor.splitn(5, ':');
+    let version = parts.next();
+    let entity = parts.next();
+    let sort = parts.next();
+    let id = parts.next();
+    let key = parts.next();
+    if version != Some("v1") || entity != Some("media") || sort != Some(expected_sort) {
+        return Err(anyhow::anyhow!("invalid media cursor"));
+    }
+    let id = id
+        .ok_or_else(|| anyhow::anyhow!("invalid media cursor"))?
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("invalid media cursor"))?;
+    let key = key.ok_or_else(|| anyhow::anyhow!("invalid media cursor"))?;
+    let key = match expected_sort {
+        "name_asc" | "name_desc" => MediaCursorKey::Name(
+            hex_decode_to_string(key).map_err(|_| anyhow::anyhow!("invalid media cursor"))?,
+        ),
+        "mtime_asc" | "mtime_desc" => MediaCursorKey::Mtime(
+            key.parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("invalid media cursor"))?,
+        ),
+        _ => return Err(anyhow::anyhow!("invalid media cursor")),
+    };
+    Ok(MediaCursor { key, id })
+}
+
+fn encode_folder_cursor(folder: &FolderRecord) -> String {
+    format!(
+        "v1:folder:{}:{}",
+        folder.id,
+        hex_encode(folder.name.as_bytes())
+    )
+}
+
+fn decode_folder_cursor(cursor: &str) -> anyhow::Result<FolderCursor> {
+    let mut parts = cursor.splitn(4, ':');
+    if parts.next() != Some("v1") || parts.next() != Some("folder") {
+        return Err(anyhow::anyhow!("invalid folder cursor"));
+    }
+    let id = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid folder cursor"))?
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("invalid folder cursor"))?;
+    let name = hex_decode_to_string(
+        parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("invalid folder cursor"))?,
+    )
+    .map_err(|_| anyhow::anyhow!("invalid folder cursor"))?;
+    Ok(FolderCursor { name, id })
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn hex_decode_to_string(value: &str) -> anyhow::Result<String> {
+    if value.len() % 2 != 0 {
+        return Err(anyhow::anyhow!("invalid cursor hex"));
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let chars = value.as_bytes();
+    for index in (0..chars.len()).step_by(2) {
+        let high = hex_value(chars[index])?;
+        let low = hex_value(chars[index + 1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(String::from_utf8(bytes)?)
+}
+
+fn hex_value(value: u8) -> anyhow::Result<u8> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(anyhow::anyhow!("invalid cursor hex")),
+    }
+}
+
 fn unix_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -806,6 +1159,55 @@ mod tests {
         let database = Database::open_in_memory().expect("open in-memory database");
         database.apply_migrations().expect("apply migrations");
         database
+    }
+
+    fn seed_media_page_fixture(database: &Database) -> (i64, i64) {
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "root-hash".to_string(),
+                mtime: Some(10),
+            })
+            .expect("insert root folder");
+
+        for (index, name) in ["alpha.jpg", "bravo.jpg", "charlie.jpg", "delta.jpg"]
+            .iter()
+            .enumerate()
+        {
+            let file_id = database
+                .upsert_file(FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: (*name).to_string(),
+                    ext: ".jpg".to_string(),
+                    size: 100 + index as i64,
+                    mtime: 100 + index as i64,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("insert file");
+            database
+                .upsert_media_kind(file_id, "image")
+                .expect("insert media kind");
+        }
+
+        (root_id, folder_id)
+    }
+
+    fn media_names(items: &[MediaRecord]) -> Vec<&str> {
+        items.iter().map(|item| item.name.as_str()).collect()
+    }
+
+    fn folder_names(items: &[FolderRecord]) -> Vec<&str> {
+        items.iter().map(|item| item.name.as_str()).collect()
     }
 
     const OLD_INITIAL_MIGRATION_WITHOUT_TASK_PROGRESS: &str = r#"
@@ -1010,13 +1412,13 @@ mod tests {
             })
             .expect("list media page");
 
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].id, file_id);
-        assert_eq!(page[0].name, "image.jpg");
-        assert_eq!(page[0].kind.as_deref(), Some("image"));
-        assert_eq!(page[0].thumbnail_state.as_deref(), Some("ready"));
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, file_id);
+        assert_eq!(page.items[0].name, "image.jpg");
+        assert_eq!(page.items[0].kind.as_deref(), Some("image"));
+        assert_eq!(page.items[0].thumbnail_state.as_deref(), Some("ready"));
         assert_eq!(
-            page[0].thumbnail_cache_key.as_deref(),
+            page.items[0].thumbnail_cache_key.as_deref(),
             Some("aa/bb/key.webp")
         );
 
@@ -1030,6 +1432,170 @@ mod tests {
             .get_media(file_id + 10)
             .expect("get missing")
             .is_none());
+    }
+
+    #[test]
+    fn list_media_page_keyset_pages_all_supported_sorts_without_offset() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+
+        for (sort, expected_pages) in [
+            (
+                "name_asc",
+                vec![
+                    vec!["alpha.jpg", "bravo.jpg"],
+                    vec!["charlie.jpg", "delta.jpg"],
+                ],
+            ),
+            (
+                "name_desc",
+                vec![
+                    vec!["delta.jpg", "charlie.jpg"],
+                    vec!["bravo.jpg", "alpha.jpg"],
+                ],
+            ),
+            (
+                "mtime_desc",
+                vec![
+                    vec!["delta.jpg", "charlie.jpg"],
+                    vec!["bravo.jpg", "alpha.jpg"],
+                ],
+            ),
+            (
+                "mtime_asc",
+                vec![
+                    vec!["alpha.jpg", "bravo.jpg"],
+                    vec!["charlie.jpg", "delta.jpg"],
+                ],
+            ),
+        ] {
+            let first_page = database
+                .list_media_page(MediaPageQuery {
+                    root_id: Some(root_id),
+                    folder_id: Some(folder_id),
+                    limit: 2,
+                    cursor: None,
+                    sort: sort.to_string(),
+                    kind: Some("image".to_string()),
+                })
+                .expect("list first media page");
+            assert_eq!(media_names(&first_page.items), expected_pages[0]);
+            let cursor = first_page.next_cursor.expect("first page cursor");
+
+            let second_page = database
+                .list_media_page(MediaPageQuery {
+                    root_id: Some(root_id),
+                    folder_id: Some(folder_id),
+                    limit: 2,
+                    cursor: Some(cursor),
+                    sort: sort.to_string(),
+                    kind: Some("image".to_string()),
+                })
+                .expect("list second media page");
+            assert_eq!(media_names(&second_page.items), expected_pages[1]);
+            assert!(second_page.next_cursor.is_none());
+        }
+    }
+
+    #[test]
+    fn list_folder_children_paginates_by_name_with_stable_cursor() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let root_folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "root-hash".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        for name in ["alpha", "bravo", "charlie"] {
+            database
+                .upsert_folder(FolderUpsert {
+                    root_id,
+                    parent_id: Some(root_folder_id),
+                    name: name.to_string(),
+                    path_hash: format!("{name}-hash"),
+                    mtime: Some(2),
+                })
+                .expect("insert child folder");
+        }
+
+        let first_page = database
+            .list_folder_children_page(root_folder_id, 2, None)
+            .expect("list first child page");
+        assert_eq!(folder_names(&first_page.items), vec!["alpha", "bravo"]);
+        let cursor = first_page.next_cursor.expect("first child page cursor");
+
+        let second_page = database
+            .list_folder_children_page(root_folder_id, 2, Some(cursor))
+            .expect("list second child page");
+        assert_eq!(folder_names(&second_page.items), vec!["charlie"]);
+        assert!(second_page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn disabled_root_is_hidden_from_roots_and_media_and_rejects_scan_tasks() {
+        let database = migrated_database();
+        let (root_id, _folder_id) = seed_media_page_fixture(&database);
+        database.disable_root(root_id).expect("disable root");
+
+        assert!(database.list_roots().expect("list roots").is_empty());
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert!(media.items.is_empty());
+
+        let scan_task = database.create_root_scan_task(root_id);
+        assert!(scan_task
+            .expect_err("disabled root should reject scan task")
+            .to_string()
+            .contains("disabled"));
+    }
+
+    #[test]
+    fn readding_disabled_root_does_not_resurrect_stale_index_rows_before_scan() {
+        let database = migrated_database();
+        let (root_id, _folder_id) = seed_media_page_fixture(&database);
+        database.disable_root(root_id).expect("disable root");
+
+        let same_root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures Again".to_string(),
+            })
+            .expect("readd root");
+        assert_eq!(same_root_id, root_id);
+
+        let roots = database.list_roots().expect("list roots");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].display_name, "Pictures Again");
+        assert!(roots[0].root_folder_id.is_none());
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert!(media.items.is_empty());
     }
 
     #[test]
@@ -1202,6 +1768,42 @@ mod tests {
             .expect("count files");
         assert_eq!(folder_count, 0);
         assert_eq!(file_count, 0);
+    }
+
+    #[test]
+    fn commit_scan_batch_rejects_disabled_root_inside_write_transaction() {
+        let mut database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        database.disable_root(root_id).expect("disable root");
+
+        let error = database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: None,
+                    name: String::new(),
+                    path_hash: "root-hash".to_string(),
+                    mtime: Some(10),
+                }],
+                files: Vec::new(),
+            })
+            .expect_err("disabled root should reject scan batch");
+        assert!(error.to_string().contains("disabled"));
+
+        let folder_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM folders WHERE root_id = ?1",
+                [root_id],
+                |row| row.get(0),
+            )
+            .expect("count folders");
+        assert_eq!(folder_count, 0);
     }
 
     #[test]

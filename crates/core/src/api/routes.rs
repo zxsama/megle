@@ -4,6 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::fs;
 
 use crate::api::AppState;
 use crate::db::{FolderRecord, MediaPageQuery, MediaRecord, NewRoot, RootRecord, TaskRecord};
@@ -102,6 +103,12 @@ struct ScanTaskRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListFolderChildrenQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ListMediaQuery {
     #[serde(rename = "rootId")]
     root_id: Option<i64>,
@@ -189,13 +196,25 @@ async fn add_root(
     State(state): State<AppState>,
     Json(payload): Json<AddRootRequest>,
 ) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    let canonical_path = fs::canonicalize(&payload.path).map_err(|error| {
+        CoreError::bad_request(format!(
+            "root path does not exist or cannot be opened: {error}"
+        ))
+    })?;
+    if !canonical_path.is_dir() {
+        return Err(CoreError::bad_request(format!(
+            "root path is not a directory: {}",
+            canonical_path.display()
+        )));
+    }
+    let canonical_path = canonical_path.to_string_lossy().into_owned();
     let display_name = payload
         .display_name
-        .unwrap_or_else(|| fallback_display_name(&payload.path));
+        .unwrap_or_else(|| fallback_display_name(&canonical_path));
     let (root_id, task_id) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let root_id = database.add_root(NewRoot {
-            path: payload.path,
+            path: canonical_path,
             display_name,
         })?;
         let task_id = database.create_root_scan_task(root_id)?;
@@ -213,13 +232,21 @@ async fn add_root(
     ))
 }
 
-async fn remove_root(Path(_root_id): Path<i64>) -> (StatusCode, Json<AcceptedResponse>) {
-    (StatusCode::ACCEPTED, Json(accepted()))
+async fn remove_root(
+    State(state): State<AppState>,
+    Path(root_id): Path<i64>,
+) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    if !database.disable_root(root_id)? {
+        return Err(CoreError::not_found(format!("root not found: {root_id}")));
+    }
+    Ok((StatusCode::ACCEPTED, Json(accepted())))
 }
 
 async fn list_folder_children(
     State(state): State<AppState>,
     Path(folder_id): Path<i64>,
+    Query(query): Query<ListFolderChildrenQuery>,
 ) -> ApiResult<Json<ListResponse<FolderRecord>>> {
     let database = state.database.lock().expect("database mutex poisoned");
     if !database.folder_exists(folder_id)? {
@@ -227,10 +254,12 @@ async fn list_folder_children(
             "folder not found: {folder_id}"
         )));
     }
-    let items = database.list_folder_children(folder_id)?;
+    let page = database
+        .list_folder_children_page(folder_id, query.limit.unwrap_or(200), query.cursor)
+        .map_err(map_cursor_error)?;
     Ok(Json(ListResponse {
-        items,
-        next_cursor: None,
+        items: page.items,
+        next_cursor: page.next_cursor,
     }))
 }
 
@@ -238,18 +267,22 @@ async fn list_media(
     State(state): State<AppState>,
     Query(query): Query<ListMediaQuery>,
 ) -> ApiResult<Json<ListResponse<MediaRecord>>> {
+    let sort = parse_media_sort(query.sort.as_deref())?.to_string();
+    let kind = parse_media_kind(query.kind.as_deref())?.map(str::to_string);
     let database = state.database.lock().expect("database mutex poisoned");
-    let items = database.list_media_page(MediaPageQuery {
-        root_id: query.root_id,
-        folder_id: query.folder_id,
-        limit: query.limit.unwrap_or(200),
-        cursor: query.cursor,
-        sort: query.sort.unwrap_or_else(|| "mtime_desc".to_string()),
-        kind: query.kind,
-    })?;
+    let page = database
+        .list_media_page(MediaPageQuery {
+            root_id: query.root_id,
+            folder_id: query.folder_id,
+            limit: query.limit.unwrap_or(200),
+            cursor: query.cursor,
+            sort,
+            kind,
+        })
+        .map_err(map_cursor_error)?;
     Ok(Json(ListResponse {
-        items,
-        next_cursor: None,
+        items: page.items,
+        next_cursor: page.next_cursor,
     }))
 }
 
@@ -289,9 +322,12 @@ async fn enqueue_scan(
 ) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
     let task_id = {
         let database = state.database.lock().expect("database mutex poisoned");
-        if database.get_root(payload.root_id)?.is_none() {
-            return Err(CoreError::not_found(format!(
-                "root not found: {}",
+        let root = database
+            .get_root(payload.root_id)?
+            .ok_or_else(|| CoreError::not_found(format!("root not found: {}", payload.root_id)))?;
+        if !root.enabled {
+            return Err(CoreError::conflict(format!(
+                "root is disabled: {}",
                 payload.root_id
             )));
         }
@@ -341,6 +377,38 @@ fn accepted() -> AcceptedResponse {
     }
 }
 
+fn parse_media_sort(value: Option<&str>) -> ApiResult<&'static str> {
+    let value = value.unwrap_or("mtime_desc");
+    MEDIA_SORT_VALUES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == value)
+        .ok_or_else(|| CoreError::bad_request(format!("unsupported media sort: {value}")))
+}
+
+fn parse_media_kind(value: Option<&str>) -> ApiResult<Option<&'static str>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    MEDIA_KIND_VALUES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == value)
+        .map(Some)
+        .ok_or_else(|| CoreError::bad_request(format!("unsupported media kind: {value}")))
+}
+
+fn map_cursor_error(error: anyhow::Error) -> CoreError {
+    let message = error.to_string();
+    if message.contains("invalid media cursor")
+        || message.contains("invalid folder cursor")
+        || message.contains("invalid cursor hex")
+    {
+        return CoreError::bad_request(message);
+    }
+    error.into()
+}
+
 async fn enqueue_task(state: &AppState, task_id: i64) -> ApiResult<()> {
     if let Err(error) = state.task_queue.send(task_id).await {
         let error = anyhow::anyhow!("background task queue is closed: {error}");
@@ -352,6 +420,20 @@ async fn enqueue_task(state: &AppState, task_id: i64) -> ApiResult<()> {
 }
 
 impl CoreError {
+    fn bad_request(message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        }
+    }
+
+    fn conflict(message: String) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message,
+        }
+    }
+
     fn not_found(message: String) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -525,7 +607,7 @@ mod tests {
             .expect("get missing media");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(temp_root);
         drop(app);
         drop(state);
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -591,7 +673,7 @@ mod tests {
         }));
 
         wait_for_task_status(&app, task_id, "succeeded").await;
-        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(temp_root);
         drop(app);
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let _ = fs::remove_dir_all(db_dir);
@@ -629,7 +711,7 @@ mod tests {
 
         drop(app);
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(temp_root);
         let _ = fs::remove_dir_all(db_dir);
     }
 
@@ -746,6 +828,240 @@ mod tests {
             .as_str()
             .expect("error")
             .contains("root not found"));
+    }
+
+    #[tokio::test]
+    async fn media_and_folder_routes_return_bad_request_for_invalid_cursors() {
+        let database = test_database();
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let root_folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "root-hash".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let app = router(AppState::new(database));
+
+        for uri in [
+            "/api/media?cursor=not-a-cursor".to_string(),
+            "/api/media?cursor=v1:media:mtime_desc:not-an-id:123".to_string(),
+            "/api/media?cursor=v1:media:mtime_desc:1:not-a-mtime".to_string(),
+            "/api/media?sort=name_asc&cursor=v1:media:name_asc:1:c3".to_string(),
+            format!("/api/folders/{root_folder_id}/children?cursor=not-a-cursor"),
+            format!("/api/folders/{root_folder_id}/children?cursor=v1:folder:not-an-id:616263"),
+            format!("/api/folders/{root_folder_id}/children?cursor=v1:folder:1:c3"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request with invalid cursor");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn media_route_returns_bad_request_for_unknown_sort_or_kind() {
+        let app = router(AppState::new(test_database()));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/media?sort=size_asc")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list media with bad sort");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/media?kind=document")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list media with bad kind");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn roots_post_rejects_nonexistent_path_without_creating_task() {
+        let state = AppState::new(test_database());
+        let app = router(state.clone());
+        let missing_path = unique_temp_dir().join("missing");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/roots")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "path": missing_path }).to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("post missing root");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let database = state.database.lock().expect("database mutex poisoned");
+        assert!(database.list_roots().expect("list roots").is_empty());
+        assert!(database.list_tasks().expect("list tasks").is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_root_hides_root_media_and_rejects_future_scans() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("image.jpg"), b"fake jpg").expect("write image");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let (database, worker_database) = test_database_pair(db_dir.join("megle.sqlite"));
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Remove Root".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        let state = AppState::new_with_worker(database, worker_database);
+        let app = router(state);
+        wait_for_task_status(&app, task_id, "succeeded").await;
+        wait_for_media_count(&app, root_id, 1).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/roots/{root_id}"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("delete root");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/roots")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list roots");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["items"].as_array().expect("root items").is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media?rootId={root_id}&sort=name_asc"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list media");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["items"].as_array().expect("media items").is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "rootId": root_id }).to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("enqueue scan for disabled root");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        drop(app);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn disabled_pending_root_scan_recovered_at_startup_fails_without_scanning() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("image.jpg"), b"fake jpg").expect("write image");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Disabled Pending Root".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        database.disable_root(root_id).expect("disable root");
+        drop(database);
+
+        let database = Database::open(&db_path).expect("reopen database");
+        let worker_database = Database::open(&db_path).expect("reopen worker database");
+        let state = AppState::new_with_worker(database, worker_database);
+        let app = router(state.clone());
+
+        let task = wait_for_task_status(&app, task_id, "failed").await;
+        assert!(task["error"]
+            .as_str()
+            .expect("task error")
+            .contains("disabled"));
+
+        let file_count: i64 = rusqlite::Connection::open(&db_path)
+            .expect("open verification database")
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .expect("count files");
+        assert_eq!(file_count, 0);
+
+        drop(app);
+        drop(state);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(db_dir);
     }
 
     #[tokio::test]
@@ -919,7 +1235,8 @@ mod tests {
         task_id: i64,
         expected_status: &str,
     ) -> serde_json::Value {
-        for _ in 0..50 {
+        let mut last_status = None;
+        for _ in 0..250 {
             let response = app
                 .clone()
                 .oneshot(
@@ -946,13 +1263,18 @@ mod tests {
             if status.as_deref() == Some(expected_status) {
                 return task.expect("task exists");
             }
+            last_status = status;
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        panic!("task {task_id} did not reach status {expected_status}");
+        panic!(
+            "task {task_id} did not reach status {expected_status}; last status was {:?}",
+            last_status
+        );
     }
 
     async fn wait_for_media_count(app: &axum::Router, root_id: i64, expected_count: usize) {
-        for _ in 0..50 {
+        let mut last_count = None;
+        for _ in 0..250 {
             let response = app
                 .clone()
                 .oneshot(
@@ -970,9 +1292,13 @@ mod tests {
             if count == expected_count {
                 return;
             }
+            last_count = Some(count);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        panic!("root {root_id} did not reach media count {expected_count}");
+        panic!(
+            "root {root_id} did not reach media count {expected_count}; last count was {:?}",
+            last_count
+        );
     }
 
     fn test_database() -> Database {
@@ -989,13 +1315,16 @@ mod tests {
     }
 
     fn unique_temp_dir() -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         std::env::temp_dir().join(format!(
-            "megle_api_test_{}_{}",
+            "megle_api_test_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time")
-                .as_nanos()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
 }

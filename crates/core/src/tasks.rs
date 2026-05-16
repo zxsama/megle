@@ -11,6 +11,9 @@ pub fn start_worker(worker_database: Database) -> TaskSender {
     worker_database
         .reset_running_root_scan_tasks_for_recovery()
         .expect("reset running root_scan tasks for startup recovery");
+    worker_database
+        .fail_pending_root_scan_tasks_for_disabled_roots()
+        .expect("fail disabled root_scan tasks for startup recovery");
     let recovery_task_ids = worker_database
         .list_pending_root_scan_task_ids()
         .expect("list pending root_scan tasks for startup recovery");
@@ -53,6 +56,9 @@ fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Resu
             let root = database
                 .get_root(root_id)?
                 .ok_or_else(|| anyhow::anyhow!("root not found: {root_id}"))?;
+            if !root.enabled {
+                return Err(anyhow::anyhow!("root is disabled: {root_id}"));
+            }
             let mut progress_database = database.reopen()?;
             let mut latest_progress = TaskScanProgress {
                 items_seen: 0,

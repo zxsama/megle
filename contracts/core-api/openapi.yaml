@@ -41,6 +41,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedRootResponse"
+        "400":
+          description: Root path does not exist, cannot be opened, or is not a directory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /roots/{rootId}:
     delete:
       operationId: removeRoot
@@ -49,6 +55,16 @@ paths:
       responses:
         "202":
           description: Root disabled or removed from index.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedRootResponse"
+        "404":
+          description: Root not found or already disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /folders/{folderId}/children:
     get:
       operationId: listFolderChildren
@@ -63,6 +79,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FolderListResponse"
+        "400":
+          description: Invalid folder children cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Folder not found.
           content:
@@ -95,6 +117,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MediaListResponse"
+        "400":
+          description: Invalid media query parameter or cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /media/{fileId}:
     get:
       operationId: getMedia
@@ -162,6 +190,12 @@ paths:
                 $ref: "#/components/schemas/AcceptedRootResponse"
         "404":
           description: Root not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Root is disabled and cannot be scanned.
           content:
             application/json:
               schema:

@@ -163,6 +163,7 @@ const schemas = contract.components?.schemas ?? {};
 
 for (const name of [
   "AcceptedRootResponse",
+  "ScanTaskRequest",
   "ScanSummary",
   "RootRecord",
   "RootListResponse",
@@ -178,6 +179,7 @@ for (const name of [
 
 assertInterfaceMatchesSchema("ScanSummary");
 assertInterfaceMatchesSchema("AcceptedRootResponse");
+assertInterfaceMatchesSchema("ScanTaskRequest");
 assertInterfaceMatchesSchema("RootRecord");
 assertInterfaceMatchesSchema("FolderRecord");
 assertInterfaceMatchesSchema("MediaRecord");
@@ -215,7 +217,7 @@ assertOperationParameters("listFolderChildren", ["folderId", "limit", "cursor"])
 assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor", "sort", "kind"]);
 assertOperationParameters("getMedia", ["fileId"]);
 
-for (const method of ["listRoots", "addRoot", "listFolderChildren", "listMedia", "getMedia", "listTasks"]) {
+for (const method of ["listRoots", "addRoot", "removeRoot", "enqueueScan", "listFolderChildren", "listMedia", "getMedia", "listTasks"]) {
   if (!client.includes(`${method}:`)) {
     fail(`client.ts missing operation ${method}`);
   }
@@ -242,6 +244,18 @@ if (!/listFolderChildren:\s*\(folderId:\s*number,\s*params:\s*ListFolderChildren
 
 if (!/listMedia:\s*\(params:\s*ListMediaParams\s*=\s*{}\)\s*=>\s*request<Page<MediaRecord>>\(`\/media\$\{query\(params\)\}`\)/.test(client)) {
   fail("client.ts listMedia must serialize typed query params");
+}
+
+if (!/removeRoot:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/roots\/\$\{rootId\}`,\s*{\s*method:\s*"DELETE"\s*}\)/.test(client)) {
+  fail("client.ts removeRoot must call DELETE /roots/{rootId}");
+}
+
+if (!/ScanTaskRequest/.test(client)) {
+  fail("client.ts enqueueScan must use the typed ScanTaskRequest body");
+}
+
+if (!/enqueueScan:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/scan",\s*{\s*method:\s*"POST",\s*body:\s*JSON\.stringify\([\s\S]*rootId[\s\S]*\)\s*}\)/.test(client)) {
+  fail("client.ts enqueueScan must call POST /tasks/scan with typed rootId body");
 }
 
 if (!/async function readResponseBody\(response:\s*Response\):\s*Promise<unknown>/.test(client)) {
