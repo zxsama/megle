@@ -10,7 +10,9 @@ export type {
   RootRecord,
   ScanTaskRequest,
   ScanSummary,
+  TaskKind,
   TaskRecord,
+  TaskStatus,
   ThumbnailAsset,
   ThumbnailResponse
 } from "./generated-contract";

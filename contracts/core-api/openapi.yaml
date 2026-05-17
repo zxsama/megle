@@ -220,6 +220,54 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /tasks/{taskId}/cancel:
+    post:
+      operationId: cancelTask
+      parameters:
+        - $ref: "#/components/parameters/taskId"
+      responses:
+        "200":
+          description: Task cancellation accepted and persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedRootResponse"
+        "404":
+          description: Task not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Task is already finished and cannot be cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tasks/{taskId}/retry:
+    post:
+      operationId: retryTask
+      parameters:
+        - $ref: "#/components/parameters/taskId"
+      responses:
+        "202":
+          description: Failed or cancelled task reset to a pending retry attempt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedRootResponse"
+        "404":
+          description: Task not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Task cannot be retried from its current status or source state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /file-ops/rename:
     post:
       operationId: renameFile
@@ -267,6 +315,13 @@ components:
         minimum: 1
     fileId:
       name: fileId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    taskId:
+      name: taskId
       in: path
       required: true
       schema:
@@ -355,6 +410,12 @@ components:
         rootId:
           type: integer
           minimum: 1
+    TaskKind:
+      type: string
+      enum: [root_scan, thumbnail]
+    TaskStatus:
+      type: string
+      enum: [pending, running, succeeded, failed, cancelled]
     TaskRecord:
       type: object
       required:
@@ -378,12 +439,11 @@ components:
         id:
           type: integer
         kind:
-          type: string
+          $ref: "#/components/schemas/TaskKind"
         priority:
           type: integer
         status:
-          type: string
-          enum: [pending, running, succeeded, failed]
+          $ref: "#/components/schemas/TaskStatus"
         rootId:
           type: integer
           nullable: true

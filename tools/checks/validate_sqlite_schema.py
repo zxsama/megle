@@ -12,6 +12,8 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0004_thumbnail_state.sql",
     ROOT / "crates" / "core" / "migrations" / "0005_thumbnail_source_fingerprint.sql",
     ROOT / "crates" / "core" / "migrations" / "0006_thumbnail_task_attempt_fingerprint.sql",
+    ROOT / "crates" / "core" / "migrations" / "0007_task_status_contract.sql",
+    ROOT / "crates" / "core" / "migrations" / "0008_task_attempt_generation.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -21,6 +23,7 @@ TASK_PROGRESS_COLUMNS = {
     "media_files_seen",
     "skipped_files",
     "thumbnail_source_fingerprint",
+    "attempt_generation",
 }
 
 REQUIRED_TABLES = {
@@ -65,6 +68,8 @@ REQUIRED_INDEXES = {
 }
 
 THUMBNAIL_STATUSES = {"pending", "queued", "ready", "failed", "skipped_small"}
+TASK_STATUSES = {"pending", "running", "succeeded", "failed", "cancelled"}
+TASK_KINDS = {"root_scan", "thumbnail"}
 THUMBNAIL_PROFILE = "grid_320"
 THUMBNAIL_FORMAT = "image/webp"
 
@@ -136,6 +141,16 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 6 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 7"
+            ).fetchone()
+            if version is None:
+                fail("migration version 7 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 8"
+            ).fetchone()
+            if version is None:
+                fail("migration version 8 was not recorded")
 
             task_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
@@ -245,6 +260,33 @@ def main() -> None:
             ).rowcount
             if invalid_format != 0:
                 fail("thumbnail output format must reject unsupported values")
+            conn.execute(
+                """
+                INSERT INTO tasks(kind, priority, status, root_id, created_at, updated_at)
+                VALUES ('root_scan', 0, 'pending', ?, 1, 1)
+                """,
+                (root_id,),
+            )
+            task_id = conn.execute("SELECT id FROM tasks").fetchone()[0]
+            for status in TASK_STATUSES - {"pending"}:
+                conn.execute(
+                    "UPDATE tasks SET status = ? WHERE id = ?",
+                    (status, task_id),
+                )
+            invalid_task_status = conn.execute(
+                "UPDATE OR IGNORE tasks SET status = 'paused' WHERE id = ?",
+                (task_id,),
+            ).rowcount
+            if invalid_task_status != 0:
+                fail("task status must reject unsupported status values")
+            invalid_task_kind = conn.execute(
+                """
+                INSERT OR IGNORE INTO tasks(kind, priority, status, created_at, updated_at)
+                VALUES ('watcher_scan', 0, 'pending', 1, 1)
+                """
+            ).rowcount
+            if invalid_task_kind != 0:
+                fail("task kind must reject unsupported kind values")
             page = conn.execute(
                 """
                 SELECT files.id, files.name

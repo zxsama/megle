@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::db::{Database, TaskScanProgress, ThumbnailStateUpsert};
+use crate::scan::{ScanOptions, TaskAttemptGuard};
 use crate::thumbnails::{
     cache_key_for, write_placeholder_thumbnail, ThumbnailDecision, ThumbnailPolicy,
     GRID_320_PROFILE,
@@ -48,49 +49,83 @@ pub fn start_worker(worker_database: Database) -> TaskSender {
 }
 
 fn run_task(database: &mut Database, task_id: i64) {
+    let attempt_generation = database.current_task_attempt_generation(task_id).ok();
     if let Err(error) = run_task_with_database(database, task_id) {
-        handle_task_error(database, task_id, error);
+        if let Some(attempt_generation) = attempt_generation {
+            handle_task_error_for_attempt(database, task_id, attempt_generation, error);
+        } else {
+            handle_task_error(database, task_id, error);
+        }
     }
 }
 
 fn handle_task_error(database: &mut Database, task_id: i64, error: anyhow::Error) {
+    if let Ok(attempt_generation) = database.current_task_attempt_generation(task_id) {
+        handle_task_error_for_attempt(database, task_id, attempt_generation, error);
+    }
+}
+
+fn handle_task_error_for_attempt(
+    database: &mut Database,
+    task_id: i64,
+    attempt_generation: i64,
+    error: anyhow::Error,
+) {
+    if !database
+        .task_attempt_is_current(task_id, attempt_generation)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if database.task_is_cancelled(task_id).unwrap_or(false) {
+        return;
+    }
     let error_message = error.to_string();
     if let Ok(Some(task)) = database.get_task(task_id) {
         if task.kind == "thumbnail" {
             if let Some(file_id) = task.file_id {
                 if error_message.contains(THUMBNAIL_SOURCE_CHANGED_ERROR) {
-                    let _ = database.reset_thumbnail_after_stale_source(
+                    let _ = database.reset_thumbnail_after_stale_source_for_task_attempt(
                         file_id,
                         GRID_320_PROFILE,
                         &error_message,
+                        task_id,
+                        attempt_generation,
                     );
                 } else {
-                    let _ = database.publish_thumbnail_failure_for_attempted_source(
-                        file_id,
-                        GRID_320_PROFILE,
-                        task.thumbnail_source_fingerprint.as_deref(),
-                        &error_message,
-                    );
+                    let _ = database
+                        .publish_thumbnail_failure_for_attempted_source_for_task_attempt(
+                            file_id,
+                            GRID_320_PROFILE,
+                            task.thumbnail_source_fingerprint.as_deref(),
+                            &error_message,
+                            task_id,
+                            attempt_generation,
+                        );
                 }
             }
         }
     }
-    let _ = database.mark_task_failed(task_id, &error_message);
+    let _ = database.mark_task_failed_for_attempt(task_id, attempt_generation, &error_message);
 }
 
 fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Result<()> {
     let task = database
         .get_task(task_id)?
         .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
+    if task.status == "cancelled" {
+        return Ok(());
+    }
     if task.status != "pending" {
         return Err(anyhow::anyhow!(
             "task {task_id} is not pending; current status is {}",
             task.status
         ));
     }
+    let attempt_generation = task.attempt_generation;
     match task.kind.as_str() {
         "root_scan" => {
-            database.mark_task_running(task_id)?;
+            database.mark_task_running_for_attempt(task_id, attempt_generation)?;
             let root_id = task
                 .root_id
                 .ok_or_else(|| anyhow::anyhow!("root_scan task missing root id: {task_id}"))?;
@@ -100,7 +135,7 @@ fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Resu
             if !root.enabled {
                 return Err(anyhow::anyhow!("root is disabled: {root_id}"));
             }
-            let mut progress_database = database.reopen()?;
+            let progress_database = std::cell::RefCell::new(database.reopen()?);
             let mut latest_progress = TaskScanProgress {
                 items_seen: 0,
                 items_total: None,
@@ -112,9 +147,13 @@ fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Resu
             let mut progress_callback = |progress: TaskScanProgress| {
                 latest_progress = progress;
                 if progress.items_seen - last_flushed_items >= TASK_PROGRESS_FLUSH_INTERVAL_ITEMS {
-                    if let Some(progress_database) = &mut progress_database {
+                    if let Some(progress_database) = progress_database.borrow_mut().as_mut() {
                         if progress_database
-                            .update_task_scan_progress(task_id, progress)
+                            .update_task_scan_progress_for_attempt(
+                                task_id,
+                                attempt_generation,
+                                progress,
+                            )
                             .is_ok()
                         {
                             last_flushed_items = progress.items_seen;
@@ -122,9 +161,39 @@ fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Resu
                     }
                 }
             };
-            let summary =
-                crate::scan::scan_root_with_progress(database, &root, &mut progress_callback)?;
+            let mut cancellation_callback = || {
+                if let Some(progress_database) = progress_database.borrow_mut().as_mut() {
+                    progress_database.ensure_task_not_cancelled(task_id)?;
+                    if !progress_database.task_attempt_is_current(task_id, attempt_generation)? {
+                        return Err(anyhow::anyhow!(
+                            "task {task_id} attempt superseded while scanning"
+                        ));
+                    }
+                }
+                Ok(())
+            };
+            let summary = crate::scan::scan_root_with_options(
+                database,
+                &root,
+                ScanOptions {
+                    write_batch_size: crate::scan::DEFAULT_SCAN_WRITE_BATCH_SIZE,
+                    progress_callback: Some(&mut progress_callback),
+                    cancellation_callback: Some(&mut cancellation_callback),
+                    task_attempt_guard: Some(TaskAttemptGuard {
+                        task_id,
+                        attempt_generation,
+                    }),
+                    #[cfg(test)]
+                    batch_observer: None,
+                },
+            )?;
             drop(progress_callback);
+            database.ensure_task_not_cancelled(task_id)?;
+            if !database.task_attempt_is_current(task_id, attempt_generation)? {
+                return Err(anyhow::anyhow!(
+                    "task {task_id} attempt superseded before completion"
+                ));
+            }
             latest_progress = TaskScanProgress {
                 items_seen: latest_progress.items_seen,
                 items_total: None,
@@ -132,13 +201,22 @@ fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Resu
                 media_files_seen: summary.media_files_seen as i64,
                 skipped_files: summary.skipped_files as i64,
             };
-            database.update_task_scan_progress(task_id, latest_progress)?;
-            database.mark_task_succeeded(task_id)?;
+            database.update_task_scan_progress_for_attempt(
+                task_id,
+                attempt_generation,
+                latest_progress,
+            )?;
+            database.mark_task_succeeded_for_attempt(task_id, attempt_generation)?;
             Ok(())
         }
         "thumbnail" => {
             let cache_root = database.default_thumbnail_cache_dir();
-            run_thumbnail_task_with_cache(database, task_id, &cache_root)
+            run_thumbnail_task_with_cache_for_attempt(
+                database,
+                task_id,
+                attempt_generation,
+                &cache_root,
+            )
         }
         other => Err(anyhow::anyhow!("unsupported task kind: {other}")),
     }
@@ -149,7 +227,23 @@ fn run_thumbnail_task_with_cache(
     task_id: i64,
     cache_root: &Path,
 ) -> anyhow::Result<()> {
-    run_thumbnail_task_with_cache_and_before_publish(database, task_id, cache_root, |_| {})
+    let attempt_generation = database.current_task_attempt_generation(task_id)?;
+    run_thumbnail_task_with_cache_for_attempt(database, task_id, attempt_generation, cache_root)
+}
+
+fn run_thumbnail_task_with_cache_for_attempt(
+    database: &mut Database,
+    task_id: i64,
+    attempt_generation: i64,
+    cache_root: &Path,
+) -> anyhow::Result<()> {
+    run_thumbnail_task_with_cache_and_before_publish_for_attempt(
+        database,
+        task_id,
+        attempt_generation,
+        cache_root,
+        |_| {},
+    )
 }
 
 fn run_thumbnail_task_with_cache_and_before_publish(
@@ -158,9 +252,29 @@ fn run_thumbnail_task_with_cache_and_before_publish(
     cache_root: &Path,
     before_publish: impl FnOnce(&mut Database),
 ) -> anyhow::Result<()> {
+    let attempt_generation = database.current_task_attempt_generation(task_id)?;
+    run_thumbnail_task_with_cache_and_before_publish_for_attempt(
+        database,
+        task_id,
+        attempt_generation,
+        cache_root,
+        before_publish,
+    )
+}
+
+fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
+    database: &mut Database,
+    task_id: i64,
+    attempt_generation: i64,
+    cache_root: &Path,
+    before_publish: impl FnOnce(&mut Database),
+) -> anyhow::Result<()> {
     let task = database
         .get_task(task_id)?
         .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
+    if task.status == "cancelled" {
+        return Ok(());
+    }
     if task.status != "pending" && task.status != "running" {
         return Err(anyhow::anyhow!(
             "task {task_id} is not pending or running; current status is {}",
@@ -176,7 +290,17 @@ fn run_thumbnail_task_with_cache_and_before_publish(
     let policy = ThumbnailPolicy::grid_320();
     let source_fingerprint = source.source_fingerprint(GRID_320_PROFILE);
     if task.status == "pending" {
-        database.mark_thumbnail_task_running(task_id, &source_fingerprint)?;
+        database.mark_thumbnail_task_running_for_attempt(
+            task_id,
+            attempt_generation,
+            &source_fingerprint,
+        )?;
+    }
+    database.ensure_task_not_cancelled(task_id)?;
+    if !database.task_attempt_is_current(task_id, attempt_generation)? {
+        return Err(anyhow::anyhow!(
+            "task {task_id} attempt superseded before thumbnail processing"
+        ));
     }
 
     let dimensions = if source.metadata_status.as_deref() == Some("ready") {
@@ -189,53 +313,75 @@ fn run_thumbnail_task_with_cache_and_before_publish(
         == ThumbnailDecision::SkippedSmall
     {
         before_publish(database);
-        let published = database.upsert_thumbnail_state_if_source_fingerprint_current(
-            ThumbnailStateUpsert {
-                file_id,
-                profile: GRID_320_PROFILE.to_string(),
-                state: "skipped_small".to_string(),
-                cache_key: None,
-                width: None,
-                height: None,
-                byte_size: None,
-                error: None,
-                source_fingerprint: Some(source_fingerprint.clone()),
-            },
-            &source_fingerprint,
-        )?;
+        database.ensure_task_not_cancelled(task_id)?;
+        if !database.task_attempt_is_current(task_id, attempt_generation)? {
+            return Err(anyhow::anyhow!(
+                "task {task_id} attempt superseded before thumbnail publish"
+            ));
+        }
+        let published = database
+            .upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
+                ThumbnailStateUpsert {
+                    file_id,
+                    profile: GRID_320_PROFILE.to_string(),
+                    state: "skipped_small".to_string(),
+                    cache_key: None,
+                    width: None,
+                    height: None,
+                    byte_size: None,
+                    error: None,
+                    source_fingerprint: Some(source_fingerprint.clone()),
+                },
+                &source_fingerprint,
+                task_id,
+                attempt_generation,
+            )?;
         if !published {
             return Err(anyhow::anyhow!(
                 "{THUMBNAIL_SOURCE_CHANGED_ERROR}: {file_id}"
             ));
         }
-        database.mark_task_succeeded(task_id)?;
+        database.mark_task_succeeded_for_attempt(task_id, attempt_generation)?;
         return Ok(());
     }
 
     let cache_key = cache_key_for(&source.cache_identity(), GRID_320_PROFILE);
     let generated = write_placeholder_thumbnail(cache_root, &cache_key)?;
     before_publish(database);
-    let published = database.upsert_thumbnail_state_if_source_fingerprint_current(
-        ThumbnailStateUpsert {
-            file_id,
-            profile: GRID_320_PROFILE.to_string(),
-            state: "ready".to_string(),
-            cache_key: Some(cache_key.clone()),
-            width: Some(generated.width),
-            height: Some(generated.height),
-            byte_size: Some(generated.byte_size),
-            error: None,
-            source_fingerprint: Some(source_fingerprint.clone()),
-        },
-        &source_fingerprint,
-    )?;
+    if let Err(error) = database.ensure_task_not_cancelled(task_id) {
+        cleanup_thumbnail_cache_file(cache_root, &cache_key);
+        return Err(error);
+    }
+    if !database.task_attempt_is_current(task_id, attempt_generation)? {
+        cleanup_thumbnail_cache_file(cache_root, &cache_key);
+        return Err(anyhow::anyhow!(
+            "task {task_id} attempt superseded before thumbnail publish"
+        ));
+    }
+    let published = database
+        .upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
+            ThumbnailStateUpsert {
+                file_id,
+                profile: GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: Some(cache_key.clone()),
+                width: Some(generated.width),
+                height: Some(generated.height),
+                byte_size: Some(generated.byte_size),
+                error: None,
+                source_fingerprint: Some(source_fingerprint.clone()),
+            },
+            &source_fingerprint,
+            task_id,
+            attempt_generation,
+        )?;
     if !published {
         cleanup_thumbnail_cache_file(cache_root, &cache_key);
         return Err(anyhow::anyhow!(
             "{THUMBNAIL_SOURCE_CHANGED_ERROR}: {file_id}"
         ));
     }
-    database.mark_task_succeeded(task_id)?;
+    database.mark_task_succeeded_for_attempt(task_id, attempt_generation)?;
     Ok(())
 }
 
@@ -324,7 +470,9 @@ mod tests {
             .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("request thumbnail task");
         let task_id = request.task_id.expect("task id");
-        database.mark_task_running(task_id).expect("mark running");
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
 
         let reset = database
             .reset_running_thumbnail_tasks_for_recovery()
@@ -341,6 +489,57 @@ mod tests {
         assert_eq!(pending, vec![task_id]);
 
         fs::remove_dir_all(temp_root).expect("cleanup media root");
+    }
+
+    #[test]
+    fn cancelled_thumbnail_tasks_are_not_recovered_or_run() {
+        let temp_root = unique_temp_dir("media");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        fs::write(temp_root.join("image.jpg"), b"not a real image").expect("write media file");
+        let cache_root = unique_temp_dir("cache");
+        fs::create_dir_all(&cache_root).expect("create cache root");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let file_id = seed_media_file(&database, &temp_root, "image.jpg");
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail task");
+        let task_id = request.task_id.expect("task id");
+        database
+            .cancel_task(task_id)
+            .expect("cancel thumbnail task");
+
+        assert_eq!(
+            database
+                .reset_running_thumbnail_tasks_for_recovery()
+                .expect("recover thumbnails"),
+            0
+        );
+        assert!(database
+            .list_pending_thumbnail_task_ids()
+            .expect("list pending thumbnails")
+            .is_empty());
+
+        run_task(&mut database, task_id);
+
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "cancelled");
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_ne!(thumbnail.state, "ready");
+        assert!(fs::read_dir(&cache_root)
+            .expect("read cache root")
+            .next()
+            .is_none());
+
+        fs::remove_dir_all(temp_root).expect("cleanup media root");
+        fs::remove_dir_all(cache_root).expect("cleanup cache root");
     }
 
     #[test]
@@ -414,7 +613,9 @@ mod tests {
             .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("request thumbnail task");
         let task_id = request.task_id.expect("thumbnail task id");
-        database.mark_task_running(task_id).expect("mark running");
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
 
         handle_task_error(
             &mut database,
@@ -461,7 +662,9 @@ mod tests {
             .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("request thumbnail task");
         let task_id = request.task_id.expect("thumbnail task id");
-        database.mark_task_running(task_id).expect("mark running");
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
 
         handle_task_error(&mut database, task_id, anyhow::anyhow!("decode failed"));
 
@@ -492,7 +695,9 @@ mod tests {
             .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("request thumbnail task");
         let task_id = request.task_id.expect("thumbnail task id");
-        database.mark_task_running(task_id).expect("mark running");
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
         let source = database
             .get_thumbnail_source(file_id)
             .expect("get source")
@@ -542,7 +747,9 @@ mod tests {
             .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("request thumbnail task");
         let task_id = first.task_id.expect("thumbnail task id");
-        database.mark_task_running(task_id).expect("mark running");
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
 
         let old_source_fingerprint = database
             .get_thumbnail_source(file_id)
@@ -599,6 +806,57 @@ mod tests {
             .expect("request thumbnail again");
         assert_eq!(next_request.thumbnail.state, "queued");
         assert!(next_request.queued);
+
+        fs::remove_dir_all(temp_root).expect("cleanup media root");
+    }
+
+    #[test]
+    fn old_thumbnail_attempt_failure_does_not_mutate_retried_task_or_thumbnail() {
+        let temp_root = unique_temp_dir("media");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        fs::write(temp_root.join("image.jpg"), b"not a real image").expect("write media file");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let file_id = seed_media_file(&database, &temp_root, "image.jpg");
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail task");
+        let task_id = request.task_id.expect("thumbnail task id");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        database
+            .mark_thumbnail_task_running_for_attempt(task_id, old_attempt, "old-source")
+            .expect("mark old thumbnail attempt running");
+        database.cancel_task(task_id).expect("cancel task");
+        let retried = database.retry_task(task_id).expect("retry task");
+        assert_eq!(retried.status, "pending");
+        assert!(retried.attempt_generation > old_attempt);
+
+        handle_task_error_for_attempt(
+            &mut database,
+            task_id,
+            old_attempt,
+            anyhow::anyhow!("late decode failure"),
+        );
+
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "pending");
+        assert_eq!(task.error, None);
+        assert_eq!(task.attempt_generation, retried.attempt_generation);
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "queued");
+        assert_eq!(thumbnail.error, None);
 
         fs::remove_dir_all(temp_root).expect("cleanup media root");
     }

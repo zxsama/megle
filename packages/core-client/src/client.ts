@@ -71,6 +71,14 @@ export function createCoreClient(config: CoreClientConfig) {
         method: "POST",
         body: JSON.stringify({ rootId } satisfies ScanTaskRequest)
       }),
+    cancelTask: (taskId: number) =>
+      request<AcceptedRootResponse>(`/tasks/${taskId}/cancel`, {
+        method: "POST"
+      }),
+    retryTask: (taskId: number) =>
+      request<AcceptedRootResponse>(`/tasks/${taskId}/retry`, {
+        method: "POST"
+      }),
     listFolderChildren: (folderId: number, params: ListFolderChildrenParams = {}) =>
       request<Page<FolderRecord>>(`/folders/${folderId}/children${query(params)}`),
     listMedia: (params: ListMediaParams = {}) => request<Page<MediaRecord>>(`/media${query(params)}`),

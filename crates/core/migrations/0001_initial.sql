@@ -92,9 +92,9 @@ CREATE TABLE IF NOT EXISTS thumbs (
 
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY,
-  kind TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('root_scan', 'thumbnail')),
   priority INTEGER NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
   root_id INTEGER REFERENCES roots(id) ON DELETE SET NULL,
   file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,

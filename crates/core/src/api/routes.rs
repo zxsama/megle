@@ -57,6 +57,8 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/media/{fileId}/preview",
     "/api/tasks",
     "/api/tasks/scan",
+    "/api/tasks/{taskId}/cancel",
+    "/api/tasks/{taskId}/retry",
     "/api/file-ops/rename",
     "/api/file-ops/move",
     "/api/file-ops/delete",
@@ -198,6 +200,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/media/:file_id/preview", get(get_preview))
         .route("/api/tasks", get(list_tasks))
         .route("/api/tasks/scan", post(enqueue_scan))
+        .route("/api/tasks/:task_id/cancel", post(cancel_task))
+        .route("/api/tasks/:task_id/retry", post(retry_task))
         .route("/api/file-ops/rename", post(rename_file))
         .route("/api/file-ops/move", post(move_files))
         .route("/api/file-ops/delete", post(delete_files))
@@ -241,16 +245,17 @@ async fn add_root(
     let display_name = payload
         .display_name
         .unwrap_or_else(|| fallback_display_name(&canonical_path));
-    let (root_id, task_id) = {
+    let (root_id, task_id, attempt_generation) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let root_id = database.add_root(NewRoot {
             path: canonical_path,
             display_name,
         })?;
         let task_id = database.create_root_scan_task(root_id)?;
-        (root_id, task_id)
+        let attempt_generation = database.current_task_attempt_generation(task_id)?;
+        (root_id, task_id, attempt_generation)
     };
-    enqueue_task(&state, task_id).await?;
+    enqueue_task(&state, task_id, attempt_generation).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(AcceptedResponse {
@@ -334,7 +339,7 @@ async fn get_thumbnail(
 ) -> ApiResult<(StatusCode, Json<ThumbnailResponse>)> {
     let profile = normalize_profile(query.profile.as_deref())
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
-    let (thumbnail, queued_task_id) = {
+    let (thumbnail, queued_task) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
             .get_thumbnail(file_id, profile)?
@@ -348,13 +353,20 @@ async fn get_thumbnail(
             } else {
                 None
             };
-            (request.thumbnail, queued_task_id)
+            let queued_task = queued_task_id
+                .map(|task_id| {
+                    database
+                        .current_task_attempt_generation(task_id)
+                        .map(|attempt| (task_id, attempt))
+                })
+                .transpose()?;
+            (request.thumbnail, queued_task)
         } else {
             (thumbnail, None)
         }
     };
-    if let Some(task_id) = queued_task_id {
-        enqueue_task(&state, task_id).await?;
+    if let Some((task_id, attempt_generation)) = queued_task {
+        enqueue_task(&state, task_id, attempt_generation).await?;
     }
     let status = if is_pending_status(&thumbnail.state) {
         StatusCode::ACCEPTED
@@ -381,7 +393,7 @@ async fn enqueue_scan(
     State(state): State<AppState>,
     Json(payload): Json<ScanTaskRequest>,
 ) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
-    let task_id = {
+    let (task_id, attempt_generation) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let root = database
             .get_root(payload.root_id)?
@@ -392,15 +404,60 @@ async fn enqueue_scan(
                 payload.root_id
             )));
         }
-        database.create_root_scan_task(payload.root_id)?
+        let task_id = database.create_root_scan_task(payload.root_id)?;
+        let attempt_generation = database.current_task_attempt_generation(task_id)?;
+        (task_id, attempt_generation)
     };
-    enqueue_task(&state, task_id).await?;
+    enqueue_task(&state, task_id, attempt_generation).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(AcceptedResponse {
             accepted: true,
             task_id: Some(task_id),
             root_id: Some(payload.root_id),
+            scan: None,
+        }),
+    ))
+}
+
+async fn cancel_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<i64>,
+) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    let task = {
+        let database = state.database.lock().expect("database mutex poisoned");
+        database
+            .cancel_task(task_id)
+            .map_err(map_task_action_error)?
+    };
+    Ok((
+        StatusCode::OK,
+        Json(AcceptedResponse {
+            accepted: true,
+            task_id: Some(task.id),
+            root_id: task.root_id,
+            scan: None,
+        }),
+    ))
+}
+
+async fn retry_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<i64>,
+) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    let task = {
+        let database = state.database.lock().expect("database mutex poisoned");
+        database
+            .retry_task(task_id)
+            .map_err(map_task_action_error)?
+    };
+    enqueue_task(&state, task.id, task.attempt_generation).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AcceptedResponse {
+            accepted: true,
+            task_id: Some(task.id),
+            root_id: task.root_id,
             scan: None,
         }),
     ))
@@ -511,23 +568,29 @@ fn map_thumbnail_request_error(error: anyhow::Error) -> CoreError {
     error.into()
 }
 
-async fn enqueue_task(state: &AppState, task_id: i64) -> ApiResult<()> {
+fn map_task_action_error(error: anyhow::Error) -> CoreError {
+    let message = error.to_string();
+    if message.contains("task not found") {
+        return CoreError::not_found(message);
+    }
+    if message.contains("not cancellable")
+        || message.contains("not retryable")
+        || message.contains("root is disabled")
+        || message.contains("root not found")
+        || message.contains("media item not found")
+        || message.contains("missing root id")
+        || message.contains("missing file id")
+    {
+        return CoreError::conflict(message);
+    }
+    error.into()
+}
+
+async fn enqueue_task(state: &AppState, task_id: i64, attempt_generation: i64) -> ApiResult<()> {
     if let Err(error) = state.task_queue.send(task_id).await {
         let error = anyhow::anyhow!("background task queue is closed: {error}");
         let database = state.database.lock().expect("database mutex poisoned");
-        if let Some(task) = database.get_task(task_id)? {
-            if task.kind == "thumbnail" {
-                if let Some(file_id) = task.file_id {
-                    database.publish_thumbnail_failure_for_attempted_source(
-                        file_id,
-                        crate::thumbnails::GRID_320_PROFILE,
-                        task.thumbnail_source_fingerprint.as_deref(),
-                        &error.to_string(),
-                    )?;
-                }
-            }
-        }
-        database.mark_task_failed(task_id, &error.to_string())?;
+        database.mark_task_failed_for_attempt(task_id, attempt_generation, &error.to_string())?;
         return Err(error.into());
     }
     Ok(())
@@ -840,6 +903,11 @@ mod tests {
             .expect("get ready source")
             .expect("ready source exists")
             .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        let skipped_source_fingerprint = database
+            .get_thumbnail_source(skipped_file_id)
+            .expect("get skipped source")
+            .expect("skipped source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
         drop(database);
 
         let conn = rusqlite::Connection::open(&db_path).expect("open seed connection");
@@ -866,10 +934,10 @@ mod tests {
         .expect("insert ready thumbnail");
         conn.execute(
             r#"
-            INSERT INTO thumbs(file_id, profile, state, updated_at)
-            VALUES (?1, 'grid_320', 'skipped_small', 11)
+            INSERT INTO thumbs(file_id, profile, state, source_fingerprint, updated_at)
+            VALUES (?1, 'grid_320', 'skipped_small', ?2, 11)
             "#,
-            [skipped_file_id],
+            (skipped_file_id, skipped_source_fingerprint),
         )
         .expect("insert skipped thumbnail");
         drop(conn);
@@ -1262,7 +1330,7 @@ mod tests {
             .create_root_scan_task(root_id)
             .expect("create root scan task");
         database
-            .mark_task_running(task_id)
+            .mark_task_running_current_attempt_for_test(task_id)
             .expect("mark task running");
         drop(database);
 
@@ -1586,7 +1654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thumbnail_enqueue_failure_marks_task_and_thumbnail_failed() {
+    async fn thumbnail_enqueue_failure_marks_task_failed_without_terminal_thumbnail_publish() {
         let database = test_database();
         let file_id = seed_media_file(&database);
         let (_sender, receiver) = tokio::sync::mpsc::channel(1);
@@ -1618,12 +1686,130 @@ mod tests {
             .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("get thumbnail")
             .expect("thumbnail exists");
-        assert_eq!(thumbnail.state, "failed");
-        assert!(thumbnail
-            .error
-            .as_deref()
-            .expect("thumbnail error")
-            .contains("background task queue is closed"));
+        assert_eq!(thumbnail.state, "queued");
+        assert_eq!(thumbnail.error, None);
+    }
+
+    #[tokio::test]
+    async fn task_cancel_and_retry_routes_update_task_and_enqueue_retry() {
+        let database = test_database();
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: "D:/Pictures/Action Root".to_string(),
+                display_name: "Action Root".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create task");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+        };
+        let app = router(state.clone());
+
+        let cancel_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{task_id}/cancel"))
+                    .body(Body::empty())
+                    .expect("build cancel request"),
+            )
+            .await
+            .expect("cancel task");
+        assert_eq!(cancel_response.status(), StatusCode::OK);
+        let cancel_body = response_json(cancel_response).await;
+        assert_eq!(cancel_body["accepted"], true);
+        assert_eq!(cancel_body["taskId"], task_id);
+        assert!(receiver.try_recv().is_err());
+
+        let retry_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{task_id}/retry"))
+                    .body(Body::empty())
+                    .expect("build retry request"),
+            )
+            .await
+            .expect("retry task");
+        assert_eq!(retry_response.status(), StatusCode::ACCEPTED);
+        let retry_body = response_json(retry_response).await;
+        assert_eq!(retry_body["accepted"], true);
+        assert_eq!(retry_body["taskId"], task_id);
+        assert_eq!(retry_body["rootId"], root_id);
+        assert_eq!(receiver.try_recv().expect("retry enqueued task"), task_id);
+
+        let database = state.database.lock().expect("database mutex poisoned");
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn task_action_routes_return_not_found_and_conflict_for_invalid_actions() {
+        let database = test_database();
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: "D:/Pictures/Finished Root".to_string(),
+                display_name: "Finished Root".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create task");
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
+        database
+            .mark_task_succeeded_current_attempt_for_test(task_id)
+            .expect("mark succeeded");
+        let state = AppState::new(database);
+        let app = router(state);
+
+        let missing_cancel = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/999999/cancel")
+                    .body(Body::empty())
+                    .expect("build missing cancel request"),
+            )
+            .await
+            .expect("cancel missing task");
+        assert_eq!(missing_cancel.status(), StatusCode::NOT_FOUND);
+
+        let retry_finished = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{task_id}/retry"))
+                    .body(Body::empty())
+                    .expect("build retry finished request"),
+            )
+            .await
+            .expect("retry finished task");
+        assert_eq!(retry_finished.status(), StatusCode::CONFLICT);
+
+        let cancel_finished = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{task_id}/cancel"))
+                    .body(Body::empty())
+                    .expect("build cancel finished request"),
+            )
+            .await
+            .expect("cancel finished task");
+        assert_eq!(cancel_finished.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

@@ -8,3 +8,8 @@ pub const THUMBNAIL_SOURCE_FINGERPRINT_MIGRATION: &str =
     include_str!("../../migrations/0005_thumbnail_source_fingerprint.sql");
 pub const THUMBNAIL_TASK_ATTEMPT_FINGERPRINT_MIGRATION: &str =
     include_str!("../../migrations/0006_thumbnail_task_attempt_fingerprint.sql");
+pub const TASK_STATUS_CONTRACT_MIGRATION: &str =
+    include_str!("../../migrations/0007_task_status_contract.sql");
+#[allow(dead_code)]
+pub const TASK_ATTEMPT_GENERATION_MIGRATION: &str =
+    include_str!("../../migrations/0008_task_attempt_generation.sql");

@@ -31,8 +31,16 @@ pub struct ScanSummary {
 pub struct ScanOptions<'a> {
     pub write_batch_size: usize,
     pub progress_callback: Option<&'a mut dyn FnMut(TaskScanProgress)>,
+    pub cancellation_callback: Option<&'a mut dyn FnMut() -> anyhow::Result<()>>,
+    pub task_attempt_guard: Option<TaskAttemptGuard>,
     #[cfg(test)]
     pub batch_observer: Option<std::rc::Rc<dyn Fn(ScanBatchStats)>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskAttemptGuard {
+    pub task_id: i64,
+    pub attempt_generation: i64,
 }
 
 impl Default for ScanOptions<'_> {
@@ -40,6 +48,8 @@ impl Default for ScanOptions<'_> {
         Self {
             write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
             progress_callback: None,
+            cancellation_callback: None,
+            task_attempt_guard: None,
             #[cfg(test)]
             batch_observer: None,
         }
@@ -57,6 +67,7 @@ pub fn scan_root(database: &mut Database, root: &RootRecord) -> anyhow::Result<S
     scan_root_with_options(database, root, ScanOptions::default())
 }
 
+#[allow(dead_code)]
 pub fn scan_root_with_progress(
     database: &mut Database,
     root: &RootRecord,
@@ -68,6 +79,8 @@ pub fn scan_root_with_progress(
         ScanOptions {
             write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
             progress_callback: Some(progress_callback),
+            cancellation_callback: None,
+            task_attempt_guard: None,
             #[cfg(test)]
             batch_observer: None,
         },
@@ -80,6 +93,7 @@ pub fn scan_root_with_options(
     mut options: ScanOptions<'_>,
 ) -> anyhow::Result<ScanSummary> {
     let root_path = PathBuf::from(&root.path);
+    check_scan_cancelled(&mut options)?;
     ensure_root_enabled(database, root.id)?;
     let root_batch = ScanWriteBatch {
         folders: vec![FolderUpsert {
@@ -92,8 +106,9 @@ pub fn scan_root_with_options(
         files: Vec::new(),
     };
     observe_scan_batch(&options, root_batch.folders.len(), root_batch.files.len());
+    check_scan_cancelled(&mut options)?;
     ensure_root_enabled(database, root.id)?;
-    let root_result = database.commit_scan_batch(root_batch)?;
+    let root_result = commit_scan_batch_with_optional_task_guard(database, root_batch, &options)?;
     let root_folder_id = root_result.folder_ids[0];
 
     let mut folder_ids = HashMap::new();
@@ -108,8 +123,10 @@ pub fn scan_root_with_options(
     };
     let mut items_seen = 0_i64;
     emit_progress(&mut options, items_seen, &summary);
+    check_scan_cancelled(&mut options)?;
 
     for entry in WalkDir::new(&root_path).min_depth(1) {
+        check_scan_cancelled(&mut options)?;
         let entry = entry?;
         let path = entry.path();
         let metadata = entry.metadata()?;
@@ -128,24 +145,28 @@ pub fn scan_root_with_options(
                 files: Vec::new(),
             };
             observe_scan_batch(&options, batch.folders.len(), batch.files.len());
+            check_scan_cancelled(&mut options)?;
             ensure_root_enabled(database, root.id)?;
-            let result = database.commit_scan_batch(batch)?;
+            let result = commit_scan_batch_with_optional_task_guard(database, batch, &options)?;
             let folder_id = result.folder_ids[0];
             folder_ids.insert(path.to_path_buf(), folder_id);
             summary.folders_seen += 1;
             emit_progress(&mut options, items_seen, &summary);
+            check_scan_cancelled(&mut options)?;
             continue;
         }
 
         if !metadata.is_file() {
             summary.skipped_files += 1;
             emit_progress(&mut options, items_seen, &summary);
+            check_scan_cancelled(&mut options)?;
             continue;
         }
 
         let Some(kind) = media_kind(path) else {
             summary.skipped_files += 1;
             emit_progress(&mut options, items_seen, &summary);
+            check_scan_cancelled(&mut options)?;
             continue;
         };
 
@@ -165,16 +186,41 @@ pub fn scan_root_with_options(
         });
         summary.media_files_seen += 1;
         emit_progress(&mut options, items_seen, &summary);
+        check_scan_cancelled(&mut options)?;
 
         if pending_files.len() >= write_batch_size {
-            flush_scan_files(database, root.id, &options, &mut pending_files)?;
+            flush_scan_files(database, root.id, &mut options, &mut pending_files)?;
         }
     }
 
-    flush_scan_files(database, root.id, &options, &mut pending_files)?;
+    flush_scan_files(database, root.id, &mut options, &mut pending_files)?;
+    check_scan_cancelled(&mut options)?;
     ensure_root_enabled(database, root.id)?;
-    database.mark_root_scanned(root.id)?;
+    if let Some(guard) = options.task_attempt_guard {
+        database.mark_root_scanned_for_task_attempt(
+            root.id,
+            guard.task_id,
+            guard.attempt_generation,
+        )?;
+    } else {
+        database.mark_root_scanned(root.id)?;
+    }
     Ok(summary)
+}
+
+fn commit_scan_batch_with_optional_task_guard(
+    database: &mut Database,
+    batch: ScanWriteBatch,
+    options: &ScanOptions<'_>,
+) -> anyhow::Result<crate::db::ScanWriteBatchResult> {
+    if let Some(guard) = options.task_attempt_guard {
+        return database.commit_scan_batch_for_task_attempt(
+            batch,
+            guard.task_id,
+            guard.attempt_generation,
+        );
+    }
+    database.commit_scan_batch(batch)
 }
 
 fn parent_folder_id(path: &Path, folder_ids: &HashMap<PathBuf, i64>) -> anyhow::Result<i64> {
@@ -190,7 +236,7 @@ fn parent_folder_id(path: &Path, folder_ids: &HashMap<PathBuf, i64>) -> anyhow::
 fn flush_scan_files(
     database: &mut Database,
     root_id: i64,
-    options: &ScanOptions,
+    options: &mut ScanOptions<'_>,
     pending_files: &mut Vec<ScanFileUpsert>,
 ) -> anyhow::Result<()> {
     if pending_files.is_empty() {
@@ -198,11 +244,16 @@ fn flush_scan_files(
     }
 
     observe_scan_batch(options, 0, pending_files.len());
+    check_scan_cancelled(options)?;
     ensure_root_enabled(database, root_id)?;
-    database.commit_scan_batch(ScanWriteBatch {
-        folders: Vec::new(),
-        files: std::mem::take(pending_files),
-    })?;
+    commit_scan_batch_with_optional_task_guard(
+        database,
+        ScanWriteBatch {
+            folders: Vec::new(),
+            files: std::mem::take(pending_files),
+        },
+        options,
+    )?;
     Ok(())
 }
 
@@ -221,6 +272,13 @@ fn observe_scan_batch(options: &ScanOptions, folders: usize, files: usize) {
 
     #[cfg(not(test))]
     let _ = (options, folders, files);
+}
+
+fn check_scan_cancelled(options: &mut ScanOptions<'_>) -> anyhow::Result<()> {
+    if let Some(callback) = options.cancellation_callback.as_deref_mut() {
+        callback()?;
+    }
+    Ok(())
 }
 
 fn emit_progress(options: &mut ScanOptions<'_>, items_seen: i64, summary: &ScanSummary) {
@@ -366,6 +424,8 @@ mod tests {
             ScanOptions {
                 write_batch_size: 2,
                 progress_callback: None,
+                cancellation_callback: None,
+                task_attempt_guard: None,
                 batch_observer: None,
             },
         )
@@ -509,6 +569,8 @@ mod tests {
             ScanOptions {
                 write_batch_size: 10,
                 progress_callback: None,
+                cancellation_callback: None,
+                task_attempt_guard: None,
                 batch_observer: Some(Rc::new(move |stats| {
                     observed_batches.borrow_mut().push(stats);
                 })),
@@ -560,6 +622,8 @@ mod tests {
             ScanOptions {
                 write_batch_size: 2,
                 progress_callback: Some(&mut progress_callback),
+                cancellation_callback: None,
+                task_attempt_guard: None,
                 batch_observer: None,
             },
         )
@@ -580,6 +644,69 @@ mod tests {
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
         let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[test]
+    fn scan_root_checks_cancellation_before_flushing_pending_files() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("a.jpg"), b"fake jpg").expect("write first image");
+        fs::write(temp_root.join("b.jpg"), b"fake jpg").expect("write second image");
+        fs::write(temp_root.join("c.jpg"), b"fake jpg").expect("write third image");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "cancel-callback-scan-test");
+        let root = test_root(&database, root_id);
+
+        let cancel_requested = Rc::new(Cell::new(false));
+        let progress_cancel_requested = Rc::clone(&cancel_requested);
+        let mut progress_callback = |progress: TaskScanProgress| {
+            if progress.media_files_seen >= 1 {
+                progress_cancel_requested.set(true);
+            }
+        };
+        let callback_cancel_requested = Rc::clone(&cancel_requested);
+        let mut cancellation_callback = || {
+            if callback_cancel_requested.get() {
+                return Err(anyhow::anyhow!("task cancelled: test"));
+            }
+            Ok(())
+        };
+
+        let error = scan_root_with_options(
+            &mut database,
+            &root,
+            ScanOptions {
+                write_batch_size: 10,
+                progress_callback: Some(&mut progress_callback),
+                cancellation_callback: Some(&mut cancellation_callback),
+                task_attempt_guard: None,
+                batch_observer: None,
+            },
+        )
+        .expect_err("cancelled task should stop scan");
+        assert!(error.to_string().contains("cancelled"));
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert!(media.items.is_empty());
+
+        let root = database.get_root(root_id).expect("get root").expect("root");
+        assert_eq!(root.last_scan_at, None);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
 
     fn add_test_root(database: &Database, temp_root: &Path, display_name: &str) -> i64 {

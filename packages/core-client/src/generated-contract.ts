@@ -33,11 +33,14 @@ export interface RootRecord {
   rootFolderId: number | null;
 }
 
+export type TaskKind = "root_scan" | "thumbnail";
+export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
+
 export interface TaskRecord {
   id: number;
-  kind: string;
+  kind: TaskKind;
   priority: number;
-  status: "pending" | "running" | "succeeded" | "failed";
+  status: TaskStatus;
   rootId: number | null;
   fileId: number | null;
   createdAt: number;

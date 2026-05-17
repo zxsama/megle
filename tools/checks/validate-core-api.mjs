@@ -24,6 +24,8 @@ const migrationSql = read("crates/core/migrations/0001_initial.sql");
 const thumbnailMigrationSql = read("crates/core/migrations/0004_thumbnail_state.sql");
 const thumbnailSourceMigrationSql = read("crates/core/migrations/0005_thumbnail_source_fingerprint.sql");
 const thumbnailTaskAttemptMigrationSql = read("crates/core/migrations/0006_thumbnail_task_attempt_fingerprint.sql");
+const taskStatusContractMigrationSql = read("crates/core/migrations/0007_task_status_contract.sql");
+const taskAttemptGenerationMigrationSql = read("crates/core/migrations/0008_task_attempt_generation.sql");
 const thumbnailsRs = read("crates/core/src/thumbnails/mod.rs");
 const pluginsRs = read("crates/core/src/plugins/mod.rs");
 const fsopsRs = read("crates/core/src/fsops/mod.rs");
@@ -68,6 +70,8 @@ const expectedAxumRoutes = [
   "/api/media/:file_id/preview",
   "/api/tasks",
   "/api/tasks/scan",
+  "/api/tasks/:task_id/cancel",
+  "/api/tasks/:task_id/retry",
   "/api/file-ops/rename",
   "/api/file-ops/move",
   "/api/file-ops/delete",
@@ -125,6 +129,12 @@ if (!dbMigrationsRs.includes('include_str!("../../migrations/0005_thumbnail_sour
 }
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0006_thumbnail_task_attempt_fingerprint.sql")')) {
   fail("db thumbnail task attempt fingerprint migration include path changed or missing");
+}
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0007_task_status_contract.sql")')) {
+  fail("db task status contract migration include path changed or missing");
+}
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0008_task_attempt_generation.sql")')) {
+  fail("db task attempt generation migration include path changed or missing");
 }
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");
@@ -336,6 +346,11 @@ for (const value of [
   "TaskRecord",
   "TaskListResponse",
   "ScanTaskRequest",
+  "TaskKind",
+  "TaskStatus",
+  "cancelled",
+  "cancelTask",
+  "retryTask",
   "itemsSeen",
   "itemsTotal",
   "foldersSeen",
@@ -346,6 +361,20 @@ for (const value of [
 ]) {
   if (!openApi.includes(value)) {
     fail(`OpenAPI task contract missing ${value}`);
+  }
+}
+for (const value of [
+  "CHECK(status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled'))",
+  "CHECK(kind IN ('root_scan', 'thumbnail'))",
+  "task_status_contract"
+]) {
+  if (!taskStatusContractMigrationSql.includes(value)) {
+    fail(`task status contract migration missing ${value}`);
+  }
+}
+for (const value of ["attempt_generation", "task_attempt_generation"]) {
+  if (!taskAttemptGenerationMigrationSql.includes(value)) {
+    fail(`task attempt generation migration missing ${value}`);
   }
 }
 if (openApi.includes("scans inline")) {
@@ -361,6 +390,18 @@ for (const value of ["Json(payload): Json<ScanTaskRequest>", "get_root", "create
 const enqueueScanOperation = operationBlock("/tasks/scan", "post");
 if (!enqueueScanOperation.includes('"409"') || !enqueueScanOperation.includes("ErrorResponse")) {
   fail("OpenAPI POST /tasks/scan must document disabled-root 409 ErrorResponse");
+}
+const cancelTaskOperation = operationBlock("/tasks/{taskId}/cancel", "post");
+for (const value of ['operationId: cancelTask', '"200"', '"404"', '"409"', "ErrorResponse"]) {
+  if (!cancelTaskOperation.includes(value)) {
+    fail(`OpenAPI POST /tasks/{taskId}/cancel missing ${value}`);
+  }
+}
+const retryTaskOperation = operationBlock("/tasks/{taskId}/retry", "post");
+for (const value of ['operationId: retryTask', '"202"', '"404"', '"409"', "ErrorResponse"]) {
+  if (!retryTaskOperation.includes(value)) {
+    fail(`OpenAPI POST /tasks/{taskId}/retry missing ${value}`);
+  }
 }
 const mediaOperation = operationBlock("/media", "get");
 if (!mediaOperation.includes('"400"') || !mediaOperation.includes("ErrorResponse")) {
@@ -385,6 +426,14 @@ if (!folderChildrenOperation.includes('"400"') || !folderChildrenOperation.inclu
 }
 if (!functionBody("list_tasks").includes("database.list_tasks")) {
   fail("GET /api/tasks must return persisted task rows");
+}
+for (const [name, action] of [
+  ["cancel_task", "cancel_task"],
+  ["retry_task", "retry_task"]
+]) {
+  if (!new RegExp(`\\.${action}\\(`).test(functionBody(name))) {
+    fail(`${name} route must call database.${action}`);
+  }
 }
 const thumbnailBody = functionBody("get_thumbnail");
 for (const value of ["Json<ThumbnailResponse>", "get_thumbnail", "StatusCode::OK", "StatusCode::ACCEPTED"]) {
@@ -421,15 +470,19 @@ if (tasksRs.includes("Arc<Mutex<Database>>")) {
 if (!tasksRs.includes("start_worker(worker_database: Database)")) {
   fail("background scan worker must own a separate Database handle");
 }
-if (!routesRs.includes("mark_task_failed(task_id, &error.to_string())")) {
-  fail("enqueue failures must mark the created task failed before returning an API error");
+if (!routesRs.includes("mark_task_failed_for_attempt(task_id, attempt_generation, &error.to_string())")) {
+  fail("enqueue failures must mark the created task failed through an attempt guard before returning an API error");
 }
 for (const value of [
   "WHERE id = ?2 AND status = 'pending'",
   "WHERE id = ?2 AND status = 'running'",
+  "attempt_generation = ?3",
+  "task_attempt_is_current",
   "update_task_scan_progress",
   "WHERE id = ?3 AND status IN ('pending', 'running')",
-  'ensure_one_task_updated(task_id, updated, "pending or running")',
+  "WHERE id = ?2 AND status IN ('pending', 'running')",
+  "WHERE id = ?2 AND status IN ('failed', 'cancelled')",
+  "ensure_one_task_attempt_updated",
   "ensure_one_task_updated"
 ]) {
   if (!dbModRs.includes(value)) {

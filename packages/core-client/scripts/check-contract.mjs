@@ -173,6 +173,8 @@ for (const name of [
   "MediaListResponse",
   "ThumbnailAsset",
   "ThumbnailResponse",
+  "TaskKind",
+  "TaskStatus",
   "TaskRecord",
   "TaskListResponse"
 ]) {
@@ -222,7 +224,7 @@ assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor",
 assertOperationParameters("getMedia", ["fileId"]);
 assertOperationParameters("getThumbnail", ["fileId", "profile"]);
 
-for (const method of ["listRoots", "addRoot", "removeRoot", "enqueueScan", "listFolderChildren", "listMedia", "getMedia", "getThumbnail", "listTasks"]) {
+for (const method of ["listRoots", "addRoot", "removeRoot", "enqueueScan", "listFolderChildren", "listMedia", "getMedia", "getThumbnail", "listTasks", "cancelTask", "retryTask"]) {
   if (!client.includes(`${method}:`)) {
     fail(`client.ts missing operation ${method}`);
   }
@@ -252,6 +254,8 @@ for (const line of [
 
 const taskBody = interfaceBody("TaskRecord");
 for (const line of [
+  "kind: TaskKind;",
+  "status: TaskStatus;",
   "itemsSeen: number;",
   "itemsTotal: number | null;",
   "foldersSeen: number;",
@@ -261,8 +265,25 @@ for (const line of [
   requireLine(taskBody, line, "generated-contract.ts TaskRecord");
 }
 
+for (const line of [
+  'export type TaskKind = "root_scan" | "thumbnail";',
+  'export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";'
+]) {
+  if (!generated.includes(line)) {
+    fail(`generated-contract.ts missing '${line}'`);
+  }
+}
+
 if (!/listTasks:\s*\(\)\s*=>\s*request<Page<TaskRecord>>\("\/tasks"\)/.test(client)) {
   fail("client.ts listTasks must request typed task pages");
+}
+
+if (!/cancelTask:\s*\(taskId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/tasks\/\$\{taskId\}\/cancel`,\s*{\s*method:\s*"POST"\s*}\)/.test(client)) {
+  fail("client.ts cancelTask must call POST /tasks/{taskId}/cancel");
+}
+
+if (!/retryTask:\s*\(taskId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/tasks\/\$\{taskId\}\/retry`,\s*{\s*method:\s*"POST"\s*}\)/.test(client)) {
+  fail("client.ts retryTask must call POST /tasks/{taskId}/retry");
 }
 
 if (!/listFolderChildren:\s*\(folderId:\s*number,\s*params:\s*ListFolderChildrenParams\s*=\s*{}\)\s*=>\s*request<Page<FolderRecord>>\(`\/folders\/\$\{folderId\}\/children\$\{query\(params\)\}`\)/.test(client)) {

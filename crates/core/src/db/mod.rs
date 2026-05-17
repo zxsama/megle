@@ -208,6 +208,8 @@ pub struct TaskRecord {
     pub skipped_files: i64,
     #[serde(skip_serializing)]
     pub thumbnail_source_fingerprint: Option<String>,
+    #[serde(skip_serializing)]
+    pub attempt_generation: i64,
     pub error: Option<String>,
 }
 
@@ -283,6 +285,17 @@ impl Database {
             self.connection
                 .execute_batch(migrations::THUMBNAIL_TASK_ATTEMPT_FINGERPRINT_MIGRATION)?;
         }
+        if !self.migration_applied(7)? {
+            self.ensure_task_contract_prerequisite_columns()?;
+            let result = self
+                .connection
+                .execute_batch(migrations::TASK_STATUS_CONTRACT_MIGRATION);
+            self.connection.pragma_update(None, "foreign_keys", "ON")?;
+            result?;
+        }
+        if !self.migration_applied(8)? {
+            self.apply_task_attempt_generation_migration()?;
+        }
         Ok(())
     }
 
@@ -293,6 +306,64 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count != 0)
+    }
+
+    fn ensure_task_contract_prerequisite_columns(&self) -> anyhow::Result<()> {
+        for (column, definition) in [
+            ("items_seen", "items_seen INTEGER NOT NULL DEFAULT 0"),
+            ("items_total", "items_total INTEGER"),
+            ("folders_seen", "folders_seen INTEGER NOT NULL DEFAULT 0"),
+            (
+                "media_files_seen",
+                "media_files_seen INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("skipped_files", "skipped_files INTEGER NOT NULL DEFAULT 0"),
+            (
+                "thumbnail_source_fingerprint",
+                "thumbnail_source_fingerprint TEXT",
+            ),
+            (
+                "attempt_generation",
+                "attempt_generation INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            if !self.table_has_column("tasks", column)? {
+                self.connection
+                    .execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {definition}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn table_has_column(&self, table: &str, column: &str) -> anyhow::Result<bool> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for candidate in columns {
+            if candidate? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn apply_task_attempt_generation_migration(&self) -> anyhow::Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        if !table_has_column_in_transaction(&transaction, "tasks", "attempt_generation")? {
+            transaction.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN attempt_generation INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        transaction.execute(
+            r#"
+            INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+            VALUES (8, 'task_attempt_generation', unixepoch())
+            "#,
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn list_roots(&self) -> anyhow::Result<Vec<RootRecord>> {
@@ -526,7 +597,7 @@ impl Database {
             r#"
             SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at,
                    items_seen, items_total, folders_seen, media_files_seen, skipped_files,
-                   thumbnail_source_fingerprint, error
+                   thumbnail_source_fingerprint, attempt_generation, error
             FROM tasks
             ORDER BY id ASC
             "#,
@@ -545,7 +616,7 @@ impl Database {
             r#"
             SELECT id, kind, priority, status, root_id, file_id, created_at, updated_at,
                    items_seen, items_total, folders_seen, media_files_seen, skipped_files,
-                   thumbnail_source_fingerprint, error
+                   thumbnail_source_fingerprint, attempt_generation, error
             FROM tasks
             WHERE id = ?1
             "#,
@@ -554,18 +625,46 @@ impl Database {
         Ok(rows.next()?.map(task_from_row).transpose()?)
     }
 
-    pub fn mark_task_running(&self, task_id: i64) -> anyhow::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn mark_task_running_current_attempt_for_test(
+        &self,
+        task_id: i64,
+    ) -> anyhow::Result<()> {
+        let attempt_generation = self.current_task_attempt_generation(task_id)?;
+        self.mark_task_running_for_attempt(task_id, attempt_generation)
+    }
+
+    pub fn mark_task_running_for_attempt(
+        &self,
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<()> {
         let updated = self.connection.execute(
-            "UPDATE tasks SET status = 'running', updated_at = ?1, error = NULL WHERE id = ?2 AND status = 'pending'",
-            (unix_timestamp(), task_id),
+            "UPDATE tasks SET status = 'running', updated_at = ?1, error = NULL WHERE id = ?2 AND status = 'pending' AND attempt_generation = ?3",
+            (unix_timestamp(), task_id, attempt_generation),
         )?;
-        self.ensure_one_task_updated(task_id, updated, "pending")?;
+        self.ensure_one_task_attempt_updated(task_id, updated, "pending", attempt_generation)?;
         Ok(())
     }
 
-    pub fn mark_thumbnail_task_running(
+    #[cfg(test)]
+    pub(crate) fn mark_thumbnail_task_running_current_attempt_for_test(
         &self,
         task_id: i64,
+        source_fingerprint: &str,
+    ) -> anyhow::Result<()> {
+        let attempt_generation = self.current_task_attempt_generation(task_id)?;
+        self.mark_thumbnail_task_running_for_attempt(
+            task_id,
+            attempt_generation,
+            source_fingerprint,
+        )
+    }
+
+    pub fn mark_thumbnail_task_running_for_attempt(
+        &self,
+        task_id: i64,
+        attempt_generation: i64,
         source_fingerprint: &str,
     ) -> anyhow::Result<()> {
         let updated = self.connection.execute(
@@ -578,36 +677,235 @@ impl Database {
             WHERE id = ?3
               AND kind = 'thumbnail'
               AND status = 'pending'
+              AND attempt_generation = ?4
             "#,
-            (unix_timestamp(), source_fingerprint, task_id),
+            (
+                unix_timestamp(),
+                source_fingerprint,
+                task_id,
+                attempt_generation,
+            ),
         )?;
-        self.ensure_one_task_updated(task_id, updated, "pending thumbnail")?;
+        self.ensure_one_task_attempt_updated(
+            task_id,
+            updated,
+            "pending thumbnail",
+            attempt_generation,
+        )?;
         Ok(())
     }
 
-    pub fn mark_task_succeeded(&self, task_id: i64) -> anyhow::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn mark_task_succeeded_current_attempt_for_test(
+        &self,
+        task_id: i64,
+    ) -> anyhow::Result<()> {
+        let attempt_generation = self.current_task_attempt_generation(task_id)?;
+        self.mark_task_succeeded_for_attempt(task_id, attempt_generation)
+    }
+
+    pub fn mark_task_succeeded_for_attempt(
+        &self,
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<()> {
         let updated = self.connection.execute(
-            "UPDATE tasks SET status = 'succeeded', updated_at = ?1, error = NULL WHERE id = ?2 AND status = 'running'",
-            (unix_timestamp(), task_id),
+            "UPDATE tasks SET status = 'succeeded', updated_at = ?1, error = NULL WHERE id = ?2 AND status = 'running' AND attempt_generation = ?3",
+            (unix_timestamp(), task_id, attempt_generation),
         )?;
-        self.ensure_one_task_updated(task_id, updated, "running")?;
+        self.ensure_one_task_attempt_updated(task_id, updated, "running", attempt_generation)?;
         Ok(())
     }
 
-    pub fn mark_task_failed(&self, task_id: i64, error: &str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn mark_task_failed_current_attempt_for_test(
+        &self,
+        task_id: i64,
+        error: &str,
+    ) -> anyhow::Result<()> {
+        let attempt_generation = self.current_task_attempt_generation(task_id)?;
+        self.mark_task_failed_for_attempt(task_id, attempt_generation, error)
+    }
+
+    pub fn mark_task_failed_for_attempt(
+        &self,
+        task_id: i64,
+        attempt_generation: i64,
+        error: &str,
+    ) -> anyhow::Result<()> {
         let updated = self.connection.execute(
-            "UPDATE tasks SET status = 'failed', updated_at = ?1, error = ?2 WHERE id = ?3 AND status IN ('pending', 'running')",
-            (unix_timestamp(), error, task_id),
+            "UPDATE tasks SET status = 'failed', updated_at = ?1, error = ?2 WHERE id = ?3 AND status IN ('pending', 'running') AND attempt_generation = ?4",
+            (unix_timestamp(), error, task_id, attempt_generation),
         )?;
         if updated == 0 {
-            return self.ensure_one_task_updated(task_id, updated, "pending or running");
+            return self.ensure_one_task_attempt_updated(
+                task_id,
+                updated,
+                "pending or running",
+                attempt_generation,
+            );
         }
         Ok(())
     }
 
-    pub fn update_task_scan_progress(
+    pub fn cancel_task(&self, task_id: i64) -> anyhow::Result<TaskRecord> {
+        let updated = self.connection.execute(
+            r#"
+            UPDATE tasks
+            SET status = 'cancelled',
+                updated_at = ?1,
+                error = 'cancelled'
+            WHERE id = ?2 AND status IN ('pending', 'running')
+            "#,
+            (unix_timestamp(), task_id),
+        )?;
+        if updated == 0 {
+            let Some(task) = self.get_task(task_id)? else {
+                return Err(anyhow::anyhow!("task not found: {task_id}"));
+            };
+            return Err(anyhow::anyhow!(
+                "task {task_id} is not cancellable; current status is {}",
+                task.status
+            ));
+        }
+        self.get_task(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))
+    }
+
+    pub fn retry_task(&self, task_id: i64) -> anyhow::Result<TaskRecord> {
+        let task = self
+            .get_task(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
+        if task.status != "failed" && task.status != "cancelled" {
+            return Err(anyhow::anyhow!(
+                "task {task_id} is not retryable; current status is {}",
+                task.status
+            ));
+        }
+
+        match task.kind.as_str() {
+            "root_scan" => self.retry_root_scan_task(&task),
+            "thumbnail" => self.retry_thumbnail_task(&task),
+            other => Err(anyhow::anyhow!(
+                "task {task_id} is not retryable; unsupported kind is {other}"
+            )),
+        }
+    }
+
+    fn retry_root_scan_task(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
+        let root_id = task
+            .root_id
+            .ok_or_else(|| anyhow::anyhow!("root_scan task missing root id: {}", task.id))?;
+        let root = self
+            .get_root(root_id)?
+            .ok_or_else(|| anyhow::anyhow!("root not found: {root_id}"))?;
+        if !root.enabled {
+            return Err(anyhow::anyhow!("root is disabled: {root_id}"));
+        }
+
+        let updated = self.connection.execute(
+            r#"
+            UPDATE tasks
+            SET status = 'pending',
+                updated_at = ?1,
+                attempt_generation = attempt_generation + 1,
+                items_seen = 0,
+                items_total = NULL,
+                folders_seen = 0,
+                media_files_seen = 0,
+                skipped_files = 0,
+                thumbnail_source_fingerprint = NULL,
+                error = NULL
+            WHERE id = ?2 AND status IN ('failed', 'cancelled')
+            "#,
+            (unix_timestamp(), task.id),
+        )?;
+        self.ensure_one_task_updated(task.id, updated, "failed or cancelled")?;
+        self.get_task(task.id)?
+            .ok_or_else(|| anyhow::anyhow!("task not found: {}", task.id))
+    }
+
+    fn retry_thumbnail_task(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
+        let file_id = task
+            .file_id
+            .ok_or_else(|| anyhow::anyhow!("thumbnail task missing file id: {}", task.id))?;
+        let source = self
+            .get_thumbnail_source(file_id)?
+            .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
+        let source_fingerprint = source.source_fingerprint(GRID_320_PROFILE);
+        let now = unix_timestamp();
+        let transaction = self.connection.unchecked_transaction()?;
+        let updated = transaction.execute(
+            r#"
+            UPDATE tasks
+            SET status = 'pending',
+                updated_at = ?1,
+                attempt_generation = attempt_generation + 1,
+                items_seen = 0,
+                items_total = NULL,
+                folders_seen = 0,
+                media_files_seen = 0,
+                skipped_files = 0,
+                thumbnail_source_fingerprint = NULL,
+                error = NULL
+            WHERE id = ?2 AND status IN ('failed', 'cancelled')
+            "#,
+            (now, task.id),
+        )?;
+        if updated != 1 {
+            return Err(anyhow::anyhow!(
+                "task {} is not retryable; current status is {}",
+                task.id,
+                task.status
+            ));
+        }
+        upsert_thumbnail_state_in_transaction(
+            &transaction,
+            ThumbnailStateUpsert {
+                file_id,
+                profile: GRID_320_PROFILE.to_string(),
+                state: "queued".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            },
+        )?;
+        transaction.commit()?;
+        self.get_task(task.id)?
+            .ok_or_else(|| anyhow::anyhow!("task not found: {}", task.id))
+    }
+
+    pub fn task_is_cancelled(&self, task_id: i64) -> anyhow::Result<bool> {
+        Ok(self
+            .get_task(task_id)?
+            .map(|task| task.status == "cancelled")
+            .unwrap_or(false))
+    }
+
+    pub fn ensure_task_not_cancelled(&self, task_id: i64) -> anyhow::Result<()> {
+        if self.task_is_cancelled(task_id)? {
+            return Err(anyhow::anyhow!("task cancelled: {task_id}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn update_task_scan_progress_current_attempt_for_test(
         &self,
         task_id: i64,
+        progress: TaskScanProgress,
+    ) -> anyhow::Result<()> {
+        let attempt_generation = self.current_task_attempt_generation(task_id)?;
+        self.update_task_scan_progress_for_attempt(task_id, attempt_generation, progress)
+    }
+
+    pub fn update_task_scan_progress_for_attempt(
+        &self,
+        task_id: i64,
+        attempt_generation: i64,
         progress: TaskScanProgress,
     ) -> anyhow::Result<()> {
         let updated = self.connection.execute(
@@ -619,7 +917,7 @@ impl Database {
                 folders_seen = ?4,
                 media_files_seen = ?5,
                 skipped_files = ?6
-            WHERE id = ?7 AND status = 'running'
+            WHERE id = ?7 AND status = 'running' AND attempt_generation = ?8
             "#,
             (
                 unix_timestamp(),
@@ -629,9 +927,10 @@ impl Database {
                 progress.media_files_seen,
                 progress.skipped_files,
                 task_id,
+                attempt_generation,
             ),
         )?;
-        self.ensure_one_task_updated(task_id, updated, "running")?;
+        self.ensure_one_task_attempt_updated(task_id, updated, "running", attempt_generation)?;
         Ok(())
     }
 
@@ -775,53 +1074,38 @@ impl Database {
         Ok(Some(thumbnail))
     }
 
-    pub fn reset_thumbnail_after_stale_source(
+    pub fn reset_thumbnail_after_stale_source_for_task_attempt(
         &self,
         file_id: i64,
         profile: &str,
         error: &str,
-    ) -> anyhow::Result<()> {
-        let now = unix_timestamp();
-        let updated = self.connection.execute(
-            r#"
-            UPDATE thumbs
-            SET state = 'pending',
-                cache_key = NULL,
-                width = NULL,
-                height = NULL,
-                byte_size = NULL,
-                error = ?1,
-                source_fingerprint = NULL,
-                updated_at = ?2
-            WHERE file_id = ?3
-              AND profile = ?4
-              AND state IN ('pending', 'queued', 'failed')
-            "#,
-            (error, now, file_id, profile),
-        )?;
-        if updated == 0 {
-            self.connection.execute(
-                r#"
-                INSERT OR IGNORE INTO thumbs(
-                    file_id, profile, state, cache_key, width, height, byte_size,
-                    short_side_px, output_format, error, source_fingerprint, updated_at
-                )
-                VALUES (?1, ?2, 'pending', NULL, NULL, NULL, NULL, 320, 'image/webp', ?3, NULL, ?4)
-                "#,
-                (file_id, profile, error, now),
-            )?;
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        if !task_attempt_running_in_transaction(&transaction, task_id, attempt_generation)? {
+            transaction.commit()?;
+            return Ok(false);
         }
-        Ok(())
+        reset_thumbnail_after_stale_source_in_transaction(&transaction, file_id, profile, error)?;
+        transaction.commit()?;
+        Ok(true)
     }
 
-    pub fn publish_thumbnail_failure_for_attempted_source(
+    pub fn publish_thumbnail_failure_for_attempted_source_for_task_attempt(
         &self,
         file_id: i64,
         profile: &str,
         attempted_source_fingerprint: Option<&str>,
         error: &str,
+        task_id: i64,
+        attempt_generation: i64,
     ) -> anyhow::Result<bool> {
         let transaction = self.connection.unchecked_transaction()?;
+        if !task_attempt_running_in_transaction(&transaction, task_id, attempt_generation)? {
+            transaction.commit()?;
+            return Ok(false);
+        }
         let current_source = thumbnail_source_in_transaction(&transaction, file_id)?
             .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
         let current_source_fingerprint = current_source.source_fingerprint(profile);
@@ -883,36 +1167,7 @@ impl Database {
         let source = self
             .get_thumbnail_source(file_id)?
             .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
-        let policy = ThumbnailPolicy::grid_320();
         let source_fingerprint = source.source_fingerprint(profile);
-        let dimensions = if source.has_reliable_dimensions() {
-            (source.width, source.height)
-        } else {
-            (None, None)
-        };
-        if policy.initial_state(source.media_kind.as_deref(), dimensions.0, dimensions.1)
-            == ThumbnailDecision::SkippedSmall
-        {
-            self.upsert_thumbnail_state(ThumbnailStateUpsert {
-                file_id,
-                profile: profile.to_string(),
-                state: "skipped_small".to_string(),
-                cache_key: None,
-                width: None,
-                height: None,
-                byte_size: None,
-                error: None,
-                source_fingerprint: Some(source_fingerprint),
-            })?;
-            let thumbnail = self
-                .get_thumbnail(file_id, profile)?
-                .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
-            return Ok(ThumbnailTaskRequest {
-                thumbnail,
-                task_id: latest_thumbnail_task_id(&self.connection, file_id)?,
-                queued: false,
-            });
-        }
 
         let transaction = self.connection.unchecked_transaction()?;
         let current = thumbnail_for_update_in_transaction(&transaction, file_id, profile)?;
@@ -1192,12 +1447,45 @@ impl Database {
         })
     }
 
+    pub fn commit_scan_batch_for_task_attempt(
+        &mut self,
+        batch: ScanWriteBatch,
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<ScanWriteBatchResult> {
+        let transaction = self.connection.transaction()?;
+        ensure_task_attempt_running_in_transaction(&transaction, task_id, attempt_generation)?;
+        let root_ids = scan_batch_root_ids(&batch);
+        for root_id in root_ids {
+            ensure_root_enabled_in_transaction(&transaction, root_id)?;
+        }
+        let mut folder_ids = Vec::with_capacity(batch.folders.len());
+        let mut file_ids = Vec::with_capacity(batch.files.len());
+
+        for folder in batch.folders {
+            folder_ids.push(upsert_folder_in_transaction(&transaction, folder)?);
+        }
+
+        for file in batch.files {
+            let file_id = upsert_file_in_transaction(&transaction, file.file)?;
+            upsert_media_kind_in_transaction(&transaction, file_id, &file.media_kind)?;
+            file_ids.push(file_id);
+        }
+
+        transaction.commit()?;
+        Ok(ScanWriteBatchResult {
+            folder_ids,
+            file_ids,
+        })
+    }
+
     #[allow(dead_code)]
     pub fn upsert_thumbnail_state(&self, state: ThumbnailStateUpsert) -> anyhow::Result<()> {
         upsert_thumbnail_state_in_connection(&self.connection, state)?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn upsert_thumbnail_state_if_source_fingerprint_current(
         &self,
         state: ThumbnailStateUpsert,
@@ -1215,11 +1503,53 @@ impl Database {
         Ok(true)
     }
 
+    pub fn upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
+        &self,
+        state: ThumbnailStateUpsert,
+        expected_source_fingerprint: &str,
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        if !task_attempt_running_in_transaction(&transaction, task_id, attempt_generation)? {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let current_source = thumbnail_source_in_transaction(&transaction, state.file_id)?
+            .ok_or_else(|| anyhow::anyhow!("media item not found: {}", state.file_id))?;
+        if current_source.source_fingerprint(&state.profile) != expected_source_fingerprint {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        upsert_thumbnail_state_in_transaction(&transaction, state)?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
     pub fn mark_root_scanned(&self, root_id: i64) -> anyhow::Result<()> {
         self.connection.execute(
             "UPDATE roots SET last_scan_at = ?1 WHERE id = ?2 AND enabled = 1",
             (unix_timestamp(), root_id),
         )?;
+        Ok(())
+    }
+
+    pub fn mark_root_scanned_for_task_attempt(
+        &self,
+        root_id: i64,
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        ensure_task_attempt_running_in_transaction(&transaction, task_id, attempt_generation)?;
+        let updated = transaction.execute(
+            "UPDATE roots SET last_scan_at = ?1 WHERE id = ?2 AND enabled = 1",
+            (unix_timestamp(), root_id),
+        )?;
+        if updated != 1 {
+            return Err(anyhow::anyhow!("root is disabled: {root_id}"));
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1277,6 +1607,50 @@ impl Database {
             "task {task_id} is not {expected_status}; current status is {}",
             task.status
         ))
+    }
+
+    fn ensure_one_task_attempt_updated(
+        &self,
+        task_id: i64,
+        updated: usize,
+        expected_status: &str,
+        expected_attempt_generation: i64,
+    ) -> anyhow::Result<()> {
+        if updated == 1 {
+            return Ok(());
+        }
+
+        let Some(task) = self.get_task(task_id)? else {
+            return Err(anyhow::anyhow!("task not found: {task_id}"));
+        };
+        if task.attempt_generation != expected_attempt_generation {
+            return Err(anyhow::anyhow!(
+                "task {task_id} attempt mismatch; expected attempt {}, current attempt {}",
+                expected_attempt_generation,
+                task.attempt_generation
+            ));
+        }
+        Err(anyhow::anyhow!(
+            "task {task_id} is not {expected_status}; current status is {}",
+            task.status
+        ))
+    }
+
+    pub(crate) fn current_task_attempt_generation(&self, task_id: i64) -> anyhow::Result<i64> {
+        self.get_task(task_id)?
+            .map(|task| task.attempt_generation)
+            .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))
+    }
+
+    pub(crate) fn task_attempt_is_current(
+        &self,
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .get_task(task_id)?
+            .map(|task| task.attempt_generation == attempt_generation)
+            .unwrap_or(false))
     }
 }
 
@@ -1342,6 +1716,52 @@ fn ensure_root_enabled_in_transaction(
         return Ok(());
     }
     Err(anyhow::anyhow!("root is disabled: {root_id}"))
+}
+
+fn task_attempt_running_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: i64,
+    attempt_generation: i64,
+) -> anyhow::Result<bool> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT status, attempt_generation
+        FROM tasks
+        WHERE id = ?1
+        "#,
+    )?;
+    let mut rows = statement.query([task_id])?;
+    let Some(row) = rows.next()? else {
+        return Err(anyhow::anyhow!("task not found: {task_id}"));
+    };
+    let status: String = row.get(0)?;
+    let current_attempt: i64 = row.get(1)?;
+    Ok(status == "running" && current_attempt == attempt_generation)
+}
+
+fn ensure_task_attempt_running_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: i64,
+    attempt_generation: i64,
+) -> anyhow::Result<()> {
+    if task_attempt_running_in_transaction(transaction, task_id, attempt_generation)? {
+        return Ok(());
+    }
+    let (status, current_attempt): (String, i64) = transaction.query_row(
+        "SELECT status, attempt_generation FROM tasks WHERE id = ?1",
+        [task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if current_attempt != attempt_generation {
+        return Err(anyhow::anyhow!(
+            "task {task_id} attempt mismatch; expected attempt {}, current attempt {}",
+            attempt_generation,
+            current_attempt
+        ));
+    }
+    Err(anyhow::anyhow!(
+        "task {task_id} is not running; current status is {status}"
+    ))
 }
 
 fn cancel_root_scan_tasks_in_transaction(
@@ -1594,23 +2014,6 @@ fn pending_or_running_thumbnail_task_id(
     Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
 }
 
-fn latest_thumbnail_task_id(
-    connection: &rusqlite::Connection,
-    file_id: i64,
-) -> anyhow::Result<Option<i64>> {
-    let mut statement = connection.prepare(
-        r#"
-        SELECT id
-        FROM tasks
-        WHERE kind = 'thumbnail' AND file_id = ?1
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        "#,
-    )?;
-    let mut rows = statement.query([file_id])?;
-    Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
-}
-
 fn latest_thumbnail_task_id_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     file_id: i64,
@@ -1667,6 +2070,21 @@ fn thumbnail_source_in_transaction(
     )?;
     let mut rows = statement.query([file_id])?;
     Ok(rows.next()?.map(thumbnail_source_from_row).transpose()?)
+}
+
+fn table_has_column_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> anyhow::Result<bool> {
+    let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for candidate in columns {
+        if candidate? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn reset_thumbnail_after_stale_source_in_transaction(
@@ -1996,7 +2414,8 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         media_files_seen: row.get(11)?,
         skipped_files: row.get(12)?,
         thumbnail_source_fingerprint: row.get(13)?,
-        error: row.get(14)?,
+        attempt_generation: row.get(14)?,
+        error: row.get(15)?,
     })
 }
 
@@ -2558,6 +2977,14 @@ mod tests {
         assert_eq!(tasks[0].media_files_seen, 0);
         assert_eq!(tasks[0].skipped_files, 0);
         assert_eq!(tasks[0].thumbnail_source_fingerprint, None);
+        let invalid_status = database
+            .connection
+            .execute(
+                "UPDATE OR IGNORE tasks SET status = 'paused' WHERE id = ?1",
+                [tasks[0].id],
+            )
+            .expect("invalid task status should be ignored");
+        assert_eq!(invalid_status, 0);
     }
 
     #[test]
@@ -2695,6 +3122,15 @@ mod tests {
             )
             .expect("query version 6");
         assert_eq!(version_6_count, 1);
+        let version_7_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 7",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version 7");
+        assert_eq!(version_7_count, 1);
 
         let thumbnail = database
             .get_thumbnail(1, crate::thumbnails::GRID_320_PROFILE)
@@ -2713,6 +3149,100 @@ mod tests {
             .expect("skipped thumbnail exists");
         assert_eq!(skipped.state, "pending");
         assert_eq!(skipped.source_fingerprint, None);
+    }
+
+    #[test]
+    fn task_attempt_generation_migration_recovers_partial_apply_and_defaults_existing_tasks() {
+        let database = Database::open_in_memory().expect("open in-memory database");
+        database
+            .connection
+            .execute_batch(migrations::INITIAL_MIGRATION)
+            .expect("apply initial migration");
+        database
+            .connection
+            .execute_batch(migrations::TASK_PROGRESS_MIGRATION)
+            .expect("apply task progress migration");
+        database
+            .connection
+            .execute_batch(migrations::BROWSING_INDEXES_MIGRATION)
+            .expect("apply browsing indexes migration");
+        database
+            .connection
+            .execute_batch(migrations::THUMBNAIL_STATE_MIGRATION)
+            .expect("apply thumbnail state migration");
+        database
+            .connection
+            .execute_batch(migrations::THUMBNAIL_SOURCE_FINGERPRINT_MIGRATION)
+            .expect("apply thumbnail source fingerprint migration");
+        database
+            .connection
+            .execute_batch(migrations::THUMBNAIL_TASK_ATTEMPT_FINGERPRINT_MIGRATION)
+            .expect("apply thumbnail task fingerprint migration");
+        database
+            .connection
+            .execute_batch(migrations::TASK_STATUS_CONTRACT_MIGRATION)
+            .expect("apply task status contract migration");
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root before v8");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create task before v8");
+
+        database
+            .apply_migrations()
+            .expect("apply v8 attempt generation migration");
+        let task = database
+            .get_task(task_id)
+            .expect("get migrated task")
+            .expect("task exists");
+        assert_eq!(task.attempt_generation, 0);
+        let version_8_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 8",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version 8");
+        assert_eq!(version_8_count, 1);
+
+        database
+            .connection
+            .execute("DELETE FROM schema_migrations WHERE version = 8", [])
+            .expect("simulate missing v8 version after partial apply");
+        database
+            .apply_migrations()
+            .expect("recover partial v8 apply without duplicate column failure");
+        let version_8_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 8",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query recovered version 8");
+        assert_eq!(version_8_count, 1);
+    }
+
+    #[test]
+    fn task_attempt_mutators_expose_only_attempt_guarded_public_surface() {
+        let source = include_str!("mod.rs");
+        for forbidden in [
+            concat!("pub fn ", "mark_task_running", "("),
+            concat!("pub fn ", "mark_thumbnail_task_running", "("),
+            concat!("pub fn ", "mark_task_succeeded", "("),
+            concat!("pub fn ", "mark_task_failed", "("),
+            concat!("pub fn ", "update_task_scan_progress", "("),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "unguarded task attempt mutator remains public: {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -3607,7 +4137,7 @@ mod tests {
         assert_eq!(tasks[0].error, None);
 
         database
-            .mark_task_running(first_task_id)
+            .mark_task_running_current_attempt_for_test(first_task_id)
             .expect("mark task running");
         let task = database
             .get_task(first_task_id)
@@ -3617,7 +4147,7 @@ mod tests {
         assert_eq!(task.error, None);
 
         database
-            .mark_task_succeeded(first_task_id)
+            .mark_task_succeeded_current_attempt_for_test(first_task_id)
             .expect("mark task succeeded");
         let task = database
             .get_task(first_task_id)
@@ -3627,7 +4157,7 @@ mod tests {
         assert_eq!(task.error, None);
 
         database
-            .mark_task_failed(second_task_id, "scan failed")
+            .mark_task_failed_current_attempt_for_test(second_task_id, "scan failed")
             .expect("mark task failed");
         let task = database
             .get_task(second_task_id)
@@ -3685,7 +4215,7 @@ mod tests {
         assert_eq!(pending, vec![task_id]);
 
         database
-            .mark_task_running(task_id)
+            .mark_task_running_current_attempt_for_test(task_id)
             .expect("mark thumbnail running");
         let running_request = database
             .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
@@ -3713,7 +4243,7 @@ mod tests {
             })
             .expect("mark thumbnail ready");
         database
-            .mark_task_succeeded(task_id)
+            .mark_task_succeeded_current_attempt_for_test(task_id)
             .expect("mark task succeeded");
 
         let ready = database
@@ -3749,7 +4279,7 @@ mod tests {
             .expect("request thumbnail");
         let first_task_id = first.task_id.expect("task id");
         database
-            .mark_task_running(first_task_id)
+            .mark_task_running_current_attempt_for_test(first_task_id)
             .expect("mark running");
         database
             .upsert_thumbnail_state(ThumbnailStateUpsert {
@@ -3767,7 +4297,7 @@ mod tests {
             })
             .expect("mark stale ready");
         database
-            .mark_task_succeeded(first_task_id)
+            .mark_task_succeeded_current_attempt_for_test(first_task_id)
             .expect("mark succeeded");
 
         let request = database
@@ -4008,10 +4538,24 @@ mod tests {
                 [file_id],
             )
             .expect("set ready small metadata");
-        let skipped = database
-            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
-            .expect("request small thumbnail");
-        assert_eq!(skipped.thumbnail.state, "skipped_small");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get thumbnail source")
+            .expect("thumbnail source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "skipped_small".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("worker marks skipped small");
 
         database
             .upsert_file(FileUpsert {
@@ -4064,7 +4608,9 @@ mod tests {
             .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("request thumbnail");
         let task_id = first.task_id.expect("task id");
-        database.mark_task_running(task_id).expect("mark running");
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
         let fingerprint = database
             .get_thumbnail_source(file_id)
             .expect("get source")
@@ -4139,6 +4685,49 @@ mod tests {
     }
 
     #[test]
+    fn skipped_small_request_queues_worker_instead_of_publishing_terminal_inline() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "small-queued.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("small-queued".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        database
+            .connection
+            .execute(
+                "UPDATE media SET width = 128, height = 128, metadata_status = 'ready' WHERE file_id = ?1",
+                [file_id],
+            )
+            .expect("set small ready metadata");
+
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request small thumbnail");
+
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
+        let task_id = request.task_id.expect("queued task id");
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.kind, "thumbnail");
+        assert_eq!(task.status, "pending");
+        assert_eq!(task.file_id, Some(file_id));
+    }
+
+    #[test]
     fn skipped_small_is_requeued_after_metadata_reset_even_when_file_identity_matches() {
         let database = migrated_database();
         let (root_id, folder_id) = seed_media_page_fixture(&database);
@@ -4165,10 +4754,24 @@ mod tests {
             )
             .expect("set ready small metadata");
 
-        let skipped = database
-            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
-            .expect("request skipped thumbnail");
-        assert_eq!(skipped.thumbnail.state, "skipped_small");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get thumbnail source")
+            .expect("thumbnail source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "skipped_small".to_string(),
+                cache_key: None,
+                width: None,
+                height: None,
+                byte_size: None,
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("worker marks skipped small");
 
         database
             .upsert_media_kind(file_id, "image")
@@ -4209,9 +4812,11 @@ mod tests {
         assert_eq!(pending_task.media_files_seen, 0);
         assert_eq!(pending_task.skipped_files, 0);
 
-        database.mark_task_running(task_id).expect("mark running");
         database
-            .update_task_scan_progress(
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
+        database
+            .update_task_scan_progress_current_attempt_for_test(
                 task_id,
                 TaskScanProgress {
                     items_seen: 6,
@@ -4234,9 +4839,9 @@ mod tests {
         assert_eq!(running_task.skipped_files, 1);
 
         database
-            .mark_task_succeeded(task_id)
+            .mark_task_succeeded_current_attempt_for_test(task_id)
             .expect("mark succeeded");
-        let late_update = database.update_task_scan_progress(
+        let late_update = database.update_task_scan_progress_current_attempt_for_test(
             task_id,
             TaskScanProgress {
                 items_seen: 7,
@@ -4266,18 +4871,18 @@ mod tests {
             .expect("create root scan task");
 
         let missing_error = database
-            .mark_task_running(task_id + 100)
+            .mark_task_running_current_attempt_for_test(task_id + 100)
             .expect_err("missing task should fail");
         assert!(missing_error.to_string().contains("task not found"));
 
         database
-            .mark_task_running(task_id)
+            .mark_task_running_current_attempt_for_test(task_id)
             .expect("mark task running");
         database
-            .mark_task_succeeded(task_id)
+            .mark_task_succeeded_current_attempt_for_test(task_id)
             .expect("mark task succeeded");
         let rerun_error = database
-            .mark_task_running(task_id)
+            .mark_task_running_current_attempt_for_test(task_id)
             .expect_err("finished task should not be rerun");
         assert!(rerun_error.to_string().contains("not pending"));
     }
@@ -4299,25 +4904,435 @@ mod tests {
             .expect("create failed task");
 
         database
-            .mark_task_running(succeeded_task_id)
+            .mark_task_running_current_attempt_for_test(succeeded_task_id)
             .expect("mark succeeded task running");
         database
-            .mark_task_succeeded(succeeded_task_id)
+            .mark_task_succeeded_current_attempt_for_test(succeeded_task_id)
             .expect("mark task succeeded");
         let succeeded_error = database
-            .mark_task_failed(succeeded_task_id, "late failure")
+            .mark_task_failed_current_attempt_for_test(succeeded_task_id, "late failure")
             .expect_err("succeeded task should not be marked failed");
         assert!(succeeded_error
             .to_string()
             .contains("not pending or running"));
 
         database
-            .mark_task_failed(failed_task_id, "first failure")
+            .mark_task_failed_current_attempt_for_test(failed_task_id, "first failure")
             .expect("mark task failed");
         let failed_error = database
-            .mark_task_failed(failed_task_id, "second failure")
+            .mark_task_failed_current_attempt_for_test(failed_task_id, "second failure")
             .expect_err("failed task should not be marked failed again");
         assert!(failed_error.to_string().contains("not pending or running"));
+    }
+
+    #[test]
+    fn cancel_pending_task_marks_cancelled_and_retry_resets_it_to_pending() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+
+        let cancelled = database.cancel_task(task_id).expect("cancel task");
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.error.as_deref(), Some("cancelled"));
+
+        let retried = database.retry_task(task_id).expect("retry cancelled task");
+        assert_eq!(retried.id, task_id);
+        assert_eq!(retried.status, "pending");
+        assert_eq!(retried.error, None);
+        assert_eq!(retried.items_seen, 0);
+    }
+
+    #[test]
+    fn retry_and_cancel_reject_missing_and_finished_tasks() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+
+        let missing_cancel = database
+            .cancel_task(task_id + 100)
+            .expect_err("missing cancel should fail");
+        assert!(missing_cancel.to_string().contains("task not found"));
+        let missing_retry = database
+            .retry_task(task_id + 100)
+            .expect_err("missing retry should fail");
+        assert!(missing_retry.to_string().contains("task not found"));
+
+        database
+            .mark_task_running_current_attempt_for_test(task_id)
+            .expect("mark running");
+        database
+            .mark_task_succeeded_current_attempt_for_test(task_id)
+            .expect("mark succeeded");
+
+        let cancel_succeeded = database
+            .cancel_task(task_id)
+            .expect_err("succeeded task should reject cancel");
+        assert!(cancel_succeeded.to_string().contains("not cancellable"));
+        let retry_succeeded = database
+            .retry_task(task_id)
+            .expect_err("succeeded task should reject retry");
+        assert!(retry_succeeded.to_string().contains("not retryable"));
+
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "succeeded");
+    }
+
+    #[test]
+    fn retry_thumbnail_task_uses_current_source_without_stale_attempt_fingerprint() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "retry-source.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("retry-source-a".to_string()),
+            })
+            .expect("insert retry source");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media kind");
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        let task_id = request.task_id.expect("thumbnail task id");
+        database
+            .mark_thumbnail_task_running_current_attempt_for_test(task_id, "stale-attempt")
+            .expect("mark thumbnail running");
+        database
+            .mark_task_failed_current_attempt_for_test(task_id, "decode failed")
+            .expect("mark thumbnail failed");
+
+        database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "retry-source.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 200,
+                mtime: 20,
+                ctime: None,
+                file_key: Some("retry-source-b".to_string()),
+            })
+            .expect("change retry source identity");
+        let current_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get current source")
+            .expect("current source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+
+        let retried = database.retry_task(task_id).expect("retry thumbnail task");
+        assert_eq!(retried.status, "pending");
+        assert_eq!(retried.thumbnail_source_fingerprint, None);
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "queued");
+        assert_eq!(
+            thumbnail.source_fingerprint.as_deref(),
+            Some(current_fingerprint.as_str())
+        );
+    }
+
+    #[test]
+    fn old_root_scan_attempt_cannot_publish_after_cancelled_task_is_retried() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+
+        database
+            .mark_task_running_for_attempt(task_id, old_attempt)
+            .expect("mark old attempt running");
+        database.cancel_task(task_id).expect("cancel task");
+        let retried = database.retry_task(task_id).expect("retry task");
+        assert_eq!(retried.status, "pending");
+        assert!(retried.attempt_generation > old_attempt);
+
+        let stale_publish = database
+            .mark_task_succeeded_for_attempt(task_id, old_attempt)
+            .expect_err("old attempt must not publish success");
+        assert!(stale_publish.to_string().contains("attempt"));
+
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "pending");
+        assert_eq!(task.attempt_generation, retried.attempt_generation);
+    }
+
+    #[test]
+    fn stale_root_scan_attempt_cannot_commit_batch_or_mark_root_scanned_after_retry() {
+        let mut database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        database
+            .mark_task_running_for_attempt(task_id, old_attempt)
+            .expect("mark old attempt running");
+        database.cancel_task(task_id).expect("cancel task");
+        database.retry_task(task_id).expect("retry task");
+
+        let batch_error = database
+            .commit_scan_batch_for_task_attempt(
+                ScanWriteBatch {
+                    folders: vec![FolderUpsert {
+                        root_id,
+                        parent_id: None,
+                        name: String::new(),
+                        path_hash: "stale-root".to_string(),
+                        mtime: Some(1),
+                    }],
+                    files: Vec::new(),
+                },
+                task_id,
+                old_attempt,
+            )
+            .expect_err("stale attempt must not commit batch");
+        assert!(batch_error.to_string().contains("attempt"));
+
+        let root = database.get_root(root_id).expect("get root").expect("root");
+        assert_eq!(root.root_folder_id, None);
+
+        let scanned_error = database
+            .mark_root_scanned_for_task_attempt(root_id, task_id, old_attempt)
+            .expect_err("stale attempt must not mark root scanned");
+        assert!(scanned_error.to_string().contains("attempt"));
+        let root = database.get_root(root_id).expect("get root").expect("root");
+        assert_eq!(root.last_scan_at, None);
+    }
+
+    #[test]
+    fn stale_thumbnail_attempt_cannot_publish_current_source_after_retry() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "stale-thumbnail-publish.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("same-source".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        let task_id = request.task_id.expect("task id");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        database
+            .mark_thumbnail_task_running_for_attempt(task_id, old_attempt, &source_fingerprint)
+            .expect("mark old thumbnail running");
+        database.cancel_task(task_id).expect("cancel task");
+        database.retry_task(task_id).expect("retry task");
+
+        let published = database
+            .upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
+                ThumbnailStateUpsert {
+                    file_id,
+                    profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                    state: "ready".to_string(),
+                    cache_key: Some("aa/bb/stale.webp".to_string()),
+                    width: Some(320),
+                    height: Some(320),
+                    byte_size: Some(64),
+                    error: None,
+                    source_fingerprint: Some(source_fingerprint.clone()),
+                },
+                &source_fingerprint,
+                task_id,
+                old_attempt,
+            )
+            .expect("guard stale publish");
+        assert!(!published);
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "queued");
+        assert_eq!(thumbnail.cache_key, None);
+    }
+
+    #[test]
+    fn stale_thumbnail_attempt_cannot_publish_failure_after_retry() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "stale-failure-publish.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("failure-source".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        let task_id = request.task_id.expect("task id");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        database
+            .mark_thumbnail_task_running_for_attempt(task_id, old_attempt, &source_fingerprint)
+            .expect("mark old thumbnail running");
+        assert!(database
+            .task_attempt_is_current(task_id, old_attempt)
+            .expect("old attempt current before retry"));
+        database.cancel_task(task_id).expect("cancel task");
+        database.retry_task(task_id).expect("retry task");
+
+        let published = database
+            .publish_thumbnail_failure_for_attempted_source_for_task_attempt(
+                file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                Some(source_fingerprint.as_str()),
+                "late decode failure",
+                task_id,
+                old_attempt,
+            )
+            .expect("guard stale failure publish");
+        assert!(!published);
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "queued");
+        assert_eq!(thumbnail.error, None);
+        assert_eq!(thumbnail.cache_key, None);
+    }
+
+    #[test]
+    fn stale_thumbnail_attempt_cannot_reset_after_retry() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "stale-reset.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("reset-source".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+        let task_id = request.task_id.expect("task id");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        database
+            .mark_thumbnail_task_running_for_attempt(task_id, old_attempt, "old-source")
+            .expect("mark old thumbnail running");
+        assert!(database
+            .task_attempt_is_current(task_id, old_attempt)
+            .expect("old attempt current before retry"));
+        database.cancel_task(task_id).expect("cancel task");
+        database.retry_task(task_id).expect("retry task");
+
+        let reset = database
+            .reset_thumbnail_after_stale_source_for_task_attempt(
+                file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                "late stale source",
+                task_id,
+                old_attempt,
+            )
+            .expect("guard stale reset");
+        assert!(!reset);
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "queued");
+        assert_eq!(thumbnail.error, None);
+        assert_ne!(thumbnail.source_fingerprint, None);
     }
 
     #[test]
@@ -4358,7 +5373,7 @@ mod tests {
             .expect("insert non-root pending task");
 
         database
-            .mark_task_running(stale_running)
+            .mark_task_running_current_attempt_for_test(stale_running)
             .expect("mark stale running");
         database
             .connection
@@ -4368,13 +5383,13 @@ mod tests {
             )
             .expect("set stale running error");
         database
-            .mark_task_failed(failed, "scan failed")
+            .mark_task_failed_current_attempt_for_test(failed, "scan failed")
             .expect("mark failed");
         database
-            .mark_task_running(succeeded)
+            .mark_task_running_current_attempt_for_test(succeeded)
             .expect("mark succeeded running");
         database
-            .mark_task_succeeded(succeeded)
+            .mark_task_succeeded_current_attempt_for_test(succeeded)
             .expect("mark succeeded");
         database
             .connection
