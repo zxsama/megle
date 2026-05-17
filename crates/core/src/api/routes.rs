@@ -70,6 +70,7 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/media",
     "/api/media/{fileId}",
     "/api/media/{fileId}/thumbnail",
+    "/api/media/{fileId}/thumbnail/blob",
     "/api/media/{fileId}/preview",
     "/api/media/{fileId}/metadata",
     "/api/media/{fileId}/tags",
@@ -357,6 +358,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/media", get(list_media))
         .route("/api/media/:file_id", get(get_media))
         .route("/api/media/:file_id/thumbnail", get(get_thumbnail))
+        .route(
+            "/api/media/:file_id/thumbnail/blob",
+            get(get_thumbnail_blob),
+        )
         .route("/api/media/:file_id/preview", get(get_preview))
         .route(
             "/api/media/:file_id/metadata",
@@ -557,6 +562,42 @@ async fn get_thumbnail(
         StatusCode::OK
     };
     Ok((status, Json(thumbnail_response(thumbnail))))
+}
+
+async fn get_thumbnail_blob(
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+    Query(query): Query<ThumbnailQuery>,
+) -> ApiResult<axum::response::Response> {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+    use axum::response::Response;
+    let profile = normalize_profile(query.profile.as_deref())
+        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
+    let (cache_root, cache_key) = {
+        let database = state.database.lock().expect("database mutex poisoned");
+        let thumbnail = database
+            .get_thumbnail(file_id, profile)?
+            .ok_or_else(|| CoreError::not_found("media item not found".to_string()))?;
+        if thumbnail.state.as_str() != "ready" {
+            return Err(CoreError::bad_request(format!(
+                "thumbnail not ready: state={}",
+                thumbnail.state
+            )));
+        }
+        let cache_key = thumbnail
+            .cache_key
+            .ok_or_else(|| CoreError::not_found("thumbnail cache key missing".to_string()))?;
+        (database.default_thumbnail_cache_dir(), cache_key)
+    };
+    let cache_path = cache_root.join(&cache_key);
+    let bytes = tokio::fs::read(&cache_path)
+        .await
+        .map_err(|err| CoreError::not_found(format!("thumbnail cache file missing: {err}")))?;
+    Response::builder()
+        .header(CONTENT_TYPE, "image/webp")
+        .header(CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .body(axum::body::Body::from(bytes))
+        .map_err(|err| CoreError::bad_request(format!("failed to build thumbnail response: {err}")))
 }
 
 async fn get_preview(Path(_file_id): Path<i64>) -> (StatusCode, Json<AcceptedResponse>) {

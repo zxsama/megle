@@ -361,6 +361,13 @@ button:disabled {
     var(--surface-2);
 }
 
+.tile-thumb-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 .tile-thumb-failed {
   border-color: rgba(228, 124, 115, 0.42);
   background: rgba(228, 124, 115, 0.13);
@@ -472,6 +479,15 @@ button:disabled {
   background:
     linear-gradient(135deg, rgba(142, 199, 208, 0.18), rgba(244, 247, 249, 0.06)),
     var(--surface-1);
+  padding: 0;
+  overflow: hidden;
+}
+
+.preview-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
 }
 
 .preview-placeholder.failed {

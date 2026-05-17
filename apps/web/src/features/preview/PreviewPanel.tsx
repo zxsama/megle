@@ -1,5 +1,7 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
+import { createCoreClient } from "@megle/core-client";
+import { getCoreClientConfig } from "../../core/client";
 
 interface PreviewPanelProps {
   selectedMedia: MediaRecord | null;
@@ -45,11 +47,7 @@ function ThumbnailPreview({
   thumbnail?: ThumbnailResponse;
 }) {
   if (thumbnail?.state === "ready") {
-    return (
-      <div className="preview-placeholder ready">
-        <span>{thumbnail.asset ? `${thumbnail.asset.width} x ${thumbnail.asset.height}` : "ready"}</span>
-      </div>
-    );
+    return <ReadyPreviewImage fileId={media.id} alt={media.name} />;
   }
 
   if (thumbnail?.state === "failed") {
@@ -71,6 +69,57 @@ function ThumbnailPreview({
   return (
     <div className="preview-placeholder pending">
       <span>{thumbnail?.state ?? media.thumbnailState ?? "pending"}</span>
+    </div>
+  );
+}
+
+function ReadyPreviewImage({ fileId, alt }: { fileId: number; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let revoked = false;
+    let objectUrl: string | null = null;
+    setSrc(null);
+    setError(false);
+
+    const client = createCoreClient(getCoreClientConfig());
+    client
+      .getThumbnailBlob(fileId)
+      .then((blob) => {
+        if (revoked) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch(() => {
+        if (!revoked) setError(true);
+      });
+
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [fileId]);
+
+  if (error) {
+    return (
+      <div className="preview-placeholder failed">
+        <span>load error</span>
+      </div>
+    );
+  }
+
+  if (!src) {
+    return (
+      <div className="preview-placeholder pending">
+        <span>loading</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="preview-placeholder ready">
+      <img alt={alt} className="preview-image" src={src} />
     </div>
   );
 }

@@ -172,6 +172,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /media/{fileId}/thumbnail/blob:
+    get:
+      operationId: getThumbnailBlob
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+        - $ref: "#/components/parameters/profile"
+      responses:
+        "200":
+          description: Generated thumbnail bytes (WebP).
+          content:
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Thumbnail not ready or unsupported profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Media item or cache file not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /media/{fileId}/preview:
     get:
       operationId: getPreview

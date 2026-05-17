@@ -2,6 +2,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
+import { getCoreClientConfig } from "../../core/client";
+import { createCoreClient } from "@megle/core-client";
 import { workbenchLayout } from "../../design/tokens";
 
 interface MediaGridProps {
@@ -281,11 +283,7 @@ function ThumbnailStateView({
   const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
 
   if (state === "ready") {
-    return (
-      <div className="tile-thumb tile-thumb-ready">
-        <span>{thumbnail?.asset ? `${thumbnail.asset.width}x${thumbnail.asset.height}` : "ready"}</span>
-      </div>
-    );
+    return <ReadyThumbnail fileId={item.id} alt={item.name} />;
   }
 
   if (state === "failed") {
@@ -361,4 +359,56 @@ function chunk<T>(items: T[], size: number): T[][] {
     rows.push(items.slice(index, index + size));
   }
   return rows;
+}
+
+
+function ReadyThumbnail({ fileId, alt }: { fileId: number; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let revoked = false;
+    let objectUrl: string | null = null;
+    setError(false);
+    setSrc(null);
+
+    const client = createCoreClient(getCoreClientConfig());
+    client
+      .getThumbnailBlob(fileId)
+      .then((blob) => {
+        if (revoked) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch(() => {
+        if (!revoked) setError(true);
+      });
+
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [fileId]);
+
+  if (error) {
+    return (
+      <div className="tile-thumb tile-thumb-failed">
+        <span>load error</span>
+      </div>
+    );
+  }
+
+  if (!src) {
+    return (
+      <div className="tile-thumb tile-thumb-loading">
+        <span>loading</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="tile-thumb tile-thumb-ready">
+      <img alt={alt} className="tile-thumb-image" loading="lazy" src={src} />
+    </div>
+  );
 }

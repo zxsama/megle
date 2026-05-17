@@ -106,6 +106,21 @@ export function createCoreClient(config: CoreClientConfig) {
     getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`),
     getThumbnail: (fileId: number, profile: "grid_320" = "grid_320") =>
       request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ profile })}`),
+    getThumbnailBlob: async (fileId: number, profile: "grid_320" = "grid_320") => {
+      const headers = new Headers();
+      if (config.sessionToken) {
+        headers.set("x-megle-session", config.sessionToken);
+      }
+      const response = await fetch(
+        resolveUrl(config.baseUrl, `/media/${fileId}/thumbnail/blob${query({ profile })}`),
+        { headers }
+      );
+      if (!response.ok) {
+        const body = await readResponseBody(response);
+        throw new CoreApiError(response.status, body);
+      }
+      return response.blob();
+    },
     listTags: () => request<TagListResponse>("/tags"),
     createTag: (body: CreateTagRequest) =>
       request<TagRecord>("/tags", {
