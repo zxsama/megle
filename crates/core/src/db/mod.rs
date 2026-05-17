@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
-use rusqlite::{params_from_iter, Connection, Transaction, TransactionBehavior};
+use rusqlite::{params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 
 use crate::thumbnails::{
@@ -174,6 +174,18 @@ pub struct MediaRecord {
     pub codec: Option<String>,
     pub thumbnail_state: Option<String>,
     pub thumbnail_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rating: Option<i64>,
+    #[serde(default, skip_serializing_if = "is_default_favorite")]
+    pub favorite: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tag_ids: Vec<i64>,
+}
+
+fn is_default_favorite(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,6 +235,90 @@ pub struct TaskScanProgress {
     pub folders_seen: i64,
     pub media_files_seen: i64,
     pub skipped_files: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagRecord {
+    pub id: i64,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMetadataRecord {
+    pub file_id: i64,
+    pub rating: Option<i64>,
+    pub favorite: bool,
+    pub note: Option<String>,
+    pub tag_ids: Vec<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UserMetadataPatch {
+    /// Outer `Option` indicates whether the caller provided the field; inner
+    /// `Option` is the value (None clears the column).
+    pub rating: Option<Option<i64>>,
+    pub favorite: Option<bool>,
+    pub note: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    pub root_id: Option<i64>,
+    pub folder_id: Option<i64>,
+    pub kind: Option<String>,
+    pub min_rating: Option<i64>,
+    pub favorite: Option<bool>,
+    pub tag_ids: Vec<i64>,
+    pub sort: String,
+    pub limit: i64,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum TagError {
+    Duplicate,
+    InvalidName,
+    InvalidColor,
+    UnknownTagId(i64),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for TagError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TagError::Duplicate => write!(f, "tag name already exists"),
+            TagError::InvalidName => write!(f, "tag name is invalid"),
+            TagError::InvalidColor => write!(f, "tag color is invalid"),
+            TagError::UnknownTagId(id) => write!(f, "tag not found: {id}"),
+            TagError::Other(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TagError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TagError::Other(error) => error.source(),
+            _ => None,
+        }
+    }
+}
+
+impl From<anyhow::Error> for TagError {
+    fn from(error: anyhow::Error) -> Self {
+        TagError::Other(error)
+    }
+}
+
+impl From<rusqlite::Error> for TagError {
+    fn from(error: rusqlite::Error) -> Self {
+        TagError::Other(anyhow::Error::from(error))
+    }
 }
 
 impl Database {
@@ -307,6 +403,11 @@ impl Database {
         if !self.migration_applied(9)? {
             self.apply_scan_reconciliation_migration()?;
         }
+        if !self.migration_applied(10)? {
+            self.connection
+                .execute_batch(migrations::MEDIA_FTS_CONTENTLESS_DELETE_MIGRATION)?;
+        }
+        self.backfill_media_fts_if_empty()?;
         Ok(())
     }
 
@@ -1055,27 +1156,41 @@ impl Database {
     }
 
     pub fn get_media(&self, file_id: i64) -> anyhow::Result<Option<MediaRecord>> {
-        let mut statement = self.connection.prepare(
-            r#"
-            SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
-                   files.size, files.mtime, media.kind, media.width, media.height,
-                   media.duration_ms, media.codec,
-                   media.metadata_status, files.file_key,
-                   thumbs.profile, thumbs.state, thumbs.short_side_px,
-                   thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
-                   thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.updated_at
-            FROM files
-            LEFT JOIN media ON media.file_id = files.id
-            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
-            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
-            WHERE files.id = ?1 AND files.status = 'active'
-            "#,
-        )?;
-        let mut rows = statement.query([file_id])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
+        let media = {
+            let mut statement = self.connection.prepare(
+                r#"
+                SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
+                       files.size, files.mtime, media.kind, media.width, media.height,
+                       media.duration_ms, media.codec,
+                       media.metadata_status, files.file_key,
+                       thumbs.profile, thumbs.state, thumbs.short_side_px,
+                       thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+                       thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.updated_at,
+                       user_metadata.rating, user_metadata.favorite, user_metadata.note
+                FROM files
+                LEFT JOIN media ON media.file_id = files.id
+                LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
+                LEFT JOIN user_metadata ON user_metadata.file_id = files.id
+                JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+                WHERE files.id = ?1 AND files.status = 'active'
+                "#,
+            )?;
+            let mut rows = statement.query([file_id])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            let mut media = media_from_row(row)?;
+            let rating: Option<i64> = row.get(25)?;
+            let favorite: Option<i64> = row.get(26)?;
+            let note: Option<String> = row.get(27)?;
+            media.rating = rating;
+            media.favorite = favorite.map(|value| value != 0).unwrap_or(false);
+            media.note = note;
+            media
         };
-        Ok(Some(media_from_row(row)?))
+        let mut media = media;
+        media.tag_ids = self.list_file_tag_ids(file_id)?;
+        Ok(Some(media))
     }
 
     pub fn get_thumbnail(
@@ -1944,6 +2059,497 @@ impl Database {
             .map(|task| task.attempt_generation == attempt_generation)
             .unwrap_or(false))
     }
+
+    pub fn list_tags(&self) -> anyhow::Result<Vec<TagRecord>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, name, color FROM tags ORDER BY name ASC, id ASC")?;
+        let rows = statement.query_map([], |row| {
+            Ok(TagRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                color: row.get(2)?,
+            })
+        })?;
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row?);
+        }
+        Ok(tags)
+    }
+
+    pub fn create_tag(&self, name: &str, color: Option<&str>) -> Result<TagRecord, TagError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() || trimmed.chars().count() > 64 {
+            return Err(TagError::InvalidName);
+        }
+        if let Some(color_value) = color {
+            if !is_valid_hex_color(color_value) {
+                return Err(TagError::InvalidColor);
+            }
+        }
+        let result = self.connection.execute(
+            "INSERT INTO tags(name, color) VALUES (?1, ?2)",
+            (trimmed, color),
+        );
+        match result {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                return Err(TagError::Duplicate);
+            }
+            Err(error) => return Err(TagError::from(error)),
+        }
+        let id = self.connection.last_insert_rowid();
+        Ok(TagRecord {
+            id,
+            name: trimmed.to_string(),
+            color: color.map(str::to_string),
+        })
+    }
+
+    pub fn delete_tag(&self, id: i64) -> anyhow::Result<bool> {
+        let updated = self
+            .connection
+            .execute("DELETE FROM tags WHERE id = ?1", [id])?;
+        Ok(updated != 0)
+    }
+
+    pub fn list_file_tag_ids(&self, file_id: i64) -> anyhow::Result<Vec<i64>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT tag_id FROM file_tags WHERE file_id = ?1 ORDER BY tag_id ASC")?;
+        let rows = statement.query_map([file_id], |row| row.get::<_, i64>(0))?;
+        let mut tag_ids = Vec::new();
+        for row in rows {
+            tag_ids.push(row?);
+        }
+        Ok(tag_ids)
+    }
+
+    pub fn get_user_metadata(&self, file_id: i64) -> anyhow::Result<Option<UserMetadataRecord>> {
+        if !self.file_exists(file_id)? {
+            return Ok(None);
+        }
+        let row = self
+            .connection
+            .query_row(
+                r#"
+                SELECT rating, favorite, note, updated_at
+                FROM user_metadata
+                WHERE file_id = ?1
+                "#,
+                [file_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, i64>(1)? != 0,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let tag_ids = self.list_file_tag_ids(file_id)?;
+        let (rating, favorite, note, updated_at) = match row {
+            Some(values) => values,
+            None => (None, false, None, 0_i64),
+        };
+        Ok(Some(UserMetadataRecord {
+            file_id,
+            rating,
+            favorite,
+            note,
+            tag_ids,
+            updated_at,
+        }))
+    }
+
+    pub fn upsert_user_metadata_partial(
+        &self,
+        file_id: i64,
+        patch: UserMetadataPatch,
+    ) -> anyhow::Result<UserMetadataRecord> {
+        if !self.file_exists(file_id)? {
+            return Err(anyhow::anyhow!("media item not found: {file_id}"));
+        }
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let now = unix_timestamp();
+        let existing: Option<(Option<i64>, i64, Option<String>)> = transaction
+            .query_row(
+                "SELECT rating, favorite, note FROM user_metadata WHERE file_id = ?1",
+                [file_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let (current_rating, current_favorite, current_note) =
+            existing.clone().unwrap_or((None, 0, None));
+        let next_rating = match patch.rating {
+            Some(value) => value,
+            None => current_rating,
+        };
+        let next_favorite = match patch.favorite {
+            Some(value) => value as i64,
+            None => current_favorite,
+        };
+        let next_note = match patch.note.clone() {
+            Some(value) => value,
+            None => current_note,
+        };
+
+        transaction.execute(
+            r#"
+            INSERT INTO user_metadata(file_id, rating, favorite, note, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(file_id) DO UPDATE SET
+                rating = excluded.rating,
+                favorite = excluded.favorite,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            "#,
+            (file_id, next_rating, next_favorite, &next_note, now),
+        )?;
+        sync_media_fts_for_file_in_transaction(&transaction, file_id)?;
+        transaction.commit()?;
+
+        Ok(UserMetadataRecord {
+            file_id,
+            rating: next_rating,
+            favorite: next_favorite != 0,
+            note: next_note,
+            tag_ids: self.list_file_tag_ids(file_id)?,
+            updated_at: now,
+        })
+    }
+
+    pub fn set_file_tags(&self, file_id: i64, tag_ids: &[i64]) -> Result<Vec<i64>, TagError> {
+        if !self.file_exists(file_id).map_err(TagError::from)? {
+            return Err(TagError::Other(anyhow::anyhow!(
+                "media item not found: {file_id}"
+            )));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for tag_id in tag_ids {
+            unique.insert(*tag_id);
+        }
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        for tag_id in &unique {
+            let exists: i64 = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tags WHERE id = ?1)",
+                [tag_id],
+                |row| row.get(0),
+            )?;
+            if exists == 0 {
+                return Err(TagError::UnknownTagId(*tag_id));
+            }
+        }
+        transaction.execute("DELETE FROM file_tags WHERE file_id = ?1", [file_id])?;
+        for tag_id in &unique {
+            transaction.execute(
+                "INSERT INTO file_tags(file_id, tag_id) VALUES (?1, ?2)",
+                (file_id, tag_id),
+            )?;
+        }
+        sync_media_fts_for_file_in_transaction(&transaction, file_id)?;
+        transaction.commit()?;
+        Ok(unique.into_iter().collect())
+    }
+
+    pub fn add_file_tag(&self, file_id: i64, tag_id: i64) -> Result<Vec<i64>, TagError> {
+        if !self.file_exists(file_id).map_err(TagError::from)? {
+            return Err(TagError::Other(anyhow::anyhow!(
+                "media item not found: {file_id}"
+            )));
+        }
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let exists: i64 = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tags WHERE id = ?1)",
+            [tag_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(TagError::UnknownTagId(tag_id));
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO file_tags(file_id, tag_id) VALUES (?1, ?2)",
+            (file_id, tag_id),
+        )?;
+        sync_media_fts_for_file_in_transaction(&transaction, file_id)?;
+        transaction.commit()?;
+        Ok(self.list_file_tag_ids(file_id)?)
+    }
+
+    pub fn remove_file_tag(&self, file_id: i64, tag_id: i64) -> Result<Vec<i64>, TagError> {
+        if !self.file_exists(file_id).map_err(TagError::from)? {
+            return Err(TagError::Other(anyhow::anyhow!(
+                "media item not found: {file_id}"
+            )));
+        }
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let removed = transaction.execute(
+            "DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2",
+            (file_id, tag_id),
+        )?;
+        if removed == 0 {
+            return Err(TagError::UnknownTagId(tag_id));
+        }
+        sync_media_fts_for_file_in_transaction(&transaction, file_id)?;
+        transaction.commit()?;
+        Ok(self.list_file_tag_ids(file_id)?)
+    }
+
+    #[allow(dead_code)]
+    pub fn sync_media_fts_for_file(&self, file_id: i64) -> anyhow::Result<()> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        sync_media_fts_for_file_in_transaction(&transaction, file_id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Ensure `media_fts` has at least one row per `files` entry. Run once at
+    /// startup; cheap when sizes already match.
+    pub fn backfill_media_fts_if_empty(&self) -> anyhow::Result<()> {
+        let files_count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+        if files_count == 0 {
+            return Ok(());
+        }
+        let fts_count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM media_fts", [], |row| row.get(0))?;
+        if fts_count >= files_count {
+            return Ok(());
+        }
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let mut statement = transaction.prepare("SELECT id FROM files")?;
+        let ids: Vec<i64> = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        for file_id in ids {
+            sync_media_fts_for_file_in_transaction(&transaction, file_id)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn search_media_page(&self, query: SearchQuery) -> anyhow::Result<Page<MediaRecord>> {
+        let limit = query.limit.clamp(1, 500);
+        let sort = normalize_search_sort(&query.sort);
+        let cursor = query
+            .cursor
+            .as_deref()
+            .map(|cursor| decode_search_cursor(cursor, sort))
+            .transpose()?;
+        let trimmed_query = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let mut predicates = vec!["files.status = 'active'".to_string()];
+        let mut parameters: Vec<Value> = Vec::new();
+
+        if trimmed_query.is_some() {
+            predicates.push("media_fts.rowid = files.id".to_string());
+            predicates.push("media_fts MATCH ?".to_string());
+            parameters.push(Value::Text(build_fts_match_query(
+                trimmed_query.as_deref().unwrap(),
+            )));
+        }
+        if let Some(root_id) = query.root_id {
+            predicates.push("files.root_id = ?".to_string());
+            parameters.push(Value::Integer(root_id));
+        }
+        if let Some(folder_id) = query.folder_id {
+            predicates.push("files.folder_id = ?".to_string());
+            parameters.push(Value::Integer(folder_id));
+        }
+        if let Some(kind) = query.kind.as_deref() {
+            predicates.push("media.kind = ?".to_string());
+            parameters.push(Value::Text(kind.to_string()));
+        }
+        if let Some(min_rating) = query.min_rating {
+            predicates
+                .push("user_metadata.rating IS NOT NULL AND user_metadata.rating >= ?".to_string());
+            parameters.push(Value::Integer(min_rating));
+        }
+        if let Some(favorite) = query.favorite {
+            if favorite {
+                predicates.push("user_metadata.favorite = 1".to_string());
+            } else {
+                predicates.push(
+                    "(user_metadata.favorite IS NULL OR user_metadata.favorite = 0)".to_string(),
+                );
+            }
+        }
+
+        let mut tag_filter_clause = String::new();
+        if !query.tag_ids.is_empty() {
+            let mut unique_tags: Vec<i64> = query.tag_ids.clone();
+            unique_tags.sort_unstable();
+            unique_tags.dedup();
+            let placeholders = unique_tags
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            tag_filter_clause = format!(
+                " AND files.id IN (SELECT file_id FROM file_tags WHERE tag_id IN ({placeholders}) GROUP BY file_id HAVING COUNT(DISTINCT tag_id) = ?)"
+            );
+            for tag_id in &unique_tags {
+                parameters.push(Value::Integer(*tag_id));
+            }
+            parameters.push(Value::Integer(unique_tags.len() as i64));
+        }
+
+        let sort_clause = match sort {
+            "mtime_asc" => "files.mtime ASC, files.id ASC",
+            "name_asc" => "files.name ASC, files.id ASC",
+            "name_desc" => "files.name DESC, files.id DESC",
+            "rating_desc" => {
+                "user_metadata.rating IS NULL, user_metadata.rating DESC, files.id DESC"
+            }
+            "rating_asc" => "user_metadata.rating IS NULL, user_metadata.rating ASC, files.id ASC",
+            _ => "files.mtime DESC, files.id DESC",
+        };
+
+        if let Some(cursor) = &cursor {
+            let predicate = match (sort, &cursor.key) {
+                ("name_asc", SearchCursorKey::Name(name)) => {
+                    parameters.push(Value::Text(name.clone()));
+                    parameters.push(Value::Text(name.clone()));
+                    parameters.push(Value::Integer(cursor.id));
+                    "(files.name > ? OR (files.name = ? AND files.id > ?))".to_string()
+                }
+                ("name_desc", SearchCursorKey::Name(name)) => {
+                    parameters.push(Value::Text(name.clone()));
+                    parameters.push(Value::Text(name.clone()));
+                    parameters.push(Value::Integer(cursor.id));
+                    "(files.name < ? OR (files.name = ? AND files.id < ?))".to_string()
+                }
+                ("mtime_asc", SearchCursorKey::Mtime(value)) => {
+                    parameters.push(Value::Integer(*value));
+                    parameters.push(Value::Integer(*value));
+                    parameters.push(Value::Integer(cursor.id));
+                    "(files.mtime > ? OR (files.mtime = ? AND files.id > ?))".to_string()
+                }
+                ("rating_desc", SearchCursorKey::Rating(rating)) => {
+                    let (clause, params_for_clause) =
+                        build_rating_keyset_predicate(*rating, cursor.id, false);
+                    for value in params_for_clause {
+                        parameters.push(value);
+                    }
+                    clause
+                }
+                ("rating_asc", SearchCursorKey::Rating(rating)) => {
+                    let (clause, params_for_clause) =
+                        build_rating_keyset_predicate(*rating, cursor.id, true);
+                    for value in params_for_clause {
+                        parameters.push(value);
+                    }
+                    clause
+                }
+                (_, SearchCursorKey::Mtime(value)) => {
+                    parameters.push(Value::Integer(*value));
+                    parameters.push(Value::Integer(*value));
+                    parameters.push(Value::Integer(cursor.id));
+                    "(files.mtime < ? OR (files.mtime = ? AND files.id < ?))".to_string()
+                }
+                _ => {
+                    return Err(anyhow::anyhow!("invalid search cursor"));
+                }
+            };
+            predicates.push(predicate);
+        }
+
+        parameters.push(Value::Integer(limit + 1));
+
+        let fts_join = if trimmed_query.is_some() {
+            ", media_fts"
+        } else {
+            ""
+        };
+        let sql = format!(
+            r#"
+            SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
+                   files.size, files.mtime, media.kind, media.width, media.height,
+                   media.duration_ms, media.codec,
+                   media.metadata_status, files.file_key,
+                   thumbs.profile, thumbs.state, thumbs.short_side_px,
+                   thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+                   thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.updated_at,
+                   user_metadata.rating, user_metadata.favorite, user_metadata.note
+            FROM files{fts_join}
+            LEFT JOIN media ON media.file_id = files.id
+            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
+            LEFT JOIN user_metadata ON user_metadata.file_id = files.id
+            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+            WHERE {where_clause}{tag_filter_clause}
+            ORDER BY {sort_clause}
+            LIMIT ?
+            "#,
+            fts_join = fts_join,
+            where_clause = predicates.join(" AND "),
+            tag_filter_clause = tag_filter_clause,
+            sort_clause = sort_clause,
+        );
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(parameters), |row| {
+            let mut media = media_from_row(row)?;
+            let rating: Option<i64> = row.get(25)?;
+            let favorite: Option<i64> = row.get(26)?;
+            let note: Option<String> = row.get(27)?;
+            media.rating = rating;
+            media.favorite = favorite.map(|value| value != 0).unwrap_or(false);
+            media.note = note;
+            Ok(media)
+        })?;
+
+        let mut items: Vec<MediaRecord> = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+
+        // Populate per-file tag ids.
+        for item in items.iter_mut() {
+            item.tag_ids = self.list_file_tag_ids(item.id)?;
+        }
+
+        let next_cursor = if items.len() > limit as usize {
+            items.pop();
+            items.last().map(|item| encode_search_cursor(sort, item))
+        } else {
+            None
+        };
+        Ok(Page { items, next_cursor })
+    }
+
+    fn file_exists(&self, file_id: i64) -> anyhow::Result<bool> {
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1)",
+            [file_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
 }
 
 fn upsert_folder_in_transaction(
@@ -2189,6 +2795,7 @@ fn upsert_file_in_transaction(
             file_key: file_key.as_deref(),
         },
     )?;
+    sync_media_fts_for_file_in_transaction(transaction, id)?;
     Ok(id)
 }
 
@@ -2552,6 +3159,10 @@ fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRecord> {
         codec,
         thumbnail_state,
         thumbnail_cache_key,
+        rating: None,
+        favorite: false,
+        note: None,
+        tag_ids: Vec::new(),
     })
 }
 
@@ -2904,6 +3515,194 @@ fn unix_timestamp_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn is_valid_hex_color(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 7 || bytes[0] != b'#' {
+        return false;
+    }
+    bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn sync_media_fts_for_file_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+) -> anyhow::Result<()> {
+    let row = transaction
+        .query_row(
+            r#"
+            SELECT files.name,
+                   COALESCE(user_metadata.note, ''),
+                   COALESCE((
+                     SELECT GROUP_CONCAT(tags.name, ' ')
+                     FROM file_tags
+                     JOIN tags ON tags.id = file_tags.tag_id
+                     WHERE file_tags.file_id = files.id
+                   ), '')
+            FROM files
+            LEFT JOIN user_metadata ON user_metadata.file_id = files.id
+            WHERE files.id = ?1
+            "#,
+            [file_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    transaction.execute("DELETE FROM media_fts WHERE rowid = ?1", [file_id])?;
+    if let Some((name, note, tags)) = row {
+        transaction.execute(
+            "INSERT INTO media_fts(rowid, name, note, tags) VALUES (?1, ?2, ?3, ?4)",
+            (file_id, name, note, tags),
+        )?;
+    }
+    Ok(())
+}
+
+fn build_fts_match_query(value: &str) -> String {
+    // Build a tolerant FTS5 match: split on whitespace, escape internal
+    // double quotes, wrap each non-empty token in double quotes, and append
+    // a `*` so partial matches succeed. We do not propagate operators;
+    // callers can author advanced queries elsewhere if needed.
+    let mut tokens = Vec::new();
+    for raw in value.split_whitespace() {
+        let escaped = raw.replace('"', "\"\"");
+        if !escaped.is_empty() {
+            tokens.push(format!("\"{}\"*", escaped));
+        }
+    }
+    if tokens.is_empty() {
+        // Fallback: match nothing-ish so no rows come back.
+        return "\"\"".to_string();
+    }
+    tokens.join(" ")
+}
+
+#[derive(Debug)]
+struct SearchCursor {
+    key: SearchCursorKey,
+    id: i64,
+}
+
+#[derive(Debug)]
+enum SearchCursorKey {
+    Mtime(i64),
+    Name(String),
+    Rating(Option<i64>),
+}
+
+fn normalize_search_sort(sort: &str) -> &'static str {
+    match sort {
+        "mtime_asc" => "mtime_asc",
+        "name_asc" => "name_asc",
+        "name_desc" => "name_desc",
+        "rating_desc" => "rating_desc",
+        "rating_asc" => "rating_asc",
+        _ => "mtime_desc",
+    }
+}
+
+fn encode_search_cursor(sort: &str, item: &MediaRecord) -> String {
+    match sort {
+        "name_asc" | "name_desc" => format!(
+            "v1:search:{sort}:{}:{}",
+            item.id,
+            hex_encode(item.name.as_bytes())
+        ),
+        "mtime_asc" | "mtime_desc" => {
+            format!("v1:search:{sort}:{}:{}", item.id, item.mtime)
+        }
+        "rating_desc" | "rating_asc" => {
+            let rating = item
+                .rating
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            format!("v1:search:{sort}:{}:{}", item.id, rating)
+        }
+        _ => format!("v1:search:mtime_desc:{}:{}", item.id, item.mtime),
+    }
+}
+
+fn decode_search_cursor(cursor: &str, expected_sort: &str) -> anyhow::Result<SearchCursor> {
+    let mut parts = cursor.splitn(5, ':');
+    let version = parts.next();
+    let entity = parts.next();
+    let sort = parts.next();
+    let id = parts.next();
+    let key = parts.next();
+    if version != Some("v1") || entity != Some("search") || sort != Some(expected_sort) {
+        return Err(anyhow::anyhow!("invalid search cursor"));
+    }
+    let id = id
+        .ok_or_else(|| anyhow::anyhow!("invalid search cursor"))?
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("invalid search cursor"))?;
+    let key = key.ok_or_else(|| anyhow::anyhow!("invalid search cursor"))?;
+    let key = match expected_sort {
+        "name_asc" | "name_desc" => SearchCursorKey::Name(
+            hex_decode_to_string(key).map_err(|_| anyhow::anyhow!("invalid search cursor"))?,
+        ),
+        "mtime_asc" | "mtime_desc" => SearchCursorKey::Mtime(
+            key.parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("invalid search cursor"))?,
+        ),
+        "rating_desc" | "rating_asc" => {
+            if key == "null" {
+                SearchCursorKey::Rating(None)
+            } else {
+                SearchCursorKey::Rating(Some(
+                    key.parse::<i64>()
+                        .map_err(|_| anyhow::anyhow!("invalid search cursor"))?,
+                ))
+            }
+        }
+        _ => return Err(anyhow::anyhow!("invalid search cursor")),
+    };
+    Ok(SearchCursor { key, id })
+}
+
+/// Build the WHERE-clause keyset predicate for rating-sorted searches.
+/// Returns the predicate text plus the parameters to bind, in order.
+fn build_rating_keyset_predicate(
+    cursor_rating: Option<i64>,
+    cursor_id: i64,
+    ascending: bool,
+) -> (String, Vec<Value>) {
+    // ORDER BY: `rating IS NULL ASC, rating <DIR>, id <DIR>`. Within the
+    // null group (rating IS NULL = 1), all rows are equivalent except by id.
+    // Outside the null group, compare by rating, breaking ties by id.
+    let id_op = if ascending { ">" } else { "<" };
+    let rating_op = if ascending { ">" } else { "<" };
+    match cursor_rating {
+        Some(rating) => {
+            // Cursor is in the non-null group. Continue with non-null rows
+            // strictly less/greater than the cursor rating, or the same
+            // rating with greater/less id, or fall through to the null
+            // group.
+            let clause = format!(
+                "((user_metadata.rating IS NOT NULL AND (user_metadata.rating {rating_op} ? OR (user_metadata.rating = ? AND files.id {id_op} ?))) OR user_metadata.rating IS NULL)"
+            );
+            (
+                clause,
+                vec![
+                    Value::Integer(rating),
+                    Value::Integer(rating),
+                    Value::Integer(cursor_id),
+                ],
+            )
+        }
+        None => {
+            // Cursor is already inside the null group. Continue with null
+            // rows whose id is past the cursor in the requested direction.
+            let clause = format!("(user_metadata.rating IS NULL AND files.id {id_op} ?)");
+            (clause, vec![Value::Integer(cursor_id)])
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6029,5 +6828,385 @@ mod tests {
             pending_ids,
             vec![high_priority_pending, low_priority_pending, stale_running]
         );
+    }
+
+    fn seed_search_fixture(database: &Database) -> (i64, i64, Vec<i64>) {
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Search".to_string(),
+                display_name: "Search Root".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "search-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("seed root folder");
+
+        let entries = [
+            ("alpha sunset.jpg", ".jpg", 100, "image"),
+            ("beach photo.jpg", ".jpg", 200, "image"),
+            ("clip.mp4", ".mp4", 300, "video"),
+            ("readme.txt", ".txt", 400, "other"),
+        ];
+        let mut file_ids = Vec::new();
+        for (index, (name, ext, mtime, kind)) in entries.iter().enumerate() {
+            let file_id = database
+                .upsert_file(FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: (*name).to_string(),
+                    ext: (*ext).to_string(),
+                    size: 1000 + index as i64,
+                    mtime: *mtime,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("insert file");
+            database
+                .upsert_media_kind(file_id, kind)
+                .expect("insert media kind");
+            file_ids.push(file_id);
+        }
+        (root_id, folder_id, file_ids)
+    }
+
+    #[test]
+    fn create_tag_validates_name_and_rejects_duplicates() {
+        let database = migrated_database();
+        let tag = database
+            .create_tag("Vacation", Some("#aabbcc"))
+            .expect("create tag");
+        assert_eq!(tag.name, "Vacation");
+        assert_eq!(tag.color.as_deref(), Some("#aabbcc"));
+
+        let tags = database.list_tags().expect("list tags");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, tag.id);
+
+        let duplicate = database
+            .create_tag("Vacation", None)
+            .expect_err("duplicate tag should fail");
+        assert!(matches!(duplicate, TagError::Duplicate));
+
+        let invalid = database
+            .create_tag("   ", None)
+            .expect_err("empty tag should fail");
+        assert!(matches!(invalid, TagError::InvalidName));
+
+        let bad_color = database
+            .create_tag("Other", Some("blue"))
+            .expect_err("non-hex color should fail");
+        assert!(matches!(bad_color, TagError::InvalidColor));
+
+        assert!(database.delete_tag(tag.id).expect("delete tag"));
+        assert!(database.list_tags().expect("list").is_empty());
+    }
+
+    #[test]
+    fn upsert_user_metadata_partial_preserves_untouched_fields() {
+        let database = migrated_database();
+        let (_root, _folder, files) = seed_search_fixture(&database);
+        let file_id = files[0];
+
+        let initial = database
+            .upsert_user_metadata_partial(
+                file_id,
+                UserMetadataPatch {
+                    rating: Some(Some(4)),
+                    favorite: Some(true),
+                    note: Some(Some("first note".to_string())),
+                },
+            )
+            .expect("initial upsert");
+        assert_eq!(initial.rating, Some(4));
+        assert!(initial.favorite);
+        assert_eq!(initial.note.as_deref(), Some("first note"));
+        assert!(initial.updated_at > 0);
+
+        let only_favorite = database
+            .upsert_user_metadata_partial(
+                file_id,
+                UserMetadataPatch {
+                    rating: None,
+                    favorite: Some(false),
+                    note: None,
+                },
+            )
+            .expect("partial favorite update");
+        assert_eq!(only_favorite.rating, Some(4));
+        assert!(!only_favorite.favorite);
+        assert_eq!(only_favorite.note.as_deref(), Some("first note"));
+
+        let cleared_rating = database
+            .upsert_user_metadata_partial(
+                file_id,
+                UserMetadataPatch {
+                    rating: Some(None),
+                    favorite: None,
+                    note: None,
+                },
+            )
+            .expect("clear rating");
+        assert!(cleared_rating.rating.is_none());
+        assert!(!cleared_rating.favorite);
+        assert_eq!(cleared_rating.note.as_deref(), Some("first note"));
+
+        let cleared_note = database
+            .upsert_user_metadata_partial(
+                file_id,
+                UserMetadataPatch {
+                    rating: None,
+                    favorite: None,
+                    note: Some(None),
+                },
+            )
+            .expect("clear note");
+        assert!(cleared_note.note.is_none());
+    }
+
+    #[test]
+    fn set_file_tags_replaces_dedupes_and_rejects_unknown_ids() {
+        let database = migrated_database();
+        let (_root, _folder, files) = seed_search_fixture(&database);
+        let file_id = files[0];
+        let tag_a = database.create_tag("alpha", None).expect("create tag a");
+        let tag_b = database.create_tag("beta", None).expect("create tag b");
+        let tag_c = database.create_tag("gamma", None).expect("create tag c");
+
+        let unknown = database
+            .set_file_tags(file_id, &[tag_a.id, 9999])
+            .expect_err("unknown tag id should reject");
+        assert!(matches!(unknown, TagError::UnknownTagId(9999)));
+
+        let initial = database
+            .set_file_tags(file_id, &[tag_a.id, tag_b.id, tag_a.id])
+            .expect("set tags");
+        assert_eq!(initial, vec![tag_a.id, tag_b.id]);
+
+        let replaced = database
+            .set_file_tags(file_id, &[tag_c.id])
+            .expect("replace tags");
+        assert_eq!(replaced, vec![tag_c.id]);
+
+        let added = database.add_file_tag(file_id, tag_a.id).expect("add tag");
+        assert_eq!(added, vec![tag_a.id, tag_c.id]);
+
+        let removed = database
+            .remove_file_tag(file_id, tag_c.id)
+            .expect("remove tag");
+        assert_eq!(removed, vec![tag_a.id]);
+
+        let missing = database
+            .remove_file_tag(file_id, tag_c.id)
+            .expect_err("removing already-absent tag fails");
+        assert!(matches!(missing, TagError::UnknownTagId(_)));
+    }
+
+    #[test]
+    fn search_media_page_matches_name_note_and_tag_via_fts() {
+        let database = migrated_database();
+        let (root_id, _folder, files) = seed_search_fixture(&database);
+        let alpha = files[0];
+        let beach = files[1];
+        let clip = files[2];
+
+        database
+            .upsert_user_metadata_partial(
+                clip,
+                UserMetadataPatch {
+                    rating: None,
+                    favorite: None,
+                    note: Some(Some("contains a holiday note".to_string())),
+                },
+            )
+            .expect("note for clip");
+
+        let tag = database.create_tag("holiday", None).expect("create tag");
+        database
+            .add_file_tag(beach, tag.id)
+            .expect("tag beach as holiday");
+
+        let by_name = database
+            .search_media_page(SearchQuery {
+                q: Some("alpha".to_string()),
+                root_id: Some(root_id),
+                folder_id: None,
+                kind: None,
+                min_rating: None,
+                favorite: None,
+                tag_ids: Vec::new(),
+                sort: "mtime_desc".to_string(),
+                limit: 50,
+                cursor: None,
+            })
+            .expect("search by name");
+        assert_eq!(by_name.items.len(), 1);
+        assert_eq!(by_name.items[0].id, alpha);
+
+        let by_note = database
+            .search_media_page(SearchQuery {
+                q: Some("holiday".to_string()),
+                root_id: Some(root_id),
+                folder_id: None,
+                kind: None,
+                min_rating: None,
+                favorite: None,
+                tag_ids: Vec::new(),
+                sort: "mtime_desc".to_string(),
+                limit: 50,
+                cursor: None,
+            })
+            .expect("search by tag/note token");
+        let mut ids: Vec<i64> = by_note.items.iter().map(|m| m.id).collect();
+        ids.sort();
+        let mut expected = vec![beach, clip];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn search_media_page_combines_kind_min_rating_favorite_and_tag_ids_with_and() {
+        let database = migrated_database();
+        let (root_id, _folder, files) = seed_search_fixture(&database);
+        let alpha = files[0];
+        let beach = files[1];
+
+        database
+            .upsert_user_metadata_partial(
+                alpha,
+                UserMetadataPatch {
+                    rating: Some(Some(5)),
+                    favorite: Some(true),
+                    note: None,
+                },
+            )
+            .expect("alpha metadata");
+        database
+            .upsert_user_metadata_partial(
+                beach,
+                UserMetadataPatch {
+                    rating: Some(Some(2)),
+                    favorite: Some(false),
+                    note: None,
+                },
+            )
+            .expect("beach metadata");
+
+        let beach_tag = database.create_tag("beach", None).expect("create tag");
+        let summer_tag = database.create_tag("summer", None).expect("create summer");
+        database
+            .set_file_tags(alpha, &[beach_tag.id, summer_tag.id])
+            .expect("alpha tags");
+        database
+            .set_file_tags(beach, &[beach_tag.id])
+            .expect("beach tags");
+
+        let result = database
+            .search_media_page(SearchQuery {
+                q: None,
+                root_id: Some(root_id),
+                folder_id: None,
+                kind: Some("image".to_string()),
+                min_rating: Some(3),
+                favorite: Some(true),
+                tag_ids: vec![beach_tag.id, summer_tag.id],
+                sort: "mtime_desc".to_string(),
+                limit: 50,
+                cursor: None,
+            })
+            .expect("search combined filters");
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, alpha);
+        assert!(result.items[0].favorite);
+        assert_eq!(result.items[0].rating, Some(5));
+        let mut tag_ids = result.items[0].tag_ids.clone();
+        tag_ids.sort();
+        let mut expected_tags = vec![beach_tag.id, summer_tag.id];
+        expected_tags.sort();
+        assert_eq!(tag_ids, expected_tags);
+    }
+
+    #[test]
+    fn search_media_page_sort_by_rating_desc_places_null_last() {
+        let database = migrated_database();
+        let (root_id, _folder, files) = seed_search_fixture(&database);
+        database
+            .upsert_user_metadata_partial(
+                files[0],
+                UserMetadataPatch {
+                    rating: Some(Some(3)),
+                    favorite: None,
+                    note: None,
+                },
+            )
+            .expect("alpha rating");
+        database
+            .upsert_user_metadata_partial(
+                files[2],
+                UserMetadataPatch {
+                    rating: Some(Some(5)),
+                    favorite: None,
+                    note: None,
+                },
+            )
+            .expect("clip rating");
+
+        let result = database
+            .search_media_page(SearchQuery {
+                q: None,
+                root_id: Some(root_id),
+                folder_id: None,
+                kind: None,
+                min_rating: None,
+                favorite: None,
+                tag_ids: Vec::new(),
+                sort: "rating_desc".to_string(),
+                limit: 50,
+                cursor: None,
+            })
+            .expect("rating desc");
+        let ids: Vec<i64> = result.items.iter().map(|item| item.id).collect();
+        // First two items are the rated ones (5 then 3), then NULL ratings
+        // in id-desc order.
+        assert_eq!(ids[0], files[2]);
+        assert_eq!(ids[1], files[0]);
+        assert!(ids.contains(&files[1]));
+        assert!(ids.contains(&files[3]));
+        let null_section = &ids[2..];
+        assert!(null_section
+            .iter()
+            .all(|id| { *id == files[1] || *id == files[3] }));
+    }
+
+    #[test]
+    fn search_media_page_without_query_applies_filters_via_non_fts_path() {
+        let database = migrated_database();
+        let (root_id, _folder, files) = seed_search_fixture(&database);
+        let result = database
+            .search_media_page(SearchQuery {
+                q: None,
+                root_id: Some(root_id),
+                folder_id: None,
+                kind: Some("image".to_string()),
+                min_rating: None,
+                favorite: None,
+                tag_ids: Vec::new(),
+                sort: "name_asc".to_string(),
+                limit: 50,
+                cursor: None,
+            })
+            .expect("image search without query");
+        let names: Vec<&str> = result.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha sunset.jpg", "beach photo.jpg"]);
+        assert!(result
+            .items
+            .iter()
+            .all(|item| item.kind.as_deref() == Some("image")));
+        assert!(result.items.iter().all(|item| item.id != files[2]));
     }
 }

@@ -153,7 +153,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
   name,
   note,
   tags,
-  content=''
+  content='',
+  contentless_delete=1
 );
 
 INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)

@@ -286,6 +286,244 @@ paths:
       responses:
         "202":
           description: Delete task accepted.
+  /tags:
+    get:
+      operationId: listTags
+      responses:
+        "200":
+          description: All known tags ordered by name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagListResponse"
+    post:
+      operationId: createTag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTagRequest"
+      responses:
+        "201":
+          description: Tag created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagRecord"
+        "400":
+          description: Invalid tag name or color.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Tag with this name already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tags/{tagId}:
+    delete:
+      operationId: deleteTag
+      parameters:
+        - $ref: "#/components/parameters/tagId"
+      responses:
+        "200":
+          description: Tag deleted; file_tags rows are removed by cascade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteTagResponse"
+        "404":
+          description: Tag not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /media/{fileId}/metadata:
+    get:
+      operationId: getUserMetadata
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+      responses:
+        "200":
+          description: User metadata for the file (default record if none persisted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserMetadataRecord"
+        "404":
+          description: Media item not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: updateUserMetadata
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserMetadataUpdate"
+      responses:
+        "200":
+          description: Updated user metadata for the file.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserMetadataRecord"
+        "400":
+          description: Invalid rating, note length, or payload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Media item not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /media/{fileId}/tags:
+    put:
+      operationId: setFileTags
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetFileTagsRequest"
+      responses:
+        "200":
+          description: Replaced tag set for the file.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileTagsResponse"
+        "404":
+          description: Media item or tag not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: addFileTag
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddFileTagRequest"
+      responses:
+        "200":
+          description: Tag added; returns the resulting tag set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileTagsResponse"
+        "404":
+          description: Media item or tag not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /media/{fileId}/tags/{tagId}:
+    delete:
+      operationId: removeFileTag
+      parameters:
+        - $ref: "#/components/parameters/fileId"
+        - $ref: "#/components/parameters/tagId"
+      responses:
+        "200":
+          description: Tag removed; returns the resulting tag set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileTagsResponse"
+        "404":
+          description: Media item or tag association not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /search:
+    get:
+      operationId: searchMedia
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - $ref: "#/components/parameters/rootIdQuery"
+        - $ref: "#/components/parameters/folderIdQuery"
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [image, video, other]
+        - name: minRating
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+        - name: favorite
+          in: query
+          schema:
+            type: boolean
+        - name: tagId
+          in: query
+          description: Repeatable; results must match ALL provided tag ids.
+          schema:
+            type: array
+            items:
+              type: integer
+              minimum: 1
+          style: form
+          explode: true
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum:
+              [
+                mtime_desc,
+                mtime_asc,
+                name_asc,
+                name_desc,
+                rating_desc,
+                rating_asc
+              ]
+            default: mtime_desc
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Keyset-paged search result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaListResponse"
+        "400":
+          description: Invalid search query parameter or cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /plugins:
     get:
       operationId: listPlugins
@@ -322,6 +560,13 @@ components:
         minimum: 1
     taskId:
       name: taskId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    tagId:
+      name: tagId
       in: path
       required: true
       schema:
@@ -580,6 +825,22 @@ components:
         thumbnailCacheKey:
           type: string
           nullable: true
+        rating:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 5
+        favorite:
+          type: boolean
+          default: false
+        note:
+          type: string
+          nullable: true
+        tagIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
     ThumbnailAsset:
       type: object
       required: [cacheKey, width, height, byteSize]
@@ -636,3 +897,100 @@ components:
         nextCursor:
           type: string
           nullable: true
+    TagRecord:
+      type: object
+      required: [id, name, color]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+    TagListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagRecord"
+    CreateTagRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+    DeleteTagResponse:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean
+    UserMetadataRecord:
+      type: object
+      required: [fileId, rating, favorite, note, tagIds, updatedAt]
+      properties:
+        fileId:
+          type: integer
+        rating:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 5
+        favorite:
+          type: boolean
+        note:
+          type: string
+          nullable: true
+        tagIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+        updatedAt:
+          type: integer
+    UserMetadataUpdate:
+      type: object
+      properties:
+        rating:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 5
+        favorite:
+          type: boolean
+        note:
+          type: string
+          nullable: true
+    FileTagsResponse:
+      type: object
+      required: [fileId, tagIds]
+      properties:
+        fileId:
+          type: integer
+        tagIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+    AddFileTagRequest:
+      type: object
+      required: [tagId]
+      properties:
+        tagId:
+          type: integer
+          minimum: 1
+    SetFileTagsRequest:
+      type: object
+      required: [tagIds]
+      properties:
+        tagIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1

@@ -76,6 +76,57 @@ export interface MediaRecord {
   codec?: string | null;
   thumbnailState?: string | null;
   thumbnailCacheKey?: string | null;
+  rating?: number | null;
+  favorite?: boolean;
+  note?: string | null;
+  tagIds?: number[];
+}
+
+export interface TagRecord {
+  id: number;
+  name: string;
+  color: string | null;
+}
+
+export interface TagListResponse {
+  items: TagRecord[];
+}
+
+export interface CreateTagRequest {
+  name: string;
+  color?: string | null;
+}
+
+export interface DeleteTagResponse {
+  deleted: boolean;
+}
+
+export interface UserMetadataRecord {
+  fileId: number;
+  rating: number | null;
+  favorite: boolean;
+  note: string | null;
+  tagIds: number[];
+  updatedAt: number;
+}
+
+export interface UserMetadataUpdate {
+  rating?: number | null;
+  favorite?: boolean;
+  note?: string | null;
+}
+
+export interface FileTagsResponse {
+  fileId: number;
+  tagIds: number[];
+}
+
+export interface AddFileTagRequest {
+  tagId: number;
+}
+
+export interface SetFileTagsRequest {
+  tagIds: number[];
 }
 
 export interface ThumbnailAsset {
@@ -108,4 +159,23 @@ export interface ListMediaParams {
   cursor?: string;
   sort?: "mtime_desc" | "mtime_asc" | "name_asc" | "name_desc";
   kind?: "image" | "video" | "other";
+}
+
+export interface SearchParams {
+  q?: string;
+  rootId?: number;
+  folderId?: number;
+  kind?: "image" | "video" | "other";
+  minRating?: number;
+  favorite?: boolean;
+  tagIds?: number[];
+  sort?:
+    | "mtime_desc"
+    | "mtime_asc"
+    | "name_asc"
+    | "name_desc"
+    | "rating_desc"
+    | "rating_asc";
+  limit?: number;
+  cursor?: string;
 }

@@ -15,3 +15,5 @@ pub const TASK_ATTEMPT_GENERATION_MIGRATION: &str =
     include_str!("../../migrations/0008_task_attempt_generation.sql");
 pub const SCAN_RECONCILIATION_MIGRATION: &str =
     include_str!("../../migrations/0009_scan_reconciliation.sql");
+pub const MEDIA_FTS_CONTENTLESS_DELETE_MIGRATION: &str =
+    include_str!("../../migrations/0010_media_fts_contentless_delete.sql");

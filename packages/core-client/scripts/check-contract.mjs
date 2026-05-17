@@ -176,7 +176,16 @@ for (const name of [
   "TaskKind",
   "TaskStatus",
   "TaskRecord",
-  "TaskListResponse"
+  "TaskListResponse",
+  "TagRecord",
+  "TagListResponse",
+  "CreateTagRequest",
+  "DeleteTagResponse",
+  "UserMetadataRecord",
+  "UserMetadataUpdate",
+  "FileTagsResponse",
+  "AddFileTagRequest",
+  "SetFileTagsRequest"
 ]) {
   schema(name);
 }
@@ -190,6 +199,13 @@ assertInterfaceMatchesSchema("MediaRecord");
 assertInterfaceMatchesSchema("ThumbnailAsset");
 assertInterfaceMatchesSchema("ThumbnailResponse");
 assertInterfaceMatchesSchema("TaskRecord");
+assertInterfaceMatchesSchema("TagRecord");
+assertInterfaceMatchesSchema("CreateTagRequest");
+assertInterfaceMatchesSchema("DeleteTagResponse");
+assertInterfaceMatchesSchema("UserMetadataRecord");
+assertInterfaceMatchesSchema("FileTagsResponse");
+assertInterfaceMatchesSchema("AddFileTagRequest");
+assertInterfaceMatchesSchema("SetFileTagsRequest");
 
 const pageBody = interfaceBody("Page");
 for (const line of ["items: T[];", "nextCursor: string | null;"]) {
@@ -224,7 +240,28 @@ assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor",
 assertOperationParameters("getMedia", ["fileId"]);
 assertOperationParameters("getThumbnail", ["fileId", "profile"]);
 
-for (const method of ["listRoots", "addRoot", "removeRoot", "enqueueScan", "listFolderChildren", "listMedia", "getMedia", "getThumbnail", "listTasks", "cancelTask", "retryTask"]) {
+for (const method of [
+  "listRoots",
+  "addRoot",
+  "removeRoot",
+  "enqueueScan",
+  "listFolderChildren",
+  "listMedia",
+  "getMedia",
+  "getThumbnail",
+  "listTasks",
+  "cancelTask",
+  "retryTask",
+  "listTags",
+  "createTag",
+  "deleteTag",
+  "getUserMetadata",
+  "updateUserMetadata",
+  "setFileTags",
+  "addFileTag",
+  "removeFileTag",
+  "searchMedia"
+]) {
   if (!client.includes(`${method}:`)) {
     fail(`client.ts missing operation ${method}`);
   }

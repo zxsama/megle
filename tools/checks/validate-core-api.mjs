@@ -70,6 +70,12 @@ const expectedAxumRoutes = [
   "/api/media/:file_id",
   "/api/media/:file_id/thumbnail",
   "/api/media/:file_id/preview",
+  "/api/media/:file_id/metadata",
+  "/api/media/:file_id/tags",
+  "/api/media/:file_id/tags/:tag_id",
+  "/api/tags",
+  "/api/tags/:tag_id",
+  "/api/search",
   "/api/tasks",
   "/api/tasks/scan",
   "/api/tasks/:task_id/cancel",
@@ -137,6 +143,9 @@ if (!dbMigrationsRs.includes('include_str!("../../migrations/0007_task_status_co
 }
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0008_task_attempt_generation.sql")')) {
   fail("db task attempt generation migration include path changed or missing");
+}
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0010_media_fts_contentless_delete.sql")')) {
+  fail("db media_fts contentless_delete migration include path changed or missing");
 }
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");
@@ -489,6 +498,106 @@ for (const value of [
 ]) {
   if (!dbModRs.includes(value)) {
     fail(`DB task status transition guard missing ${value}`);
+  }
+}
+
+// Phase 5 metadata + search contract alignment.
+for (const fragment of [
+  "  /tags:",
+  "  /tags/{tagId}:",
+  "  /media/{fileId}/metadata:",
+  "  /media/{fileId}/tags:",
+  "  /media/{fileId}/tags/{tagId}:",
+  "  /search:"
+]) {
+  if (!openApi.includes(fragment)) {
+    fail(`OpenAPI must declare ${fragment}`);
+  }
+}
+
+for (const value of [
+  "TagRecord",
+  "TagListResponse",
+  "CreateTagRequest",
+  "DeleteTagResponse",
+  "UserMetadataRecord",
+  "UserMetadataUpdate",
+  "FileTagsResponse",
+  "AddFileTagRequest",
+  "SetFileTagsRequest"
+]) {
+  if (!openApi.includes(`#/components/schemas/${value}`)) {
+    fail(`OpenAPI must reference component schema ${value}`);
+  }
+  if (!openApi.includes(`    ${value}:`)) {
+    fail(`OpenAPI must define schema ${value}`);
+  }
+}
+
+const searchOperation = operationBlock("/search", "get");
+for (const value of [
+  "operationId: searchMedia",
+  "rating_desc",
+  "rating_asc",
+  "mtime_desc",
+  "name_asc",
+  "minRating",
+  "tagId",
+  "MediaListResponse"
+]) {
+  if (!searchOperation.includes(value)) {
+    fail(`OpenAPI GET /search missing ${value}`);
+  }
+}
+
+const mediaSchemaBlock = openApi.match(/\n    MediaRecord:[\s\S]*?(?=\n    [A-Z][A-Za-z]+:)/);
+if (!mediaSchemaBlock) {
+  fail("OpenAPI must define MediaRecord schema block");
+} else {
+  for (const value of ["rating", "favorite", "note", "tagIds"]) {
+    if (!mediaSchemaBlock[0].includes(value)) {
+      fail(`OpenAPI MediaRecord must include ${value}`);
+    }
+  }
+}
+
+for (const value of [
+  '"/api/tags"',
+  '"/api/tags/{tagId}"',
+  '"/api/media/{fileId}/metadata"',
+  '"/api/media/{fileId}/tags"',
+  '"/api/media/{fileId}/tags/{tagId}"',
+  '"/api/search"'
+]) {
+  if (!routesRs.includes(value)) {
+    fail(`PHASE1_API_PATHS must include ${value}`);
+  }
+}
+
+for (const value of ["SEARCH_SORT_VALUES", "rating_desc", "rating_asc"]) {
+  if (!routesRs.includes(value)) {
+    fail(`routes.rs must declare ${value}`);
+  }
+}
+
+for (const value of [
+  "list_tags",
+  "create_tag",
+  "delete_tag",
+  "get_user_metadata",
+  "upsert_user_metadata_partial",
+  "set_file_tags",
+  "add_file_tag",
+  "remove_file_tag",
+  "sync_media_fts_for_file",
+  "search_media_page",
+  "TagRecord",
+  "UserMetadataRecord",
+  "UserMetadataPatch",
+  "SearchQuery"
+]) {
+  if (!dbModRs.includes(value)) {
+    fail(`db/mod.rs must expose ${value}`);
   }
 }
 

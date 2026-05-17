@@ -1,5 +1,9 @@
 import type {
   AcceptedRootResponse,
+  AddFileTagRequest,
+  CreateTagRequest,
+  DeleteTagResponse,
+  FileTagsResponse,
   FolderRecord,
   ListFolderChildrenParams,
   ListMediaParams,
@@ -7,8 +11,14 @@ import type {
   Page,
   RootRecord,
   ScanTaskRequest,
+  SearchParams,
+  SetFileTagsRequest,
+  TagListResponse,
+  TagRecord,
   TaskRecord,
-  ThumbnailResponse
+  ThumbnailResponse,
+  UserMetadataRecord,
+  UserMetadataUpdate
 } from "./generated-contract";
 
 export interface CoreClientConfig {
@@ -84,7 +94,40 @@ export function createCoreClient(config: CoreClientConfig) {
     listMedia: (params: ListMediaParams = {}) => request<Page<MediaRecord>>(`/media${query(params)}`),
     getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`),
     getThumbnail: (fileId: number, profile: "grid_320" = "grid_320") =>
-      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ profile })}`)
+      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ profile })}`),
+    listTags: () => request<TagListResponse>("/tags"),
+    createTag: (body: CreateTagRequest) =>
+      request<TagRecord>("/tags", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    deleteTag: (tagId: number) =>
+      request<DeleteTagResponse>(`/tags/${tagId}`, {
+        method: "DELETE"
+      }),
+    getUserMetadata: (fileId: number) =>
+      request<UserMetadataRecord>(`/media/${fileId}/metadata`),
+    updateUserMetadata: (fileId: number, body: UserMetadataUpdate) =>
+      request<UserMetadataRecord>(`/media/${fileId}/metadata`, {
+        method: "PUT",
+        body: JSON.stringify(body)
+      }),
+    setFileTags: (fileId: number, body: SetFileTagsRequest) =>
+      request<FileTagsResponse>(`/media/${fileId}/tags`, {
+        method: "PUT",
+        body: JSON.stringify(body)
+      }),
+    addFileTag: (fileId: number, body: AddFileTagRequest) =>
+      request<FileTagsResponse>(`/media/${fileId}/tags`, {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    removeFileTag: (fileId: number, tagId: number) =>
+      request<FileTagsResponse>(`/media/${fileId}/tags/${tagId}`, {
+        method: "DELETE"
+      }),
+    searchMedia: (params: SearchParams = {}) =>
+      request<Page<MediaRecord>>(`/search${searchQuery(params)}`)
   };
 }
 
@@ -103,6 +146,26 @@ function query(params: QueryParams): string {
   if ("sort" in params && params.sort) search.set("sort", params.sort);
   if ("kind" in params && params.kind) search.set("kind", params.kind);
   if ("profile" in params && params.profile) search.set("profile", params.profile);
+  const value = search.toString();
+  return value ? `?${value}` : "";
+}
+
+function searchQuery(params: SearchParams): string {
+  const search = new URLSearchParams();
+  if (params.q) search.set("q", params.q);
+  if (params.rootId) search.set("rootId", String(params.rootId));
+  if (params.folderId) search.set("folderId", String(params.folderId));
+  if (params.kind) search.set("kind", params.kind);
+  if (typeof params.minRating === "number") search.set("minRating", String(params.minRating));
+  if (typeof params.favorite === "boolean") search.set("favorite", params.favorite ? "true" : "false");
+  if (params.tagIds) {
+    for (const tagId of params.tagIds) {
+      search.append("tagId", String(tagId));
+    }
+  }
+  if (params.sort) search.set("sort", params.sort);
+  if (params.limit) search.set("limit", String(params.limit));
+  if (params.cursor) search.set("cursor", params.cursor);
   const value = search.toString();
   return value ? `?${value}` : "";
 }

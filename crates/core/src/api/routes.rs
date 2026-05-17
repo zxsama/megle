@@ -1,20 +1,30 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
 use crate::api::AppState;
 use crate::db::{
-    FolderRecord, MediaPageQuery, MediaRecord, NewRoot, RootRecord, TaskRecord, ThumbnailRecord,
+    FolderRecord, MediaPageQuery, MediaRecord, NewRoot, RootRecord, SearchQuery, TagError,
+    TagRecord, TaskRecord, ThumbnailRecord, UserMetadataPatch, UserMetadataRecord,
 };
 use crate::scan::ScanSummary;
 use crate::thumbnails::{is_pending_status, normalize_profile};
 
 #[allow(dead_code)]
 pub const MEDIA_SORT_VALUES: &[&str] = &["mtime_desc", "mtime_asc", "name_asc", "name_desc"];
+#[allow(dead_code)]
+pub const SEARCH_SORT_VALUES: &[&str] = &[
+    "mtime_desc",
+    "mtime_asc",
+    "name_asc",
+    "name_desc",
+    "rating_desc",
+    "rating_asc",
+];
 #[allow(dead_code)]
 pub const MEDIA_KIND_VALUES: &[&str] = &["image", "video", "other"];
 
@@ -55,6 +65,12 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/media/{fileId}",
     "/api/media/{fileId}/thumbnail",
     "/api/media/{fileId}/preview",
+    "/api/media/{fileId}/metadata",
+    "/api/media/{fileId}/tags",
+    "/api/media/{fileId}/tags/{tagId}",
+    "/api/tags",
+    "/api/tags/{tagId}",
+    "/api/search",
     "/api/tasks",
     "/api/tasks/scan",
     "/api/tasks/{taskId}/cancel",
@@ -130,6 +146,56 @@ struct ThumbnailQuery {
     profile: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateTagRequestBody {
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddFileTagRequestBody {
+    #[serde(rename = "tagId")]
+    tag_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetFileTagsRequestBody {
+    #[serde(rename = "tagIds")]
+    tag_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchMediaQuery {
+    q: Option<String>,
+    #[serde(rename = "rootId")]
+    root_id: Option<i64>,
+    #[serde(rename = "folderId")]
+    folder_id: Option<i64>,
+    kind: Option<String>,
+    #[serde(rename = "minRating")]
+    min_rating: Option<i64>,
+    favorite: Option<bool>,
+    #[serde(default, rename = "tagId")]
+    tag_id: Vec<i64>,
+    sort: Option<String>,
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteTagResponse {
+    deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileTagsResponse {
+    file_id: i64,
+    tag_ids: Vec<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
@@ -198,6 +264,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/media/:file_id", get(get_media))
         .route("/api/media/:file_id/thumbnail", get(get_thumbnail))
         .route("/api/media/:file_id/preview", get(get_preview))
+        .route(
+            "/api/media/:file_id/metadata",
+            get(get_user_metadata).put(update_user_metadata),
+        )
+        .route(
+            "/api/media/:file_id/tags",
+            put(set_file_tags).post(add_file_tag),
+        )
+        .route(
+            "/api/media/:file_id/tags/:tag_id",
+            axum::routing::delete(remove_file_tag),
+        )
+        .route("/api/tags", get(list_tags).post(create_tag))
+        .route("/api/tags/:tag_id", axum::routing::delete(delete_tag))
+        .route("/api/search", get(search_media))
         .route("/api/tasks", get(list_tasks))
         .route("/api/tasks/scan", post(enqueue_scan))
         .route("/api/tasks/:task_id/cancel", post(cancel_task))
@@ -479,6 +560,145 @@ async fn list_plugins() -> Json<ListResponse<PluginState>> {
     Json(empty_list())
 }
 
+async fn list_tags(State(state): State<AppState>) -> ApiResult<Json<ListResponse<TagRecord>>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let items = database.list_tags()?;
+    Ok(Json(ListResponse {
+        items,
+        next_cursor: None,
+    }))
+}
+
+async fn create_tag(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateTagRequestBody>,
+) -> ApiResult<(StatusCode, Json<TagRecord>)> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let color = payload.color.as_deref();
+    let tag = database
+        .create_tag(payload.name.as_str(), color)
+        .map_err(map_tag_error)?;
+    Ok((StatusCode::CREATED, Json(tag)))
+}
+
+async fn delete_tag(
+    State(state): State<AppState>,
+    Path(tag_id): Path<i64>,
+) -> ApiResult<Json<DeleteTagResponse>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let deleted = database.delete_tag(tag_id)?;
+    if !deleted {
+        return Err(CoreError::not_found(format!("tag not found: {tag_id}")));
+    }
+    Ok(Json(DeleteTagResponse { deleted: true }))
+}
+
+async fn get_user_metadata(
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+) -> ApiResult<Json<UserMetadataRecord>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let record = database
+        .get_user_metadata(file_id)?
+        .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
+    Ok(Json(record))
+}
+
+async fn update_user_metadata(
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+    Json(payload): Json<serde_json::Value>,
+) -> ApiResult<Json<UserMetadataRecord>> {
+    let patch = parse_user_metadata_patch(&payload)?;
+    let database = state.database.lock().expect("database mutex poisoned");
+    let record = database
+        .upsert_user_metadata_partial(file_id, patch)
+        .map_err(map_metadata_error)?;
+    Ok(Json(record))
+}
+
+async fn set_file_tags(
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+    Json(payload): Json<SetFileTagsRequestBody>,
+) -> ApiResult<Json<FileTagsResponse>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let tag_ids = database
+        .set_file_tags(file_id, &payload.tag_ids)
+        .map_err(map_tag_error)?;
+    Ok(Json(FileTagsResponse { file_id, tag_ids }))
+}
+
+async fn add_file_tag(
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+    Json(payload): Json<AddFileTagRequestBody>,
+) -> ApiResult<Json<FileTagsResponse>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let tag_ids = database
+        .add_file_tag(file_id, payload.tag_id)
+        .map_err(map_tag_error)?;
+    Ok(Json(FileTagsResponse { file_id, tag_ids }))
+}
+
+async fn remove_file_tag(
+    State(state): State<AppState>,
+    Path((file_id, tag_id)): Path<(i64, i64)>,
+) -> ApiResult<Json<FileTagsResponse>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let tag_ids = database
+        .remove_file_tag(file_id, tag_id)
+        .map_err(map_tag_error)?;
+    Ok(Json(FileTagsResponse { file_id, tag_ids }))
+}
+
+async fn search_media(
+    State(state): State<AppState>,
+    Query(query): Query<SearchMediaQuery>,
+) -> ApiResult<Json<ListResponse<MediaRecord>>> {
+    let sort = parse_search_sort(query.sort.as_deref())?.to_string();
+    let kind = parse_media_kind(query.kind.as_deref())?.map(str::to_string);
+    if let Some(min_rating) = query.min_rating {
+        if !(1..=5).contains(&min_rating) {
+            return Err(CoreError::bad_request(format!(
+                "minRating must be between 1 and 5: {min_rating}"
+            )));
+        }
+    }
+    for tag_id in &query.tag_id {
+        if *tag_id <= 0 {
+            return Err(CoreError::bad_request(format!(
+                "tagId must be positive: {tag_id}"
+            )));
+        }
+    }
+    let limit = query.limit.unwrap_or(100);
+    if !(1..=500).contains(&limit) {
+        return Err(CoreError::bad_request(format!(
+            "limit must be between 1 and 500: {limit}"
+        )));
+    }
+    let database = state.database.lock().expect("database mutex poisoned");
+    let page = database
+        .search_media_page(SearchQuery {
+            q: query.q,
+            root_id: query.root_id,
+            folder_id: query.folder_id,
+            kind,
+            min_rating: query.min_rating,
+            favorite: query.favorite,
+            tag_ids: query.tag_id,
+            sort,
+            limit,
+            cursor: query.cursor,
+        })
+        .map_err(map_cursor_error)?;
+    Ok(Json(ListResponse {
+        items: page.items,
+        next_cursor: page.next_cursor,
+    }))
+}
+
 fn empty_list<T>() -> ListResponse<T> {
     ListResponse {
         items: Vec::new(),
@@ -534,6 +754,15 @@ fn parse_media_sort(value: Option<&str>) -> ApiResult<&'static str> {
         .ok_or_else(|| CoreError::bad_request(format!("unsupported media sort: {value}")))
 }
 
+fn parse_search_sort(value: Option<&str>) -> ApiResult<&'static str> {
+    let value = value.unwrap_or("mtime_desc");
+    SEARCH_SORT_VALUES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == value)
+        .ok_or_else(|| CoreError::bad_request(format!("unsupported search sort: {value}")))
+}
+
 fn parse_media_kind(value: Option<&str>) -> ApiResult<Option<&'static str>> {
     let Some(value) = value else {
         return Ok(None);
@@ -584,6 +813,91 @@ fn map_task_action_error(error: anyhow::Error) -> CoreError {
         return CoreError::conflict(message);
     }
     error.into()
+}
+
+fn map_tag_error(error: TagError) -> CoreError {
+    match error {
+        TagError::Duplicate => CoreError::conflict("tag name already exists".to_string()),
+        TagError::InvalidName => {
+            CoreError::bad_request("tag name must be 1..=64 characters".to_string())
+        }
+        TagError::InvalidColor => {
+            CoreError::bad_request("tag color must be #rrggbb hex when provided".to_string())
+        }
+        TagError::UnknownTagId(tag_id) => CoreError::not_found(format!("tag not found: {tag_id}")),
+        TagError::Other(error) => {
+            let message = error.to_string();
+            if message.contains("media item not found") {
+                CoreError::not_found(message)
+            } else {
+                error.into()
+            }
+        }
+    }
+}
+
+fn map_metadata_error(error: anyhow::Error) -> CoreError {
+    let message = error.to_string();
+    if message.contains("media item not found") {
+        return CoreError::not_found(message);
+    }
+    error.into()
+}
+
+fn parse_user_metadata_patch(value: &serde_json::Value) -> ApiResult<UserMetadataPatch> {
+    let object = value.as_object().ok_or_else(|| {
+        CoreError::bad_request("metadata update body must be an object".to_string())
+    })?;
+    let mut patch = UserMetadataPatch::default();
+
+    if let Some(rating_value) = object.get("rating") {
+        let rating = if rating_value.is_null() {
+            None
+        } else {
+            let rating = rating_value.as_i64().ok_or_else(|| {
+                CoreError::bad_request("rating must be an integer or null".to_string())
+            })?;
+            if !(0..=5).contains(&rating) {
+                return Err(CoreError::bad_request(format!(
+                    "rating must be between 0 and 5: {rating}"
+                )));
+            }
+            Some(rating)
+        };
+        patch.rating = Some(rating);
+    }
+
+    if let Some(favorite_value) = object.get("favorite") {
+        let favorite = favorite_value
+            .as_bool()
+            .ok_or_else(|| CoreError::bad_request("favorite must be a boolean".to_string()))?;
+        patch.favorite = Some(favorite);
+    }
+
+    if let Some(note_value) = object.get("note") {
+        let note = if note_value.is_null() {
+            None
+        } else {
+            let note = note_value
+                .as_str()
+                .ok_or_else(|| CoreError::bad_request("note must be a string or null".to_string()))?
+                .trim()
+                .to_string();
+            if note.chars().count() > 2048 {
+                return Err(CoreError::bad_request(
+                    "note must be 2048 characters or fewer".to_string(),
+                ));
+            }
+            if note.is_empty() {
+                None
+            } else {
+                Some(note)
+            }
+        };
+        patch.note = Some(note);
+    }
+
+    Ok(patch)
 }
 
 async fn enqueue_task(state: &AppState, task_id: i64, attempt_generation: i64) -> ApiResult<()> {
@@ -639,7 +953,7 @@ mod tests {
 
     use super::{fallback_display_name, router};
     use crate::api::{router_with_config, ApiConfig, AppState};
-    use crate::db::Database;
+    use crate::db::{Database, NewRoot};
 
     #[test]
     fn fallback_display_name_uses_last_path_component() {
@@ -1929,6 +2243,285 @@ mod tests {
             response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
             Some(&"http://127.0.0.1:5174".parse().expect("origin header"))
         );
+    }
+
+    #[tokio::test]
+    async fn create_tag_returns_201_then_409_on_duplicate_and_400_on_empty() {
+        let app = router(AppState::new(test_database()));
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tags")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "Vacation", "color": "#aabbcc" }).to_string(),
+                    ))
+                    .expect("build create request"),
+            )
+            .await
+            .expect("create tag");
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let body = response_json(create).await;
+        assert_eq!(body["name"], "Vacation");
+        assert_eq!(body["color"], "#aabbcc");
+
+        let duplicate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tags")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "Vacation" }).to_string(),
+                    ))
+                    .expect("build duplicate request"),
+            )
+            .await
+            .expect("duplicate tag");
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tags")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({ "name": "   " }).to_string()))
+                    .expect("build invalid request"),
+            )
+            .await
+            .expect("invalid tag");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let bad_color = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tags")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "Other", "color": "blue" }).to_string(),
+                    ))
+                    .expect("build bad color request"),
+            )
+            .await
+            .expect("invalid color");
+        assert_eq!(bad_color.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_user_metadata_validates_rating_and_returns_404_for_missing_file() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let app = router(AppState::new(database));
+
+        let valid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/api/media/{file_id}/metadata"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "rating": 4,
+                            "favorite": true,
+                            "note": "trip notes"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("update metadata");
+        assert_eq!(valid.status(), StatusCode::OK);
+        let body = response_json(valid).await;
+        assert_eq!(body["fileId"], file_id);
+        assert_eq!(body["rating"], 4);
+        assert_eq!(body["favorite"], true);
+        assert_eq!(body["note"], "trip notes");
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/api/media/{file_id}/metadata"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({ "rating": 6 }).to_string()))
+                    .expect("build invalid request"),
+            )
+            .await
+            .expect("invalid rating");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/media/999999/metadata")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "favorite": true }).to_string(),
+                    ))
+                    .expect("build missing request"),
+            )
+            .await
+            .expect("missing file");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn add_file_tag_returns_404_for_unknown_tag_and_200_for_existing() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let tag = database.create_tag("trip", None).expect("create tag");
+        let app = router(AppState::new(database));
+
+        let unknown = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/media/{file_id}/tags"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "tagId": 99999 }).to_string(),
+                    ))
+                    .expect("build unknown tag request"),
+            )
+            .await
+            .expect("unknown tag");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let added = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/media/{file_id}/tags"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "tagId": tag.id }).to_string(),
+                    ))
+                    .expect("build add tag request"),
+            )
+            .await
+            .expect("add tag");
+        assert_eq!(added.status(), StatusCode::OK);
+        let body = response_json(added).await;
+        assert_eq!(body["fileId"], file_id);
+        assert_eq!(body["tagIds"], serde_json::json!([tag.id]));
+    }
+
+    #[tokio::test]
+    async fn search_route_filters_by_kind_and_query_and_respects_rating_desc_null_last() {
+        let database = test_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Search Route Root".to_string(),
+                display_name: "Search Route".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "search-route".to_string(),
+                mtime: Some(1),
+            })
+            .expect("seed folder");
+
+        let mut file_ids = Vec::new();
+        for (name, ext, mtime, kind) in [
+            ("foo image.jpg", ".jpg", 100, "image"),
+            ("bar image.jpg", ".jpg", 200, "image"),
+            ("foo clip.mp4", ".mp4", 300, "video"),
+        ] {
+            let id = database
+                .upsert_file(crate::db::FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: name.to_string(),
+                    ext: ext.to_string(),
+                    size: 100,
+                    mtime,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("insert file");
+            database
+                .upsert_media_kind(id, kind)
+                .expect("upsert media kind");
+            file_ids.push(id);
+        }
+        // Set ratings so rating_desc has a deterministic ordering.
+        database
+            .upsert_user_metadata_partial(
+                file_ids[1],
+                crate::db::UserMetadataPatch {
+                    rating: Some(Some(5)),
+                    favorite: None,
+                    note: None,
+                },
+            )
+            .expect("rate bar image");
+        database
+            .upsert_user_metadata_partial(
+                file_ids[0],
+                crate::db::UserMetadataPatch {
+                    rating: Some(Some(2)),
+                    favorite: None,
+                    note: None,
+                },
+            )
+            .expect("rate foo image");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/search?q=foo&kind=image&rootId={root_id}"))
+                    .body(Body::empty())
+                    .expect("build search request"),
+            )
+            .await
+            .expect("search request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let items = body["items"].as_array().expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], file_ids[0]);
+        assert_eq!(items[0]["name"], "foo image.jpg");
+
+        let rated = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/search?rootId={root_id}&sort=rating_desc"))
+                    .body(Body::empty())
+                    .expect("build rating request"),
+            )
+            .await
+            .expect("rating search request");
+        assert_eq!(rated.status(), StatusCode::OK);
+        let body = response_json(rated).await;
+        let items = body["items"].as_array().expect("rated items");
+        assert_eq!(items.len(), 3);
+        // First two are rated 5, then 2.
+        assert_eq!(items[0]["id"], file_ids[1]);
+        assert_eq!(items[1]["id"], file_ids[0]);
+        // The unrated video comes last.
+        assert_eq!(items[2]["id"], file_ids[2]);
+        assert!(items[2]["rating"].is_null());
     }
 
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
