@@ -15,9 +15,15 @@ import type { LibraryState } from "../../core/useLibraryData";
 
 interface LibrarySidebarProps {
   library: LibraryState;
+  onFolderContextMenu?: (event: {
+    folder: FolderRecord;
+    x: number;
+    y: number;
+    shiftKey: boolean;
+  }) => void;
 }
 
-export function LibrarySidebar({ library }: LibrarySidebarProps) {
+export function LibrarySidebar({ library, onFolderContextMenu }: LibrarySidebarProps) {
   const [rootPath, setRootPath] = useState("");
   const canPickFolder = canPickNativeFolder();
   const selectedRootId = library.selectedRootId;
@@ -100,7 +106,12 @@ export function LibrarySidebar({ library }: LibrarySidebarProps) {
 
       <div className="tree-list" role="tree" aria-label="Folder tree">
         {library.roots.map((root) => (
-          <RootNode key={root.id} library={library} root={root} />
+          <RootNode
+            key={root.id}
+            library={library}
+            onFolderContextMenu={onFolderContextMenu}
+            root={root}
+          />
         ))}
         {library.roots.length === 0 ? <div className="empty-panel">No roots</div> : null}
       </div>
@@ -108,7 +119,20 @@ export function LibrarySidebar({ library }: LibrarySidebarProps) {
   );
 }
 
-function RootNode({ library, root }: { library: LibraryState; root: RootRecord }) {
+function RootNode({
+  library,
+  root,
+  onFolderContextMenu
+}: {
+  library: LibraryState;
+  root: RootRecord;
+  onFolderContextMenu?: (event: {
+    folder: FolderRecord;
+    x: number;
+    y: number;
+    shiftKey: boolean;
+  }) => void;
+}) {
   const rootFolderId = root.rootFolderId;
   const expanded = rootFolderId ? library.expandedFolderIds.has(rootFolderId) : false;
   const children = rootFolderId ? library.folderChildrenByParent[rootFolderId] ?? [] : [];
@@ -144,7 +168,13 @@ function RootNode({ library, root }: { library: LibraryState; root: RootRecord }
       {expanded ? (
         <div role="group">
           {children.map((folder) => (
-            <FolderNode depth={1} folder={folder} key={folder.id} library={library} />
+            <FolderNode
+              depth={1}
+              folder={folder}
+              key={folder.id}
+              library={library}
+              onFolderContextMenu={onFolderContextMenu}
+            />
           ))}
           <LoadMoreChildren folderId={rootFolderId} library={library} />
         </div>
@@ -156,11 +186,18 @@ function RootNode({ library, root }: { library: LibraryState; root: RootRecord }
 function FolderNode({
   depth,
   folder,
-  library
+  library,
+  onFolderContextMenu
 }: {
   depth: number;
   folder: FolderRecord;
   library: LibraryState;
+  onFolderContextMenu?: (event: {
+    folder: FolderRecord;
+    x: number;
+    y: number;
+    shiftKey: boolean;
+  }) => void;
 }) {
   const expanded = library.expandedFolderIds.has(folder.id);
   const children = library.folderChildrenByParent[folder.id] ?? [];
@@ -174,6 +211,17 @@ function FolderNode({
         role="treeitem"
         aria-expanded={expanded}
         aria-selected={selected}
+        onContextMenu={(event) => {
+          if (!onFolderContextMenu) return;
+          event.preventDefault();
+          library.setSelectedFolder(folder);
+          onFolderContextMenu({
+            folder,
+            x: event.clientX,
+            y: event.clientY,
+            shiftKey: event.shiftKey
+          });
+        }}
         style={{ "--tree-depth": String(depth) } as CSSProperties}
       >
         <button
@@ -197,7 +245,13 @@ function FolderNode({
       {expanded ? (
         <div role="group">
           {children.map((child) => (
-            <FolderNode depth={depth + 1} folder={child} key={child.id} library={library} />
+            <FolderNode
+              depth={depth + 1}
+              folder={child}
+              key={child.id}
+              library={library}
+              onFolderContextMenu={onFolderContextMenu}
+            />
           ))}
           <LoadMoreChildren depth={depth + 1} folderId={folder.id} library={library} />
         </div>

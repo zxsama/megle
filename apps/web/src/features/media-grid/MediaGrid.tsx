@@ -14,6 +14,7 @@ interface MediaGridProps {
   onRequestMore: () => void;
   onRequestThumbnailStates: (mediaIds: number[]) => void;
   thumbnailStatesByMediaId: Record<number, ThumbnailResponse>;
+  onContextMenu?: (event: { item: MediaRecord; x: number; y: number; shiftKey: boolean }) => void;
 }
 
 export function MediaGrid({
@@ -25,7 +26,8 @@ export function MediaGrid({
   onRequestMore,
   onRequestThumbnailStates,
   onSelect,
-  thumbnailStatesByMediaId
+  thumbnailStatesByMediaId,
+  onContextMenu
 }: MediaGridProps) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
@@ -211,6 +213,7 @@ export function MediaGrid({
                     <MediaTile
                       item={item}
                       key={item.id}
+                      onContextMenu={onContextMenu}
                       onSelect={onSelect}
                       selected={item.id === selectedMediaId}
                       thumbnail={thumbnailStatesByMediaId[item.id]}
@@ -228,12 +231,14 @@ export function MediaGrid({
 function MediaTile({
   item,
   onSelect,
+  onContextMenu,
   selected,
   thumbnail,
   width
 }: {
   item: MediaRecord;
   onSelect: (mediaId: number) => void;
+  onContextMenu?: (event: { item: MediaRecord; x: number; y: number; shiftKey: boolean }) => void;
   selected: boolean;
   thumbnail?: ThumbnailResponse;
   width: number;
@@ -242,6 +247,12 @@ function MediaTile({
     <div
       aria-selected={selected}
       className="media-gridcell"
+      onContextMenu={(event) => {
+        if (!onContextMenu) return;
+        event.preventDefault();
+        onSelect(item.id);
+        onContextMenu({ item, x: event.clientX, y: event.clientY, shiftKey: event.shiftKey });
+      }}
       role="gridcell"
       style={{ width }}
     >

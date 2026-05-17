@@ -1,4 +1,5 @@
 import { RefreshCw } from "lucide-react";
+import type { MediaRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import { MediaGrid } from "../media-grid/MediaGrid";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
@@ -9,9 +10,15 @@ import { SortMenu } from "./SortMenu";
 
 interface LibraryViewProps {
   library: LibraryState;
+  onMediaContextMenu?: (event: {
+    item: MediaRecord;
+    x: number;
+    y: number;
+    shiftKey: boolean;
+  }) => void;
 }
 
-export function LibraryView({ library }: LibraryViewProps) {
+export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
   const selectedRoot = library.roots.find((root) => root.id === library.selectedRootId) ?? null;
   const selectedFolder = library.folders.find((folder) => folder.id === library.selectedFolderId);
 
@@ -62,6 +69,7 @@ export function LibraryView({ library }: LibraryViewProps) {
           items={library.media}
           loading={library.loading}
           loadingMore={library.loadingMoreMedia}
+          onContextMenu={onMediaContextMenu}
           onRequestMore={library.loadMoreMedia}
           onRequestThumbnailStates={library.requestThumbnailStates}
           onSelect={library.setSelectedMediaId}

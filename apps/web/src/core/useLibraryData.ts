@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  FileOperationRecord,
   FolderRecord,
   MediaRecord,
   RootRecord,
@@ -11,6 +12,7 @@ import type {
   UserMetadataRecord,
   UserMetadataUpdate
 } from "@megle/core-client";
+import { CoreApiError } from "@megle/core-client";
 import { createCoreClient } from "./client";
 import {
   isFreshThumbnailForMediaRecord,
@@ -32,6 +34,13 @@ export type LibrarySort =
 
 export type MediaKindFilter = "image" | "video" | "other";
 export type MinRatingFilter = 1 | 2 | 3 | 4 | 5;
+
+export interface FileOpResult {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  operations?: FileOperationRecord[];
+}
 
 export interface SearchState {
   q: string;
@@ -72,6 +81,21 @@ export interface LibraryState {
   metadataSaving: boolean;
   error: string | null;
   lastScan: ScanSummary | null;
+  recentOps: FileOperationRecord[];
+  recentOpsLoading: boolean;
+  loadRecentOps: () => Promise<void>;
+  renameFile: (fileId: number, newName: string) => Promise<FileOpResult>;
+  renameFolder: (folderId: number, newName: string) => Promise<FileOpResult>;
+  moveItems: (input: {
+    fileIds?: number[];
+    folderIds?: number[];
+    targetFolderId: number;
+  }) => Promise<FileOpResult>;
+  deleteItems: (input: {
+    fileIds?: number[];
+    folderIds?: number[];
+    permanent: boolean;
+  }) => Promise<FileOpResult>;
   setSelectedRootId: (rootId: number) => void;
   setSelectedFolder: (folder: FolderRecord) => void;
   setSelectedMediaId: (mediaId: number) => void;
@@ -147,6 +171,8 @@ export function useLibraryData(): LibraryState {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [selectedMetadata, setSelectedMetadata] = useState<UserMetadataRecord | null>(null);
   const [metadataSaving, setMetadataSaving] = useState(false);
+  const [recentOps, setRecentOps] = useState<FileOperationRecord[]>([]);
+  const [recentOpsLoading, setRecentOpsLoading] = useState(false);
   const mediaById = useMemo(() => new Map(media.map((item) => [item.id, item])), [media]);
   const mediaByIdRef = useRef(mediaById);
   mediaByIdRef.current = mediaById;
@@ -835,6 +861,171 @@ export function useLibraryData(): LibraryState {
     [client]
   );
 
+  const loadRecentOps = useCallback(async () => {
+    setRecentOpsLoading(true);
+    try {
+      const response = await client.listFileOperations({ limit: 50 });
+      setRecentOps(response.items);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setRecentOpsLoading(false);
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void loadRecentOps();
+  }, [loadRecentOps]);
+
+  const renameFile = useCallback(
+    async (fileId: number, newName: string): Promise<FileOpResult> => {
+      const previousMedia = media;
+      const previousSelectedMediaId = selectedMediaId;
+      // Optimistic: update name in grid
+      setMedia((current) =>
+        current.map((item) => (item.id === fileId ? { ...item, name: newName } : item))
+      );
+      try {
+        await client.renameFileOp({ fileId, newName });
+        await Promise.all([loadRecentOps(), loadLibrary()]);
+        return { ok: true };
+      } catch (cause) {
+        setMedia(previousMedia);
+        selectMedia(previousSelectedMediaId);
+        const result = fileOpFailure(cause);
+        setError(result.message ?? "Rename failed");
+        return result;
+      }
+    },
+    [client, loadLibrary, loadRecentOps, media, selectedMediaId]
+  );
+
+  const renameFolder = useCallback(
+    async (folderId: number, newName: string): Promise<FileOpResult> => {
+      const previousChildren = folderChildrenByParent;
+      // Optimistic: update folder name everywhere it appears
+      setFolderChildrenByParent((current) => {
+        let changed = false;
+        const next: Record<number, FolderRecord[]> = {};
+        for (const [parentId, children] of Object.entries(current)) {
+          const updated = children.map((child) =>
+            child.id === folderId ? { ...child, name: newName } : child
+          );
+          if (updated.some((child, idx) => child !== children[idx])) {
+            changed = true;
+          }
+          next[Number(parentId)] = updated;
+        }
+        return changed ? next : current;
+      });
+      try {
+        await client.renameFileOp({ folderId, newName });
+        await Promise.all([loadRecentOps(), loadLibrary()]);
+        return { ok: true };
+      } catch (cause) {
+        setFolderChildrenByParent(previousChildren);
+        const result = fileOpFailure(cause);
+        setError(result.message ?? "Rename failed");
+        return result;
+      }
+    },
+    [client, folderChildrenByParent, loadLibrary, loadRecentOps]
+  );
+
+  const moveItems = useCallback(
+    async (input: {
+      fileIds?: number[];
+      folderIds?: number[];
+      targetFolderId: number;
+    }): Promise<FileOpResult> => {
+      const fileIds = input.fileIds ?? [];
+      const folderIds = input.folderIds ?? [];
+      if (fileIds.length === 0 && folderIds.length === 0) {
+        return { ok: true };
+      }
+      const previousMedia = media;
+      // Optimistic: drop moved files from current view if their target is different from current folder
+      if (fileIds.length > 0 && input.targetFolderId !== selectedFolderId) {
+        setMedia((current) => current.filter((item) => !fileIds.includes(item.id)));
+      }
+      try {
+        const response = await client.moveFileOps({
+          fileIds: fileIds.length > 0 ? fileIds : undefined,
+          folderIds: folderIds.length > 0 ? folderIds : undefined,
+          targetFolderId: input.targetFolderId
+        });
+        await Promise.all([loadRecentOps(), loadLibrary()]);
+        return { ok: true, operations: response.operations };
+      } catch (cause) {
+        setMedia(previousMedia);
+        const result = fileOpFailure(cause);
+        setError(result.message ?? "Move failed");
+        return result;
+      }
+    },
+    [client, loadLibrary, loadRecentOps, media, selectedFolderId]
+  );
+
+  const deleteItems = useCallback(
+    async (input: {
+      fileIds?: number[];
+      folderIds?: number[];
+      permanent: boolean;
+    }): Promise<FileOpResult> => {
+      const fileIds = input.fileIds ?? [];
+      const folderIds = input.folderIds ?? [];
+      if (fileIds.length === 0 && folderIds.length === 0) {
+        return { ok: true };
+      }
+      const previousMedia = media;
+      const previousSelectedMediaId = selectedMediaId;
+      const previousChildren = folderChildrenByParent;
+
+      // Optimistic: remove deleted items locally
+      if (fileIds.length > 0) {
+        setMedia((current) => current.filter((item) => !fileIds.includes(item.id)));
+        if (selectedMediaId !== null && fileIds.includes(selectedMediaId)) {
+          selectMedia(null);
+        }
+      }
+      if (folderIds.length > 0) {
+        setFolderChildrenByParent((current) => {
+          const next: Record<number, FolderRecord[]> = {};
+          for (const [parentId, children] of Object.entries(current)) {
+            next[Number(parentId)] = children.filter((child) => !folderIds.includes(child.id));
+          }
+          return next;
+        });
+      }
+
+      try {
+        const response = await client.deleteFileOps({
+          fileIds: fileIds.length > 0 ? fileIds : undefined,
+          folderIds: folderIds.length > 0 ? folderIds : undefined,
+          permanent: input.permanent
+        });
+        await Promise.all([loadRecentOps(), loadLibrary()]);
+        return { ok: true, operations: response.operations };
+      } catch (cause) {
+        // Rollback
+        setMedia(previousMedia);
+        selectMedia(previousSelectedMediaId);
+        setFolderChildrenByParent(previousChildren);
+        const result = fileOpFailure(cause);
+        setError(result.message ?? "Delete failed");
+        return result;
+      }
+    },
+    [
+      client,
+      folderChildrenByParent,
+      loadLibrary,
+      loadRecentOps,
+      media,
+      selectedMediaId
+    ]
+  );
+
   return {
     roots,
     folders,
@@ -865,6 +1056,13 @@ export function useLibraryData(): LibraryState {
     metadataSaving,
     error,
     lastScan,
+    recentOps,
+    recentOpsLoading,
+    loadRecentOps,
+    renameFile,
+    renameFolder,
+    moveItems,
+    deleteItems,
     setSelectedRootId: (rootId: number) => {
       const root = roots.find((item) => item.id === rootId);
       mediaPageGeneration.current += 1;
@@ -1036,4 +1234,27 @@ function errorMessage(cause: unknown): string {
     return cause.message;
   }
   return "Core request failed";
+}
+
+function fileOpFailure(cause: unknown): FileOpResult {
+  if (cause instanceof CoreApiError) {
+    const body = cause.body;
+    let code: string | undefined;
+    let message: string | undefined;
+    if (body && typeof body === "object") {
+      const record = body as Record<string, unknown>;
+      if (typeof record.code === "string") code = record.code;
+      if (typeof record.error === "string") message = record.error;
+      else if (typeof record.message === "string") message = record.message;
+    }
+    return {
+      ok: false,
+      code,
+      message: message ?? `Request failed (${cause.status})`
+    };
+  }
+  return {
+    ok: false,
+    message: errorMessage(cause)
+  };
 }
