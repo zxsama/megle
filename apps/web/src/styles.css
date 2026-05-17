@@ -1,23 +1,48 @@
 :root {
   color-scheme: dark;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #101215;
+    "Geist Sans", "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
+  background: transparent;
   color: #f4f7f9;
-  --surface-0: #101215;
-  --surface-1: #171b20;
-  --surface-2: #1f252b;
-  --surface-3: #283039;
-  --line: rgba(255, 255, 255, 0.1);
-  --line-strong: rgba(144, 191, 199, 0.6);
+
+  --glass-canvas: rgba(9, 13, 17, 0.76);
+  --glass-workbench: rgba(11, 15, 19, 0.88);
+  --glass-panel: rgba(25, 33, 40, 0.64);
+  --glass-control: rgba(246, 252, 255, 0.1);
+  --glass-elevated: rgba(19, 25, 31, 0.82);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-border-strong: rgba(151, 219, 226, 0.58);
+  --glass-blur: 26px;
+  --glass-elevated-blur: 34px;
+  --glass-shadow: 0 18px 46px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  --glass-shadow-tight: 0 10px 28px rgba(0, 0, 0, 0.28);
+  --interactive-hover: rgba(151, 219, 226, 0.16);
+  --interactive-active: rgba(151, 219, 226, 0.24);
+  --interactive-focus: rgba(151, 219, 226, 0.72);
+  --accent-primary: #97dbe2;
+  --accent-green: #8fd3a2;
+  --accent-warn: #e7b66b;
+  --accent-coral: #ef8d7f;
+
+  --surface-0: var(--glass-workbench);
+  --surface-1: rgba(22, 29, 35, 0.72);
+  --surface-2: var(--glass-control);
+  --surface-3: rgba(250, 252, 255, 0.16);
+  --line: var(--glass-border);
+  --line-strong: var(--glass-border-strong);
   --text-muted: rgba(244, 247, 249, 0.62);
   --text-soft: rgba(244, 247, 249, 0.78);
-  --accent: #8ec7d0;
-  --danger: #e47c73;
+  --accent: var(--accent-primary);
+  --danger: var(--accent-coral);
 }
 
 * {
   box-sizing: border-box;
+}
+
+html,
+body {
+  background: transparent;
 }
 
 body {
@@ -27,13 +52,45 @@ body {
   overflow: hidden;
 }
 
-button,
-input {
+:where(button, [role="button"], input, select, textarea) {
   font: inherit;
+  color: inherit;
+  outline: none;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease,
+    transform 140ms ease;
 }
 
-button {
-  color: inherit;
+:where(button, [role="button"]) {
+  cursor: pointer;
+}
+
+:where(button, [role="button"]):hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: linear-gradient(180deg, var(--interactive-hover), rgba(255, 255, 255, 0.04));
+  color: #f8fdff;
+  transform: translateY(-1px);
+}
+
+:where(button, [role="button"]):active:not(:disabled) {
+  background: var(--interactive-active);
+  transform: translateY(0) scale(0.985);
+}
+
+:where(button, [role="button"], input, select, textarea):focus-visible {
+  border-color: var(--interactive-focus);
+  box-shadow:
+    0 0 0 1px rgba(151, 219, 226, 0.38),
+    0 0 0 5px rgba(151, 219, 226, 0.12);
+}
+
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .app-shell {
@@ -45,7 +102,11 @@ button {
   grid-template-rows: 52px minmax(0, 1fr);
   height: 100vh;
   min-width: 0;
-  background: var(--surface-0);
+  background:
+    radial-gradient(circle at 8% 0%, rgba(151, 219, 226, 0.18), transparent 32%),
+    radial-gradient(circle at 88% 10%, rgba(231, 182, 107, 0.12), transparent 28%),
+    linear-gradient(135deg, rgba(7, 11, 15, 0.7), rgba(15, 21, 26, 0.86));
+  color: #f4f7f9;
 }
 
 .topbar,
@@ -53,8 +114,11 @@ button {
 .task-panel,
 .toolbar,
 .inspector-panel {
-  background: rgba(23, 27, 32, 0.96);
-  border-color: var(--line);
+  background: var(--glass-panel);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.45);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.45);
 }
 
 .topbar {
@@ -170,7 +234,7 @@ button {
 }
 
 button:disabled {
-  cursor: default;
+  cursor: not-allowed;
   opacity: 0.45;
 }
 
@@ -2731,4 +2795,311 @@ button:disabled {
 
 .grid-empty-action:hover {
   background: rgba(142, 199, 208, 0.28);
+}
+
+/* Phase 10: layered liquid glass interaction pass. */
+
+.topbar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+    var(--glass-panel);
+}
+
+.library-sidebar {
+  background:
+    linear-gradient(180deg, rgba(151, 219, 226, 0.08), rgba(255, 255, 255, 0.02)),
+    var(--glass-panel);
+}
+
+.task-panel,
+.inspector-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025)),
+    var(--glass-panel);
+}
+
+.toolbar {
+  background:
+    linear-gradient(90deg, rgba(151, 219, 226, 0.08), rgba(231, 182, 107, 0.04)),
+    var(--glass-panel);
+}
+
+.workspace,
+.simple-workspace {
+  background:
+    radial-gradient(circle at 40% 0%, rgba(151, 219, 226, 0.08), transparent 28%),
+    rgba(8, 12, 16, 0.46);
+  box-shadow: inset 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.grid-surface {
+  background:
+    radial-gradient(circle at 80% 12%, rgba(143, 211, 162, 0.06), transparent 22%),
+    linear-gradient(180deg, rgba(10, 14, 18, 0.94), rgba(8, 11, 15, 0.98));
+}
+
+.virtual-grid {
+  border-radius: 16px;
+  scrollbar-color: rgba(151, 219, 226, 0.34) rgba(255, 255, 255, 0.04);
+  scrollbar-width: thin;
+}
+
+.media-tile,
+.tree-item,
+.move-row,
+.plugin-card,
+.task-card,
+.recent-op-row,
+.settings-row,
+.filter-chip,
+.tag-chip-clickable,
+.rating-star,
+.favorite-toggle,
+.window-chrome-button,
+.plugin-toggle-track {
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease,
+    opacity 140ms ease;
+}
+
+.media-tile:hover:not(:disabled),
+.media-tile:focus-visible {
+  background: rgba(151, 219, 226, 0.08);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+}
+
+.media-tile:hover:not(:disabled) .tile-thumb,
+.media-tile:focus-visible .tile-thumb {
+  border-color: var(--line-strong);
+  box-shadow: 0 0 0 1px rgba(151, 219, 226, 0.2), 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.tree-item:hover:not(.selected),
+.move-row:hover:not(.move-row-selected),
+.plugin-card:hover,
+.task-card:hover,
+.settings-row:hover,
+.recent-op-row:hover {
+  background: rgba(151, 219, 226, 0.08);
+  border-color: rgba(151, 219, 226, 0.26);
+}
+
+.tree-item.selected,
+.media-tile.selected,
+.move-row-selected,
+.plugin-card.selected {
+  border-color: var(--line-strong);
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.18), rgba(143, 211, 162, 0.08)),
+    rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 22px rgba(0, 0, 0, 0.22);
+}
+
+.tile-thumb,
+.preview-stage {
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.16), rgba(239, 141, 127, 0.08)),
+    rgba(10, 14, 18, 0.96);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.tile-thumb-ready,
+.preview-placeholder.ready {
+  background: rgba(7, 10, 13, 0.96);
+}
+
+.context-menu,
+.dialog-panel,
+.dialog,
+.recent-ops-drawer,
+.sort-menu-list,
+.inspector-tag-suggestions {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.035)),
+    var(--glass-elevated);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  -webkit-backdrop-filter: blur(var(--glass-elevated-blur)) saturate(1.5);
+  backdrop-filter: blur(var(--glass-elevated-blur)) saturate(1.5);
+}
+
+.dialog-backdrop {
+  background:
+    radial-gradient(circle at 50% 35%, rgba(151, 219, 226, 0.1), transparent 34%),
+    rgba(3, 6, 9, 0.56);
+  -webkit-backdrop-filter: blur(10px) saturate(1.2);
+  backdrop-filter: blur(10px) saturate(1.2);
+}
+
+.dialog,
+.recent-ops-drawer {
+  border-radius: 18px;
+}
+
+.context-menu,
+.sort-menu-list,
+.inspector-tag-suggestions {
+  border-radius: 14px;
+}
+
+.dialog-header,
+.recent-ops-header {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.dialog-input,
+.inspector-tag-input,
+.inspector-note,
+.root-form input,
+.search-bar,
+.sort-menu-trigger {
+  background: rgba(5, 9, 13, 0.48);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.icon-button,
+.top-tab,
+.root-form button[type="submit"],
+.load-more-button button,
+.task-action,
+.task-center-refresh,
+.task-filter-chip,
+.plugins-rescan,
+.plugin-delete-button,
+.plugin-manifest-copy,
+.dialog-button,
+.recent-ops-dismiss,
+.settings-action,
+.grid-empty-action,
+.inspector-tag-submit,
+.favorite-toggle {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.025)),
+    var(--glass-control);
+  border-color: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), var(--glass-shadow-tight);
+}
+
+.top-tab.active,
+.sort-menu-trigger-open,
+.task-filter-chip.active,
+.filter-chip-active {
+  color: #f8fdff;
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.24), rgba(143, 211, 162, 0.1)),
+    rgba(255, 255, 255, 0.04);
+  border-color: var(--line-strong);
+}
+
+.dialog-button-primary,
+.inspector-tag-submit,
+.grid-empty-action {
+  color: #e1fbff;
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.28), rgba(143, 211, 162, 0.12)),
+    rgba(151, 219, 226, 0.08);
+  border-color: rgba(151, 219, 226, 0.5);
+}
+
+.dialog-button-danger,
+.plugin-delete-button,
+.context-menu-item-danger {
+  color: #ffd9d5;
+  border-color: rgba(239, 141, 127, 0.48);
+}
+
+.plugins-detail-pane,
+.settings-section,
+.task-card,
+.plugin-card,
+.plugins-empty,
+.grid-empty-search,
+.grid-empty-folder,
+.recent-op-row,
+.move-tree {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.02)),
+    rgba(18, 24, 30, 0.62);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 12px 34px rgba(0, 0, 0, 0.24);
+}
+
+.plugins-body,
+.settings-body,
+.task-center,
+.onboarding-hero {
+  background:
+    radial-gradient(circle at 18% 12%, rgba(151, 219, 226, 0.08), transparent 26%),
+    radial-gradient(circle at 88% 0%, rgba(231, 182, 107, 0.07), transparent 24%),
+    rgba(6, 10, 14, 0.28);
+}
+
+.plugin-toggle:hover:not(.disabled) .plugin-toggle-track {
+  border-color: var(--line-strong);
+  background: rgba(151, 219, 226, 0.18);
+  transform: translateY(-1px);
+}
+
+.plugin-toggle input:focus-visible + .plugin-toggle-track {
+  border-color: var(--interactive-focus);
+  box-shadow:
+    0 0 0 1px rgba(151, 219, 226, 0.38),
+    0 0 0 5px rgba(151, 219, 226, 0.12);
+}
+
+.tag-chip-clickable:hover,
+.filter-chip:hover,
+.rating-star:hover,
+.favorite-toggle:hover:not(:disabled),
+.search-bar:focus-within {
+  border-color: var(--line-strong);
+  background: var(--interactive-hover);
+  color: #f8fdff;
+}
+
+.window-chrome-button:hover {
+  background: var(--interactive-hover);
+  border-color: rgba(151, 219, 226, 0.24);
+}
+
+.window-chrome-button-close:hover {
+  background: rgba(239, 141, 127, 0.28);
+  border-color: rgba(239, 141, 127, 0.44);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .topbar,
+  .library-sidebar,
+  .task-panel,
+  .toolbar,
+  .inspector-panel,
+  .context-menu,
+  .dialog,
+  .recent-ops-drawer,
+  .sort-menu-list {
+    background: rgba(18, 24, 30, 0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(*, *::before, *::after) {
+    animation-duration: 1ms !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --glass-border: rgba(255, 255, 255, 0.28);
+    --glass-border-strong: rgba(190, 246, 250, 0.9);
+    --interactive-hover: rgba(190, 246, 250, 0.24);
+    --interactive-active: rgba(190, 246, 250, 0.34);
+  }
 }

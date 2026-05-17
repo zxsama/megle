@@ -82,7 +82,9 @@ async function createWindow(): Promise<void> {
     y: placement.y,
     minWidth: 1100,
     minHeight: 720,
-    backgroundColor: "#101215",
+    backgroundMaterial: "acrylic",
+    transparent: true,
+    backgroundColor: "#00000000",
     frame: false,
     titleBarStyle: "hidden",
     webPreferences: {
