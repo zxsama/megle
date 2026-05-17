@@ -122,7 +122,7 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
             onClick={() => closeAndReturnFocus()}
           />
           <LiquidGlassSurface
-            as="ul"
+            as="div"
             className="sort-menu-list"
             interactive
             role="listbox"
@@ -130,21 +130,20 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
             tone="elevated"
           >
             {SORT_OPTIONS.map((option, index) => (
-              <li key={option.value}>
-                <button
-                  ref={(element) => {
-                    optionRefs.current[index] = element;
-                  }}
-                  aria-selected={value === option.value}
-                  className={`sort-menu-item${value === option.value ? " sort-menu-item-active" : ""}`}
-                  onClick={() => handleSelect(option.value)}
-                  onKeyDown={(event) => handleOptionKeyDown(event, index)}
-                  role="option"
-                  type="button"
-                >
-                  {option.label}
-                </button>
-              </li>
+              <button
+                ref={(element) => {
+                  optionRefs.current[index] = element;
+                }}
+                aria-selected={value === option.value}
+                className={`sort-menu-item${value === option.value ? " sort-menu-item-active" : ""}`}
+                key={option.value}
+                onClick={() => handleSelect(option.value)}
+                onKeyDown={(event) => handleOptionKeyDown(event, index)}
+                role="option"
+                type="button"
+              >
+                {option.label}
+              </button>
             ))}
           </LiquidGlassSurface>
         </>

@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FolderRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
-import { LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 import { useFocusTrap } from "./useFocusTrap";
 
 export interface MoveDialogProps {
@@ -139,16 +139,17 @@ export function MoveDialog({
             >
               Cancel
             </button>
-            <button
+            <LiquidGlassButton
               className="dialog-button dialog-button-primary"
               disabled={!canSubmit}
               onClick={() => {
                 if (target !== null) onSubmit(target);
               }}
+              tone="primary"
               type="button"
             >
               {busy ? "Moving…" : "Move here"}
-            </button>
+            </LiquidGlassButton>
           </footer>
         </div>
       </LiquidGlassSurface>

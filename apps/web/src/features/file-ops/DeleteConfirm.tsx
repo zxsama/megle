@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 import { useFocusTrap } from "./useFocusTrap";
 
 export interface DeleteConfirmProps {
@@ -124,12 +124,13 @@ export function DeleteConfirm({
             >
               Cancel
             </button>
-            <button
+            <LiquidGlassButton
               className={`dialog-button ${
                 permanent ? "dialog-button-danger" : "dialog-button-primary"
               }`}
               disabled={!canConfirm}
               onClick={onConfirm}
+              tone={permanent ? "danger" : "primary"}
               type="button"
             >
               {busy
@@ -139,7 +140,7 @@ export function DeleteConfirm({
                 : permanent
                   ? "Delete permanently"
                   : "Move to recycle bin"}
-            </button>
+            </LiquidGlassButton>
           </footer>
         </div>
       </LiquidGlassSurface>

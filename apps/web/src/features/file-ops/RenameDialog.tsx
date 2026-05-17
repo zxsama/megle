@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 import { useFocusTrap } from "./useFocusTrap";
 
 export interface RenameDialogProps {
@@ -148,9 +148,14 @@ export function RenameDialog({
             >
               Cancel
             </button>
-            <button className="dialog-button dialog-button-primary" disabled={!canSubmit} type="submit">
+            <LiquidGlassButton
+              className="dialog-button dialog-button-primary"
+              disabled={!canSubmit}
+              tone="primary"
+              type="submit"
+            >
               {busy ? "Renaming…" : "Rename"}
-            </button>
+            </LiquidGlassButton>
           </footer>
         </form>
       </LiquidGlassSurface>

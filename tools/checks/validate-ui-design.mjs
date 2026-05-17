@@ -24,6 +24,13 @@ const app = read("apps/web/src/app/App.tsx");
 const windowChrome = read("apps/web/src/features/window-chrome/WindowChrome.tsx");
 const liquidGlassSurface = read("apps/web/src/design/liquid-glass/LiquidGlassSurface.tsx");
 const liquidGlassIndex = read("apps/web/src/design/liquid-glass/index.ts");
+const sortMenu = read("apps/web/src/features/library/SortMenu.tsx");
+const inspectorMetadata = read("apps/web/src/features/preview/InspectorMetadata.tsx");
+const renameDialog = read("apps/web/src/features/file-ops/RenameDialog.tsx");
+const moveDialog = read("apps/web/src/features/file-ops/MoveDialog.tsx");
+const deleteConfirm = read("apps/web/src/features/file-ops/DeleteConfirm.tsx");
+const onboardingHero = read("apps/web/src/features/onboarding/OnboardingHero.tsx");
+const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
 
 for (const value of [
   "frame: false",
@@ -103,13 +110,28 @@ for (const value of [
   "LiquidGlassLayer",
   "LiquidGlassSurface",
   "LiquidGlassButton",
+  "scrollable?: boolean",
+  "pressable?: boolean",
   "data-liquid-glass",
   "liquid-glass-backdrop",
   "liquid-glass-lens",
+  "liquid-glass-content",
   "sharp child content layer"
 ]) {
   if (!liquidGlassSurface.includes(value) && !liquidGlassIndex.includes(value)) {
     fail(`liquid glass primitive source missing ${value}`);
+  }
+}
+
+for (const value of [
+  "liquid-glass-scrollable",
+  ".liquid-glass.liquid-glass-scrollable",
+  "overflow: hidden",
+  ".liquid-glass.liquid-glass-scrollable > .liquid-glass-content",
+  "overflow: auto"
+]) {
+  if (!styles.includes(value) && !liquidGlassSurface.includes(value)) {
+    fail(`scrollable liquid glass surfaces must keep chrome fixed and scroll inner content: missing ${value}`);
   }
 }
 
@@ -132,7 +154,9 @@ for (const value of [
   "onPointerLeave",
   "--glass-pointer-x",
   "--glass-pointer-y",
-  "data-glass-pressed"
+  "data-glass-pressed",
+  "target === currentTarget",
+  "pressable"
 ]) {
   if (!liquidGlassSurface.includes(value)) {
     fail(`liquid glass primitive must handle pointer-driven illumination/refraction: missing ${value}`);
@@ -163,6 +187,28 @@ for (const value of [
   }
 }
 
+if (styles.includes("animation-duration: 1ms")) {
+  fail("reduced motion must disable nonessential animations instead of shortening them to 1ms");
+}
+
+for (const value of [
+  "animation: none !important",
+  "transition: none !important",
+  "transform: none !important",
+  ".spin",
+  ".task-progress-bar.indeterminate .task-progress-fill"
+]) {
+  if (!styles.includes(value)) {
+    fail(`reduced motion must prevent shimmer/spin/liquid flicker: missing ${value}`);
+  }
+}
+
+for (const token of ["--glass-refraction-scale", "--glass-chromatic-aberration"]) {
+  if (styles.includes(token)) {
+    fail(`unused liquid glass SVG token must be wired or removed: ${token}`);
+  }
+}
+
 for (const value of [
   'from "../design/liquid-glass"',
   'from "../../design/liquid-glass"'
@@ -174,6 +220,44 @@ for (const value of [
     !read("apps/web/src/features/library/LibrarySidebar.tsx").includes(value)
   ) {
     fail(`app surfaces must consume liquid-glass primitives: missing import ${value}`);
+  }
+}
+
+if (sortMenu.includes('LiquidGlassSurface') && sortMenu.includes('as="ul"')) {
+  fail('LiquidGlassSurface must not render as ul because injected material layers are invalid list children');
+}
+
+for (const value of [
+  "LiquidGlassSurface",
+  'className="inspector-tag-suggestions"',
+  'role="listbox"',
+  'role="option"'
+]) {
+  if (!inspectorMetadata.includes(value)) {
+    fail(`tag suggestions popup must use LiquidGlassSurface and preserve listbox semantics: missing ${value}`);
+  }
+}
+
+const ctaFiles = [
+  ["RenameDialog", renameDialog, ["primary"]],
+  ["MoveDialog", moveDialog, ["primary"]],
+  ["DeleteConfirm", deleteConfirm, ["primary", "danger"]],
+  ["OnboardingHero", onboardingHero, ["primary"]],
+  ["LibraryView", libraryView, ["primary"]]
+];
+
+for (const [label, source, tones] of ctaFiles) {
+  if (!source.includes("LiquidGlassButton")) {
+    fail(`${label} primary/danger CTAs must use LiquidGlassButton`);
+  }
+  for (const tone of tones) {
+    if (!source.includes(`tone="${tone}"`) && !source.includes(`"${tone}"`)) {
+      fail(`${label} CTA must set LiquidGlassButton tone ${tone}`);
+    }
+  }
+  const rawButtonTags = source.match(/<button\b[^>]*>/gs) ?? [];
+  if (rawButtonTags.some((tag) => /(dialog-button-primary|dialog-button-danger|onboarding-hero-cta|grid-empty-action)/.test(tag))) {
+    fail(`${label} must not render primary/danger CTA classes on raw button elements`);
   }
 }
 

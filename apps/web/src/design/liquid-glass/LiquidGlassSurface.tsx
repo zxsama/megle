@@ -15,14 +15,15 @@ type LiquidGlassTag =
   | "header"
   | "main"
   | "nav"
-  | "section"
-  | "ul";
+  | "section";
 
 interface LiquidGlassSurfaceProps extends HTMLAttributes<HTMLElement> {
   as?: LiquidGlassTag;
   variant?: "regular" | "clear";
   tone?: "chrome" | "panel" | "elevated" | "control" | "primary" | "danger";
   interactive?: boolean;
+  pressable?: boolean;
+  scrollable?: boolean;
   active?: boolean;
   children?: ReactNode;
 }
@@ -56,6 +57,8 @@ export const LiquidGlassSurface = forwardRef<HTMLElement, LiquidGlassSurfaceProp
       onPointerLeave,
       onPointerMove,
       onPointerUp,
+      pressable = false,
+      scrollable = false,
       style,
       tone = "panel",
       variant = "regular",
@@ -65,6 +68,7 @@ export const LiquidGlassSurface = forwardRef<HTMLElement, LiquidGlassSurfaceProp
   ) {
     const eventProps = buildPointerEventProps({
       interactive,
+      pressable,
       onPointerDown,
       onPointerLeave,
       onPointerMove,
@@ -76,9 +80,11 @@ export const LiquidGlassSurface = forwardRef<HTMLElement, LiquidGlassSurfaceProp
       {
         ...props,
         ...eventProps,
-        className: liquidGlassClassName({ active, className, tone, variant }),
+        className: liquidGlassClassName({ active, className, scrollable, tone, variant }),
         "data-glass-active": active ? "true" : undefined,
         "data-glass-interactive": interactive ? "true" : undefined,
+        "data-glass-pressable": pressable ? "true" : undefined,
+        "data-glass-scrollable": scrollable ? "true" : undefined,
         "data-glass-tone": tone,
         "data-glass-variant": variant,
         "data-liquid-glass": "surface",
@@ -86,7 +92,7 @@ export const LiquidGlassSurface = forwardRef<HTMLElement, LiquidGlassSurfaceProp
         style: withInitialPointer(style)
       },
       <LiquidGlassMaterialLayers variant={variant} />,
-      children
+      scrollable ? <div className="liquid-glass-content">{children}</div> : children
     );
   }
 );
@@ -111,6 +117,7 @@ export const LiquidGlassButton = forwardRef<HTMLButtonElement, LiquidGlassButton
   ) {
     const eventProps = buildPointerEventProps<HTMLButtonElement>({
       interactive: !props.disabled,
+      pressable: !props.disabled,
       onPointerDown,
       onPointerLeave,
       onPointerMove,
@@ -121,9 +128,13 @@ export const LiquidGlassButton = forwardRef<HTMLButtonElement, LiquidGlassButton
       <button
         {...props}
         {...eventProps}
-        className={liquidGlassClassName({ active, className, tone, variant }, "liquid-glass-button")}
+        className={liquidGlassClassName(
+          { active, className, scrollable: false, tone, variant },
+          "liquid-glass-button"
+        )}
         data-glass-active={active ? "true" : undefined}
         data-glass-interactive={props.disabled ? undefined : "true"}
+        data-glass-pressable={props.disabled ? undefined : "true"}
         data-glass-tone={tone}
         data-glass-variant={variant}
         data-liquid-glass="button"
@@ -132,7 +143,7 @@ export const LiquidGlassButton = forwardRef<HTMLButtonElement, LiquidGlassButton
         type={type}
       >
         <LiquidGlassMaterialLayers variant={variant} />
-        {children}
+        <span className="liquid-glass-content">{children}</span>
       </button>
     );
   }
@@ -227,12 +238,14 @@ function LiquidGlassRefractionDefs() {
 
 function buildPointerEventProps<TElement extends HTMLElement = HTMLElement>({
   interactive,
+  pressable,
   onPointerDown,
   onPointerLeave,
   onPointerMove,
   onPointerUp
 }: {
   interactive: boolean;
+  pressable: boolean;
   onPointerDown?: (event: PointerEvent<TElement>) => void;
   onPointerLeave?: (event: PointerEvent<TElement>) => void;
   onPointerMove?: (event: PointerEvent<TElement>) => void;
@@ -242,8 +255,10 @@ function buildPointerEventProps<TElement extends HTMLElement = HTMLElement>({
     onPointerDown(event: PointerEvent<TElement>) {
       if (interactive) {
         syncPointer(event);
-        event.currentTarget.setAttribute("data-glass-pressed", "true");
-        event.currentTarget.style.setProperty("--glass-pressure", "1");
+        if (shouldPressSurface(event, pressable)) {
+          event.currentTarget.setAttribute("data-glass-pressed", "true");
+          event.currentTarget.style.setProperty("--glass-pressure", "1");
+        }
       }
       onPointerDown?.(event);
     },
@@ -267,12 +282,22 @@ function buildPointerEventProps<TElement extends HTMLElement = HTMLElement>({
     onPointerUp(event: PointerEvent<TElement>) {
       if (interactive) {
         syncPointer(event);
-        event.currentTarget.removeAttribute("data-glass-pressed");
-        event.currentTarget.style.setProperty("--glass-pressure", "0");
+        if (shouldPressSurface(event, pressable)) {
+          event.currentTarget.removeAttribute("data-glass-pressed");
+          event.currentTarget.style.setProperty("--glass-pressure", "0");
+        }
       }
       onPointerUp?.(event);
     }
   };
+}
+
+function shouldPressSurface<TElement extends HTMLElement>(
+  event: PointerEvent<TElement>,
+  pressable: boolean
+) {
+  const { target, currentTarget } = event;
+  return pressable && (target === currentTarget || currentTarget.contains(target as Node));
 }
 
 function syncPointer(event: PointerEvent<HTMLElement>) {
@@ -293,11 +318,13 @@ function liquidGlassClassName(
   {
     active,
     className,
+    scrollable,
     tone,
     variant
   }: {
     active: boolean;
     className?: string;
+    scrollable: boolean;
     tone: "chrome" | "panel" | "elevated" | "control" | "primary" | "danger";
     variant: "regular" | "clear";
   },
@@ -307,6 +334,7 @@ function liquidGlassClassName(
     "liquid-glass",
     `liquid-glass-${variant}`,
     `liquid-glass-tone-${tone}`,
+    scrollable ? "liquid-glass-scrollable" : "",
     active ? "liquid-glass-active" : "",
     extra ?? "",
     className ?? ""

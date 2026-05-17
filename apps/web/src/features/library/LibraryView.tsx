@@ -1,7 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
-import { LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
@@ -128,13 +128,14 @@ function renderEmptyState({
         <p className="grid-empty-copy">
           Try different filters, or clear the current ones.
         </p>
-        <button
+        <LiquidGlassButton
           className="grid-empty-action"
           onClick={() => library.clearFilters()}
+          tone="primary"
           type="button"
         >
           Clear filters
-        </button>
+        </LiquidGlassButton>
       </div>
     );
   }

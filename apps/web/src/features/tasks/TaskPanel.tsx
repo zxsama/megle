@@ -20,6 +20,7 @@ export function TaskPanel({ tasks, scanActive }: TaskPanelProps) {
       className="task-panel"
       aria-label="Tasks"
       interactive
+      scrollable
       tone="panel"
     >
       <div className="panel-heading">

@@ -15,9 +15,7 @@
   --glass-blur: 26px;
   --glass-elevated-blur: 34px;
   --glass-control-blur: 18px;
-  --glass-refraction-scale: 14;
   --glass-saturation: 1.55;
-  --glass-chromatic-aberration: 0.72;
   --glass-edge-light: rgba(255, 255, 255, 0.34);
   --glass-inner-light: rgba(255, 255, 255, 0.12);
   --glass-pointer-light: rgba(206, 249, 255, 0.28);
@@ -85,6 +83,37 @@ body {
 .liquid-glass > :not(.liquid-glass-backdrop):not(.liquid-glass-lens):not(.liquid-glass-dim) {
   position: relative;
   z-index: 2;
+}
+
+.liquid-glass-content {
+  min-width: 0;
+  min-height: 0;
+}
+
+.liquid-glass-button > .liquid-glass-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: inherit;
+}
+
+.liquid-glass.liquid-glass-scrollable {
+  overflow: hidden;
+}
+
+.liquid-glass.liquid-glass-scrollable > .liquid-glass-content {
+  display: inherit;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  overflow: auto;
+  align-content: inherit;
+  align-items: inherit;
+  flex-direction: inherit;
+  justify-content: inherit;
+  gap: inherit;
+  scrollbar-color: rgba(151, 219, 226, 0.34) rgba(255, 255, 255, 0.04);
+  scrollbar-width: thin;
 }
 
 .liquid-glass-backdrop,
@@ -3346,9 +3375,40 @@ button:disabled {
 
 @media (prefers-reduced-motion: reduce) {
   :where(*, *::before, *::after) {
-    animation-duration: 1ms !important;
+    animation: none !important;
     scroll-behavior: auto !important;
-    transition-duration: 1ms !important;
+    transition: none !important;
+  }
+
+  .spin,
+  .tile-thumb-loading,
+  .media-tile.skeleton .tile-thumb,
+  .media-tile.skeleton .tile-label,
+  .preview-placeholder.pending,
+  .task-progress-bar.indeterminate .task-progress-fill {
+    animation: none !important;
+  }
+
+  .liquid-glass,
+  .liquid-glass-lens,
+  .media-tile,
+  .tree-item,
+  .move-row,
+  .plugin-card,
+  .task-card,
+  .recent-op-row,
+  .settings-row,
+  .filter-chip,
+  .tag-chip-clickable,
+  .rating-star,
+  .favorite-toggle,
+  .window-chrome-button,
+  .plugin-toggle-track {
+    transform: none !important;
+  }
+
+  .task-progress-bar.indeterminate .task-progress-fill {
+    transform: none !important;
   }
 }
 

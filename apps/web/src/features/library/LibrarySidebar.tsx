@@ -56,6 +56,7 @@ export function LibrarySidebar({ library, onFolderContextMenu }: LibrarySidebarP
       className="library-sidebar"
       aria-label="Library folders"
       interactive
+      scrollable
       tone="panel"
     >
       <div className="sidebar-heading">

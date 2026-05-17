@@ -27,6 +27,7 @@ export function SettingsView({ library }: SettingsViewProps) {
           className="settings-section"
           aria-labelledby="settings-diagnostics-title"
           interactive
+          scrollable
           tone="panel"
         >
           <h2 className="settings-section-title" id="settings-diagnostics-title">
@@ -74,6 +75,7 @@ export function SettingsView({ library }: SettingsViewProps) {
           className="settings-section"
           aria-labelledby="settings-cache-title"
           interactive
+          scrollable
           tone="panel"
         >
           <h2 className="settings-section-title" id="settings-cache-title">

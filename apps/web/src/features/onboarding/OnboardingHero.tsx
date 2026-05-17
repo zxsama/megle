@@ -1,6 +1,6 @@
 import { FolderPlus } from "lucide-react";
 import { canPickNativeFolder, pickNativeFolder } from "../../core/desktop";
-import { LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 
 export interface OnboardingHeroProps {
   rootCount: number;
@@ -56,13 +56,14 @@ export function OnboardingHero({ rootCount, loading, onAddRoot }: OnboardingHero
           Megle indexes existing folders without copying their contents. Point it at a
           local directory and your media will start showing up here.
         </p>
-        <button
+        <LiquidGlassButton
           className="onboarding-hero-cta"
           onClick={() => void chooseFolder()}
+          tone="primary"
           type="button"
         >
           Choose folder
-        </button>
+        </LiquidGlassButton>
       </LiquidGlassSurface>
     </section>
   );

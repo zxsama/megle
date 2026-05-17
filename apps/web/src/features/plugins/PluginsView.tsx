@@ -118,6 +118,7 @@ export function PluginsView() {
             as="div"
             className="plugins-detail-pane"
             interactive
+            scrollable
             tone="panel"
           >
             {selected ? (

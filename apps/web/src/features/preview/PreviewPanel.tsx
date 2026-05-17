@@ -17,6 +17,7 @@ export function PreviewPanel({ selectedMedia, thumbnail, children }: PreviewPane
       className="inspector-panel preview-panel"
       aria-label="Preview"
       interactive
+      scrollable
       tone="panel"
     >
       <div className="panel-title">Preview</div>

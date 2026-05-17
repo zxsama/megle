@@ -201,6 +201,7 @@ export function App() {
             as="div"
             className="recent-ops-drawer"
             interactive
+            scrollable
             tone="elevated"
           >
             <RecentOpsPanel

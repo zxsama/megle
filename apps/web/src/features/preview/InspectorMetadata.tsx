@@ -2,6 +2,7 @@ import { Heart, Star } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { useEffect, useId, useMemo, useState } from "react";
 import type { TagRecord, UserMetadataRecord } from "@megle/core-client";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 import { TagChip } from "../library/TagChip";
 
 interface InspectorMetadataProps {
@@ -256,41 +257,41 @@ export function InspectorMetadata({
             </button>
           </div>
           {showSuggestions ? (
-            <ul
+            <LiquidGlassSurface
+              as="div"
               aria-label="Tag suggestions"
               className="inspector-tag-suggestions"
               id={suggestionsListId}
+              interactive
               role="listbox"
+              tone="elevated"
             >
               {matchingTags.map((tag, index) => {
                 const isActive = index === activeSuggestionIndex;
                 return (
-                  <li
+                  <button
                     aria-selected={isActive}
+                    className={`inspector-tag-suggestion${isActive ? " inspector-tag-suggestion-active" : ""}`}
                     id={suggestionOptionId(index)}
                     key={tag.id}
+                    onClick={() => attachSuggestion(tag)}
+                    onMouseEnter={() => setActiveSuggestionIndex(index)}
                     role="option"
+                    tabIndex={-1}
+                    type="button"
                   >
-                    <button
-                      className={`inspector-tag-suggestion${isActive ? " inspector-tag-suggestion-active" : ""}`}
-                      onClick={() => attachSuggestion(tag)}
-                      onMouseEnter={() => setActiveSuggestionIndex(index)}
-                      tabIndex={-1}
-                      type="button"
-                    >
-                      {tag.color ? (
-                        <span
-                          aria-hidden="true"
-                          className="tag-chip-swatch"
-                          style={{ background: tag.color }}
-                        />
-                      ) : null}
-                      {tag.name}
-                    </button>
-                  </li>
+                    {tag.color ? (
+                      <span
+                        aria-hidden="true"
+                        className="tag-chip-swatch"
+                        style={{ background: tag.color }}
+                      />
+                    ) : null}
+                    {tag.name}
+                  </button>
                 );
               })}
-            </ul>
+            </LiquidGlassSurface>
           ) : null}
         </div>
       </div>
