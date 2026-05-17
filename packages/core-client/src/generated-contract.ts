@@ -179,3 +179,53 @@ export interface SearchParams {
   limit?: number;
   cursor?: string;
 }
+
+export type FileOperationKind =
+  | "rename"
+  | "move"
+  | "delete_recycle"
+  | "delete_permanent";
+export type FileOperationStatus = "succeeded" | "failed";
+
+export interface FileOperationRecord {
+  id: number;
+  operation: FileOperationKind;
+  sourcePath: string;
+  targetPath: string | null;
+  status: FileOperationStatus;
+  createdAt: number;
+  finishedAt: number | null;
+  error: string | null;
+}
+
+export interface FileOperationListResponse {
+  items: FileOperationRecord[];
+  nextCursor: string | null;
+}
+
+export interface FileOperationsResponse {
+  operations: FileOperationRecord[];
+}
+
+export interface RenameRequest {
+  fileId?: number;
+  folderId?: number;
+  newName: string;
+}
+
+export interface MoveRequest {
+  fileIds?: number[];
+  folderIds?: number[];
+  targetFolderId: number;
+}
+
+export interface DeleteRequest {
+  fileIds?: number[];
+  folderIds?: number[];
+  permanent?: boolean;
+}
+
+export interface ListFileOperationsParams {
+  limit?: number;
+  cursor?: string;
+}

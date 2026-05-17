@@ -17,5 +17,6 @@ tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+trash = "5"
 uuid.workspace = true
 walkdir.workspace = true

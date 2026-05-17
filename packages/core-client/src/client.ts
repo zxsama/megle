@@ -2,13 +2,20 @@ import type {
   AcceptedRootResponse,
   AddFileTagRequest,
   CreateTagRequest,
+  DeleteRequest,
   DeleteTagResponse,
+  FileOperationListResponse,
+  FileOperationRecord,
+  FileOperationsResponse,
   FileTagsResponse,
   FolderRecord,
+  ListFileOperationsParams,
   ListFolderChildrenParams,
   ListMediaParams,
   MediaRecord,
+  MoveRequest,
   Page,
+  RenameRequest,
   RootRecord,
   ScanTaskRequest,
   SearchParams,
@@ -127,7 +134,24 @@ export function createCoreClient(config: CoreClientConfig) {
         method: "DELETE"
       }),
     searchMedia: (params: SearchParams = {}) =>
-      request<Page<MediaRecord>>(`/search${searchQuery(params)}`)
+      request<Page<MediaRecord>>(`/search${searchQuery(params)}`),
+    renameFileOp: (body: RenameRequest) =>
+      request<FileOperationRecord>("/file-ops/rename", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    moveFileOps: (body: MoveRequest) =>
+      request<FileOperationsResponse>("/file-ops/move", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    deleteFileOps: (body: DeleteRequest) =>
+      request<FileOperationsResponse>("/file-ops/delete", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    listFileOperations: (params: ListFileOperationsParams = {}) =>
+      request<FileOperationListResponse>(`/file-ops${fileOpsQuery(params)}`)
   };
 }
 
@@ -164,6 +188,14 @@ function searchQuery(params: SearchParams): string {
     }
   }
   if (params.sort) search.set("sort", params.sort);
+  if (params.limit) search.set("limit", String(params.limit));
+  if (params.cursor) search.set("cursor", params.cursor);
+  const value = search.toString();
+  return value ? `?${value}` : "";
+}
+
+function fileOpsQuery(params: ListFileOperationsParams): string {
+  const search = new URLSearchParams();
   if (params.limit) search.set("limit", String(params.limit));
   if (params.cursor) search.set("cursor", params.cursor);
   const value = search.toString();

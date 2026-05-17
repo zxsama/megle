@@ -270,22 +270,125 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
   /file-ops/rename:
     post:
-      operationId: renameFile
+      operationId: renameFileOp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameRequest"
       responses:
-        "202":
-          description: Rename task accepted.
+        "200":
+          description: Rename succeeded; returns the persisted operation log row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileOperationRecord"
+        "400":
+          description: Invalid name or request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: File or folder not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Target name already exists in the same folder.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /file-ops/move:
     post:
-      operationId: moveFiles
+      operationId: moveFileOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveRequest"
       responses:
-        "202":
-          description: Move task accepted.
+        "200":
+          description: Move succeeded; returns one operation log row per item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileOperationsResponse"
+        "400":
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: File, folder, or target folder not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Target conflict or cross_volume move.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /file-ops/delete:
     post:
-      operationId: deleteFiles
+      operationId: deleteFileOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteRequest"
       responses:
-        "202":
-          description: Delete task accepted.
+        "200":
+          description: Delete succeeded; returns one operation log row per item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileOperationsResponse"
+        "400":
+          description: Invalid request (no targets specified).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: File or folder not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /file-ops:
+    get:
+      operationId: listFileOperations
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Recent file operations, ordered by id DESC.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileOperationListResponse"
+        "400":
+          description: Invalid limit or cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /tags:
     get:
       operationId: listTags
@@ -994,3 +1097,105 @@ components:
           items:
             type: integer
             minimum: 1
+    FileOperationKind:
+      type: string
+      enum: [rename, move, delete_recycle, delete_permanent]
+    FileOperationStatus:
+      type: string
+      enum: [succeeded, failed]
+    FileOperationRecord:
+      type: object
+      required:
+        [
+          id,
+          operation,
+          sourcePath,
+          targetPath,
+          status,
+          createdAt,
+          finishedAt,
+          error
+        ]
+      properties:
+        id:
+          type: integer
+        operation:
+          $ref: "#/components/schemas/FileOperationKind"
+        sourcePath:
+          type: string
+        targetPath:
+          type: string
+          nullable: true
+        status:
+          $ref: "#/components/schemas/FileOperationStatus"
+        createdAt:
+          type: integer
+        finishedAt:
+          type: integer
+          nullable: true
+        error:
+          type: string
+          nullable: true
+    FileOperationListResponse:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileOperationRecord"
+        nextCursor:
+          type: string
+          nullable: true
+    FileOperationsResponse:
+      type: object
+      required: [operations]
+      properties:
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileOperationRecord"
+    RenameRequest:
+      type: object
+      required: [newName]
+      properties:
+        fileId:
+          type: integer
+          minimum: 1
+        folderId:
+          type: integer
+          minimum: 1
+        newName:
+          type: string
+    MoveRequest:
+      type: object
+      required: [targetFolderId]
+      properties:
+        fileIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+        folderIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+        targetFolderId:
+          type: integer
+          minimum: 1
+    DeleteRequest:
+      type: object
+      properties:
+        fileIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+        folderIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+        permanent:
+          type: boolean

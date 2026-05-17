@@ -360,6 +360,20 @@ impl Database {
         std::env::temp_dir().join("megle-thumbnail-cache")
     }
 
+    /// Read-only access to the underlying connection. Used by sibling
+    /// modules (like `fsops`) that need ad-hoc lookups but should not own
+    /// transaction lifecycle on the shared handle.
+    pub(crate) fn connection_for_fsops(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// Mutable access to the underlying connection so callers can begin
+    /// `BEGIN IMMEDIATE` transactions. Mirrors how scan batching reaches
+    /// into the connection for write-side flows.
+    pub(crate) fn connection_for_fsops_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
     pub fn apply_migrations(&self) -> anyhow::Result<()> {
         self.connection
             .execute_batch(migrations::INITIAL_MIGRATION)?;
@@ -3523,6 +3537,15 @@ fn is_valid_hex_color(value: &str) -> bool {
         return false;
     }
     bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Public re-export so other modules in the crate (e.g. `fsops`) can keep
+/// FTS in sync inside their own transactions without owning the SQL.
+pub(crate) fn sync_media_fts_for_file_in_transaction_pub(
+    transaction: &rusqlite::Transaction<'_>,
+    file_id: i64,
+) -> anyhow::Result<()> {
+    sync_media_fts_for_file_in_transaction(transaction, file_id)
 }
 
 fn sync_media_fts_for_file_in_transaction(

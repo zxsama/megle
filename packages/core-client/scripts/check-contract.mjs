@@ -185,7 +185,13 @@ for (const name of [
   "UserMetadataUpdate",
   "FileTagsResponse",
   "AddFileTagRequest",
-  "SetFileTagsRequest"
+  "SetFileTagsRequest",
+  "FileOperationRecord",
+  "FileOperationsResponse",
+  "FileOperationListResponse",
+  "RenameRequest",
+  "MoveRequest",
+  "DeleteRequest"
 ]) {
   schema(name);
 }
@@ -206,6 +212,12 @@ assertInterfaceMatchesSchema("UserMetadataRecord");
 assertInterfaceMatchesSchema("FileTagsResponse");
 assertInterfaceMatchesSchema("AddFileTagRequest");
 assertInterfaceMatchesSchema("SetFileTagsRequest");
+assertInterfaceMatchesSchema("FileOperationRecord");
+assertInterfaceMatchesSchema("FileOperationsResponse");
+assertInterfaceMatchesSchema("FileOperationListResponse");
+assertInterfaceMatchesSchema("RenameRequest");
+assertInterfaceMatchesSchema("MoveRequest");
+assertInterfaceMatchesSchema("DeleteRequest");
 
 const pageBody = interfaceBody("Page");
 for (const line of ["items: T[];", "nextCursor: string | null;"]) {
@@ -260,7 +272,11 @@ for (const method of [
   "setFileTags",
   "addFileTag",
   "removeFileTag",
-  "searchMedia"
+  "searchMedia",
+  "renameFileOp",
+  "moveFileOps",
+  "deleteFileOps",
+  "listFileOperations"
 ]) {
   if (!client.includes(`${method}:`)) {
     fail(`client.ts missing operation ${method}`);
@@ -305,6 +321,19 @@ for (const line of [
 for (const line of [
   'export type TaskKind = "root_scan" | "thumbnail";',
   'export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";'
+]) {
+  if (!generated.includes(line)) {
+    fail(`generated-contract.ts missing '${line}'`);
+  }
+}
+
+for (const line of [
+  'export type FileOperationKind =',
+  '  | "rename"',
+  '  | "move"',
+  '  | "delete_recycle"',
+  '  | "delete_permanent";',
+  'export type FileOperationStatus = "succeeded" | "failed";'
 ]) {
   if (!generated.includes(line)) {
     fail(`generated-contract.ts missing '${line}'`);

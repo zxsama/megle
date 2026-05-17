@@ -11,6 +11,10 @@ use crate::db::{
     FolderRecord, MediaPageQuery, MediaRecord, NewRoot, RootRecord, SearchQuery, TagError,
     TagRecord, TaskRecord, ThumbnailRecord, UserMetadataPatch, UserMetadataRecord,
 };
+use crate::fsops::{
+    self, DeleteRequest, FileOperationRecord, FsOpsError, FsOpsErrorCode, MoveRequest,
+    RenameRequest,
+};
 use crate::scan::ScanSummary;
 use crate::thumbnails::{is_pending_status, normalize_profile};
 
@@ -78,6 +82,7 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/file-ops/rename",
     "/api/file-ops/move",
     "/api/file-ops/delete",
+    "/api/file-ops",
     "/api/plugins",
 ];
 
@@ -196,9 +201,59 @@ struct FileTagsResponse {
     tag_ids: Vec<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameRequestBody {
+    #[serde(default)]
+    file_id: Option<i64>,
+    #[serde(default)]
+    folder_id: Option<i64>,
+    new_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveRequestBody {
+    #[serde(default)]
+    file_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    folder_ids: Option<Vec<i64>>,
+    target_folder_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteRequestBody {
+    #[serde(default)]
+    file_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    folder_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    permanent: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileOperationsResponse {
+    operations: Vec<FileOperationRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListFileOperationsQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodedErrorResponse {
+    error: String,
+    code: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,6 +281,7 @@ struct ThumbnailResponse {
 struct CoreError {
     status: StatusCode,
     message: String,
+    code: Option<String>,
 }
 
 impl From<anyhow::Error> for CoreError {
@@ -233,19 +289,31 @@ impl From<anyhow::Error> for CoreError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
+            code: None,
         }
     }
 }
 
 impl IntoResponse for CoreError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(ErrorResponse {
-                error: self.message,
-            }),
-        )
-            .into_response()
+        if let Some(code) = self.code {
+            (
+                self.status,
+                Json(CodedErrorResponse {
+                    error: self.message,
+                    code,
+                }),
+            )
+                .into_response()
+        } else {
+            (
+                self.status,
+                Json(ErrorResponse {
+                    error: self.message,
+                }),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -286,6 +354,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/file-ops/rename", post(rename_file))
         .route("/api/file-ops/move", post(move_files))
         .route("/api/file-ops/delete", post(delete_files))
+        .route("/api/file-ops", get(list_file_operations))
         .route("/api/plugins", get(list_plugins))
         .with_state(state)
 }
@@ -544,16 +613,74 @@ async fn retry_task(
     ))
 }
 
-async fn rename_file() -> (StatusCode, Json<AcceptedResponse>) {
-    (StatusCode::ACCEPTED, Json(accepted()))
+async fn rename_file(
+    State(state): State<AppState>,
+    Json(payload): Json<RenameRequestBody>,
+) -> ApiResult<Json<FileOperationRecord>> {
+    let mut database = state.database.lock().expect("database mutex poisoned");
+    let record = fsops::rename(
+        &mut database,
+        RenameRequest {
+            file_id: payload.file_id,
+            folder_id: payload.folder_id,
+            new_name: payload.new_name,
+        },
+    )
+    .map_err(map_fsops_error)?;
+    Ok(Json(record))
 }
 
-async fn move_files() -> (StatusCode, Json<AcceptedResponse>) {
-    (StatusCode::ACCEPTED, Json(accepted()))
+async fn move_files(
+    State(state): State<AppState>,
+    Json(payload): Json<MoveRequestBody>,
+) -> ApiResult<Json<FileOperationsResponse>> {
+    let mut database = state.database.lock().expect("database mutex poisoned");
+    let operations = fsops::move_items(
+        &mut database,
+        MoveRequest {
+            file_ids: payload.file_ids.unwrap_or_default(),
+            folder_ids: payload.folder_ids.unwrap_or_default(),
+            target_folder_id: payload.target_folder_id,
+        },
+    )
+    .map_err(map_fsops_error)?;
+    Ok(Json(FileOperationsResponse { operations }))
 }
 
-async fn delete_files() -> (StatusCode, Json<AcceptedResponse>) {
-    (StatusCode::ACCEPTED, Json(accepted()))
+async fn delete_files(
+    State(state): State<AppState>,
+    Json(payload): Json<DeleteRequestBody>,
+) -> ApiResult<Json<FileOperationsResponse>> {
+    let mut database = state.database.lock().expect("database mutex poisoned");
+    let operations = fsops::delete(
+        &mut database,
+        DeleteRequest {
+            file_ids: payload.file_ids.unwrap_or_default(),
+            folder_ids: payload.folder_ids.unwrap_or_default(),
+            permanent: payload.permanent.unwrap_or(false),
+        },
+    )
+    .map_err(map_fsops_error)?;
+    Ok(Json(FileOperationsResponse { operations }))
+}
+
+async fn list_file_operations(
+    State(state): State<AppState>,
+    Query(query): Query<ListFileOperationsQuery>,
+) -> ApiResult<Json<ListResponse<FileOperationRecord>>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=200).contains(&limit) {
+        return Err(CoreError::bad_request(format!(
+            "limit must be between 1 and 200: {limit}"
+        )));
+    }
+    let page =
+        fsops::list_recent(&database, limit, query.cursor.as_deref()).map_err(map_fsops_error)?;
+    Ok(Json(ListResponse {
+        items: page.items,
+        next_cursor: page.next_cursor,
+    }))
 }
 
 async fn list_plugins() -> Json<ListResponse<PluginState>> {
@@ -844,6 +971,18 @@ fn map_metadata_error(error: anyhow::Error) -> CoreError {
     error.into()
 }
 
+fn map_fsops_error(error: FsOpsError) -> CoreError {
+    let status = match error.code {
+        FsOpsErrorCode::InvalidName | FsOpsErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        FsOpsErrorCode::NotFound => StatusCode::NOT_FOUND,
+        FsOpsErrorCode::NameConflict
+        | FsOpsErrorCode::CrossVolume
+        | FsOpsErrorCode::OutsideRoot => StatusCode::CONFLICT,
+        FsOpsErrorCode::FsError => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    CoreError::coded(status, error.code.as_str(), error.message)
+}
+
 fn parse_user_metadata_patch(value: &serde_json::Value) -> ApiResult<UserMetadataPatch> {
     let object = value.as_object().ok_or_else(|| {
         CoreError::bad_request("metadata update body must be an object".to_string())
@@ -915,6 +1054,7 @@ impl CoreError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message,
+            code: None,
         }
     }
 
@@ -922,6 +1062,7 @@ impl CoreError {
         Self {
             status: StatusCode::CONFLICT,
             message,
+            code: None,
         }
     }
 
@@ -929,6 +1070,15 @@ impl CoreError {
         Self {
             status: StatusCode::NOT_FOUND,
             message,
+            code: None,
+        }
+    }
+
+    fn coded(status: StatusCode, code: &str, message: String) -> Self {
+        Self {
+            status,
+            message,
+            code: Some(code.to_string()),
         }
     }
 }
@@ -2522,6 +2672,427 @@ mod tests {
         // The unrated video comes last.
         assert_eq!(items[2]["id"], file_ids[2]);
         assert!(items[2]["rating"].is_null());
+    }
+
+    #[tokio::test]
+    async fn file_ops_rename_route_returns_record_and_404_400_409() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("alpha.jpg"), b"a").expect("write alpha");
+        fs::write(temp_root.join("beta.jpg"), b"b").expect("write beta");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let database = Database::open(db_dir.join("megle.sqlite")).expect("open db");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "ops".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "ops-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("upsert folder");
+        let alpha_id = database
+            .upsert_file(crate::db::FileUpsert {
+                root_id,
+                folder_id,
+                name: "alpha.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 1,
+                mtime: 1,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("upsert alpha");
+        let _beta_id = database
+            .upsert_file(crate::db::FileUpsert {
+                root_id,
+                folder_id,
+                name: "beta.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 1,
+                mtime: 1,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("upsert beta");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/rename")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"fileId": alpha_id, "newName": "alpha2.jpg"})
+                            .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("rename");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["operation"], "rename");
+        assert_eq!(body["status"], "succeeded");
+
+        let conflict = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/rename")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"fileId": alpha_id, "newName": "beta.jpg"}).to_string(),
+                    ))
+                    .expect("build conflict request"),
+            )
+            .await
+            .expect("rename conflict");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = response_json(conflict).await;
+        assert_eq!(body["code"], "name_conflict");
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/rename")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"fileId": alpha_id, "newName": "with/slash.jpg"})
+                            .to_string(),
+                    ))
+                    .expect("build invalid request"),
+            )
+            .await
+            .expect("rename invalid");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/rename")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"fileId": 999_999, "newName": "x.jpg"}).to_string(),
+                    ))
+                    .expect("build missing request"),
+            )
+            .await
+            .expect("rename missing");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        drop(app);
+        let _ = fs::remove_dir_all(&temp_root);
+        let _ = fs::remove_dir_all(&db_dir);
+    }
+
+    #[tokio::test]
+    async fn file_ops_move_route_returns_operations_and_cross_volume_409() {
+        let temp_root = unique_temp_dir();
+        let other_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::create_dir_all(temp_root.join("dst")).expect("create dst");
+        fs::create_dir_all(&other_root).expect("create other root dir");
+        fs::write(temp_root.join("m.jpg"), b"m").expect("write m");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let database = Database::open(db_dir.join("megle.sqlite")).expect("open db");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "ops".to_string(),
+            })
+            .expect("add root");
+        let other_root_id = database
+            .add_root(NewRoot {
+                path: other_root.to_string_lossy().into_owned(),
+                display_name: "other".to_string(),
+            })
+            .expect("add other root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "ops-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("upsert root folder");
+        let dst_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: Some(folder_id),
+                name: "dst".to_string(),
+                path_hash: "dst-folder".to_string(),
+                mtime: Some(1),
+            })
+            .expect("upsert dst");
+        let other_root_folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id: other_root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "other-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("upsert other folder");
+        let file_id = database
+            .upsert_file(crate::db::FileUpsert {
+                root_id,
+                folder_id,
+                name: "m.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 1,
+                mtime: 1,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("upsert file");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/move")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "fileIds": [file_id],
+                            "targetFolderId": dst_id
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build move request"),
+            )
+            .await
+            .expect("move");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let ops = body["operations"].as_array().expect("operations");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["operation"], "move");
+        assert_eq!(ops[0]["status"], "succeeded");
+
+        // Now try cross-volume: move from same source to other root's folder.
+        // Reseed a file at temp_root.
+        fs::write(temp_root.join("x.jpg"), b"x").expect("write x");
+        let cross_volume_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/move")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "fileIds": [file_id],
+                            "targetFolderId": other_root_folder_id
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build cross-volume request"),
+            )
+            .await
+            .expect("cross volume");
+        assert_eq!(cross_volume_response.status(), StatusCode::CONFLICT);
+        let body = response_json(cross_volume_response).await;
+        assert_eq!(body["code"], "cross_volume");
+
+        drop(app);
+        let _ = fs::remove_dir_all(&temp_root);
+        let _ = fs::remove_dir_all(&other_root);
+        let _ = fs::remove_dir_all(&db_dir);
+    }
+
+    #[tokio::test]
+    async fn file_ops_delete_route_supports_recycle_and_permanent() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("p.jpg"), b"p").expect("write p");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let database = Database::open(db_dir.join("megle.sqlite")).expect("open db");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "ops".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "ops-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("upsert folder");
+        let file_id = database
+            .upsert_file(crate::db::FileUpsert {
+                root_id,
+                folder_id,
+                name: "p.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 1,
+                mtime: 1,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("upsert file");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/delete")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "fileIds": [file_id],
+                            "permanent": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build delete request"),
+            )
+            .await
+            .expect("delete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let ops = body["operations"].as_array().expect("operations");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["operation"], "delete_permanent");
+        assert!(!temp_root.join("p.jpg").exists());
+
+        let empty = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/file-ops/delete")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "permanent": true }).to_string(),
+                    ))
+                    .expect("build empty request"),
+            )
+            .await
+            .expect("delete empty");
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+        drop(app);
+        let _ = fs::remove_dir_all(&temp_root);
+        let _ = fs::remove_dir_all(&db_dir);
+    }
+
+    #[tokio::test]
+    async fn file_ops_list_returns_keyset_page() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let database = Database::open(db_dir.join("megle.sqlite")).expect("open db");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "ops".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "ops-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("upsert folder");
+        for index in 0..3 {
+            let name = format!("f{index}.jpg");
+            fs::write(temp_root.join(&name), b"x").expect("write file");
+            let file_id = database
+                .upsert_file(crate::db::FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: name.clone(),
+                    ext: ".jpg".to_string(),
+                    size: 1,
+                    mtime: 1,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("upsert file");
+            // Trigger a rename to log a row.
+            // Via direct fsops call would require &mut Database, so use the route.
+            let _ = file_id;
+        }
+        // Drive renames through the route for genuine logs.
+        let app = router(AppState::new(database));
+        for index in 0..3 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/file-ops/rename")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "fileId": index + 1,
+                                "newName": format!("renamed{index}.jpg")
+                            })
+                            .to_string(),
+                        ))
+                        .expect("build request"),
+                )
+                .await
+                .expect("rename");
+            assert_eq!(response.status(), StatusCode::OK, "rename {index}");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/file-ops?limit=2")
+                    .body(Body::empty())
+                    .expect("build list request"),
+            )
+            .await
+            .expect("list");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let items = body["items"].as_array().expect("items");
+        assert_eq!(items.len(), 2);
+        assert!(items[0]["id"].as_i64().unwrap() > items[1]["id"].as_i64().unwrap());
+        assert!(body["nextCursor"].is_string());
+
+        drop(app);
+        let _ = fs::remove_dir_all(&temp_root);
+        let _ = fs::remove_dir_all(&db_dir);
     }
 
     async fn response_json(response: axum::response::Response) -> serde_json::Value {

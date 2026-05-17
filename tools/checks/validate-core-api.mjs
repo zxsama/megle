@@ -31,6 +31,7 @@ const taskAttemptGenerationMigrationSql = read("crates/core/migrations/0008_task
 const thumbnailsRs = read("crates/core/src/thumbnails/mod.rs");
 const pluginsRs = read("crates/core/src/plugins/mod.rs");
 const fsopsRs = read("crates/core/src/fsops/mod.rs");
+const coreCargo = read("crates/core/Cargo.toml");
 const pluginManifest = read("contracts/plugins/manifest.schema.json");
 
 const openApiPaths = new Set(
@@ -285,7 +286,7 @@ for (const value of ["decoder", "metadata", "action", "import-provider"]) {
   }
 }
 
-for (const value of ["rename", "move", "delete_to_recycle_bin"]) {
+for (const value of ["rename", "move", "delete_recycle", "delete_permanent"]) {
   if (!fsopsRs.includes(value)) {
     fail(`file operation value is missing: ${value}`);
   }
@@ -329,10 +330,7 @@ for (const name of [
   "remove_root",
   "get_thumbnail",
   "get_preview",
-  "enqueue_scan",
-  "rename_file",
-  "move_files",
-  "delete_files"
+  "enqueue_scan"
 ]) {
   if (!functionBody(name).includes("StatusCode::ACCEPTED")) {
     fail(`${name} must return StatusCode::ACCEPTED while it is queued/placeholder work`);
@@ -599,6 +597,94 @@ for (const value of [
   if (!dbModRs.includes(value)) {
     fail(`db/mod.rs must expose ${value}`);
   }
+}
+
+// Phase 6 file operations contract alignment.
+for (const fragment of [
+  "  /file-ops/rename:",
+  "  /file-ops/move:",
+  "  /file-ops/delete:",
+  "  /file-ops:"
+]) {
+  if (!openApi.includes(fragment)) {
+    fail(`OpenAPI must declare ${fragment}`);
+  }
+}
+
+for (const value of [
+  "FileOperationRecord",
+  "FileOperationKind",
+  "FileOperationStatus",
+  "FileOperationsResponse",
+  "FileOperationListResponse",
+  "RenameRequest",
+  "MoveRequest",
+  "DeleteRequest"
+]) {
+  if (!openApi.includes(`#/components/schemas/${value}`)) {
+    fail(`OpenAPI must reference component schema ${value}`);
+  }
+  if (!openApi.includes(`    ${value}:`)) {
+    fail(`OpenAPI must define schema ${value}`);
+  }
+}
+
+for (const value of ["rename", "move", "delete_recycle", "delete_permanent"]) {
+  if (!openApi.includes(value)) {
+    fail(`OpenAPI FileOperationKind enum missing ${value}`);
+  }
+}
+
+for (const value of [
+  '"/api/file-ops/rename"',
+  '"/api/file-ops/move"',
+  '"/api/file-ops/delete"',
+  '"/api/file-ops"'
+]) {
+  if (!routesRs.includes(value)) {
+    fail(`PHASE1_API_PATHS must include ${value}`);
+  }
+}
+
+for (const value of [
+  "fsops::rename",
+  "fsops::move_items",
+  "fsops::delete",
+  "fsops::list_recent",
+  "list_file_operations",
+  "map_fsops_error",
+  "FileOperationRecord",
+  "FileOperationsResponse"
+]) {
+  if (!routesRs.includes(value)) {
+    fail(`routes.rs must wire ${value}`);
+  }
+}
+
+for (const value of [
+  "BEGIN IMMEDIATE",
+  "TransactionBehavior::Immediate",
+  "FileOperationRecord",
+  "FsOpsError",
+  "FsOpsErrorCode",
+  "cross_volume",
+  "trash::delete",
+  "remove_file",
+  "remove_dir_all",
+  "validate_name",
+  "is_windows_reserved",
+  "list_recent",
+  "rename(",
+  "move_items(",
+  "delete("
+]) {
+  if (!fsopsRs.includes(value)) {
+    fail(`fsops/mod.rs must include ${value}`);
+  }
+}
+
+if (!coreCargo.includes("trash =")) {
+  fail("crates/core/Cargo.toml must depend on trash");
 }
 
 if (!process.exitCode) {
