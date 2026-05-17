@@ -100,6 +100,14 @@ has all ten tasks ticked, and the manual smoke-test list lives in
 add a root, browse, preview, organize, file-ops, watcher, plugins, Web/Docker reuse, and a
 demoable frameless desktop build.
 
+A real-GUI test against a 31-image photo directory on 2026-05-17 surfaced and fixed three
+integration bugs that the unit tests missed: the preload script needed to be CommonJS, the
+thumbnail freshness check assumed metadata that `/api/media` does not include, and the
+grid only rendered placeholder text instead of `<img>` elements. The Core API now exposes
+`/media/{fileId}/thumbnail/blob` and the React grid + preview render real WebP bytes.
+See [`release-checklist.md` §2.1](release-checklist.md) for the automated CDP-driven
+smoke test that catches these issues end-to-end.
+
 The approved UI direction is layered liquid glass with a shared desktop app shell. The
 foundation track lives in `docs/superpowers/plans/2026-05-16-megle-ui-foundation.md`. The
 full-product execution order lives in

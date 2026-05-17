@@ -158,6 +158,22 @@ Phases 1–10 of the master plan are complete. Each phase ships both Core and UI
 9. **Phase 9 — Web / Docker.** Headless Core mode, Basic auth, mounted roots, HTTP asset delivery, the same React app shell served as static files.
 10. **Phase 10 — Release hardening.** Onboarding hero, empty states, Settings page with diagnostics, keyboard shortcuts (F2 / Delete / Shift+Delete / Ctrl+F / Esc), frameless desktop chrome with restored window state, release checklist at `docs/release-checklist.md`.
 
+### Real GUI Integration (2026-05-17)
+
+End-to-end real-photo testing against `C:/Users/84460/Pictures/normal` (31 multi-MB illustrations) shipped three additional fixes that anyone running `npm run dev` against a real directory needs:
+
+- `apps/desktop/src/preload.cjs` (CommonJS, hand-maintained) replaces the old `preload.ts`. Electron's sandboxed preload runtime requires CJS, but the workspace root is `"type": "module"`, so a `.ts → .js` build was loaded as ESM and crashed with "Cannot use import statement outside a module" — the renderer never received `window.megleDesktop`. The `.cjs` is short enough that a static file beats forcing a separate tsconfig.
+- `apps/web/src/core/mediaResources.ts::isFreshThumbnailForMediaRecord` no longer requires `mediaRecord.thumbnailCacheKey`. `/api/media` listing intentionally omits per-row thumbnail metadata for performance, so the freshness check used to reject every `ready` thumbnail and tiles stayed in `loading` forever. Now it trusts `ThumbnailResponse.fileId` and the response state.
+- The new `GET /api/media/{fileId}/thumbnail/blob` endpoint streams the cached WebP bytes (`image/webp` + 1-year immutable cache), and `apps/web/src/features/media-grid/MediaGrid.tsx::ReadyThumbnail` + `apps/web/src/features/preview/PreviewPanel.tsx::ReadyPreviewImage` fetch the blob through `@megle/core-client::getThumbnailBlob` and render `<img>` elements via `URL.createObjectURL`. Phase 1 only rendered placeholder text in tiles — the cache files existed on disk but never reached the screen.
+
+### Dev Ergonomics
+
+Three optional env vars / scripts make local debugging cheap:
+
+- `MEGLE_AUTO_ADD_ROOT="<path>"` — Electron auto-adds the path as a root after Core is healthy. Lets `npm run dev` come up with data already loaded.
+- `MEGLE_REMOTE_DEBUG=1` — `tools/dev/run-dev.mjs` passes `--remote-debugging-port=9222` to Electron so you can attach Chrome DevTools or use the next script.
+- `tools/dev/cdp-inspect.mjs <ws-url>` — connects to the renderer over CDP and prints `hasBridge`, `coreUrl`, token presence, tile counts (`ready` / `loading` / `failed`), `<img>` count, and recent console errors. Use it instead of guessing whether the UI rendered. Wire-up: `WS=$(curl -sS http://127.0.0.1:9222/json | python -c "import json,sys; print([p for p in json.load(sys.stdin) if p['type']=='page'][0]['webSocketDebuggerUrl'])") && node tools/dev/cdp-inspect.mjs "$WS"`.
+
 Remaining scan work explicitly deferred: transactional scan batching, chunked commits, worker shutdown, progress counters, cancellation/retry semantics, clearer rescan failure/staleness behavior. The Phase 1 dynamic-port probe still has a small probe-and-close bind race before Core starts. Desktop dev still uses `cargo run -p megle-core`; a packaged Core sidecar replaces this for production.
 
 ## Next Execution Order

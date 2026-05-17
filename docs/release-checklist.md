@@ -19,7 +19,7 @@ Expected:
 
 - `npm test` is green (structure + contracts + schema + typecheck + cargo test).
 - Web build emits `apps/web/dist/` without TypeScript or Vite errors.
-- Desktop build emits `apps/desktop/dist/main.js` and `apps/desktop/dist/preload.js`.
+- Desktop build emits `apps/desktop/dist/main.js` and `apps/desktop/dist/preload.cjs`.
 - `cargo build --release -p megle-core` produces `target/release/megle-core[.exe]`.
 
 If any step fails, stop and fix before continuing. Never edit the contract or schema to
@@ -39,12 +39,42 @@ as a follow-up issue rather than patching during release prep.
 - [ ] Cancel a running scan from Task Center; retry it; final state is succeeded.
 - [ ] Disable / re-enable a registered plugin; the badge reflects state.
 - [ ] Settings page shows ffmpeg badge, database path, and plugins folder path.
-- [ ] Onboarding hero appears on a fresh profile (no roots) and "Choose folder" focuses
-      the existing sidebar input.
+- [ ] Onboarding hero appears on a fresh profile (no roots) and "Choose folder" opens
+      the native picker (or focuses the sidebar input in browser-only mode).
 - [ ] Frameless chrome — minimize / maximize / close work; the topbar is draggable;
       window position and maximized state restore on next launch.
 - [ ] Keyboard shortcuts behave: F2 rename, Delete recycle, Shift+Delete permanent
       delete, Ctrl+F focuses search, Esc clears selection.
+
+### 2.1 Automated real-photo smoke (recommended)
+
+Use this when you don't want to click through the smoke list manually. It exercises
+the entire `Electron → Core → SQLite → thumbnail worker → preload bridge → React grid`
+path against a real photo directory and reports the exact UI state via CDP.
+
+```bash
+# 1. Clean DB so we hit the cold-start path.
+rm -rf .data
+
+# 2. Launch dev with auto-add-root + Chrome DevTools Protocol port.
+MEGLE_AUTO_ADD_ROOT="<absolute path to a real photo folder>" \
+  MEGLE_REMOTE_DEBUG=1 \
+  npm run dev
+
+# 3. After the window opens, in another shell:
+WS=$(curl -sS http://127.0.0.1:9222/json \
+  | python -c "import json,sys; print([p for p in json.load(sys.stdin) if p['type']=='page'][0]['webSocketDebuggerUrl'])")
+node tools/dev/cdp-inspect.mjs "$WS"
+```
+
+The CDP inspector prints a one-liner JSON: `hasBridge`, `coreUrl`, `hasToken`,
+tile counts (`ready` / `loading` / `failed`), `<img>` element count, and the
+sidebar's roots subtitle. A healthy run is `hasBridge: true`, `hasToken: true`,
+non-zero `tiles_ready`, and an equal number of `imgs` (each ready tile renders
+one real `<img class="tile-thumb-image">`).
+
+If the inspector reports `hasBridge: false`, the preload script crashed — check
+that `apps/desktop/dist/preload.cjs` exists and is loaded by the BrowserWindow.
 
 ## 3. Release artifacts
 
