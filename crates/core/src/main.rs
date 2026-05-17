@@ -6,6 +6,7 @@ mod roots;
 mod scan;
 mod tasks;
 mod thumbnails;
+mod watch;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

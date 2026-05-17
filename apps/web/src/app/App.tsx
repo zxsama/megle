@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useLibraryData } from "../core/useLibraryData";
 import { LibrarySidebar } from "../features/library/LibrarySidebar";
 import { LibraryView } from "../features/library/LibraryView";
+import { TaskCenter } from "../features/tasks/TaskCenter";
 import { TaskPanel } from "../features/tasks/TaskPanel";
 
 type AppView = "library" | "tasks" | "plugins" | "settings";
@@ -44,42 +45,27 @@ export function App() {
       <LibrarySidebar library={library} />
 
       {activeView === "library" ? <LibraryView library={library} /> : null}
-      {activeView === "tasks" ? <TasksView library={library} /> : null}
+      {activeView === "tasks" ? (
+        <TaskCenter
+          busyTaskIds={library.busyTaskIds}
+          onCancel={(taskId) => {
+            void library.cancelTask(taskId);
+          }}
+          onRefresh={() => {
+            void library.refreshTasks();
+          }}
+          onRetry={(taskId) => {
+            void library.retryTask(taskId);
+          }}
+          scanActive={library.scanActive}
+          tasks={library.tasks}
+        />
+      ) : null}
       {activeView === "plugins" ? <PlaceholderView title="Plugins" detail="No plugins installed" /> : null}
       {activeView === "settings" ? <PlaceholderView title="Settings" detail="Local library settings" /> : null}
 
       <TaskPanel scanActive={library.scanActive} tasks={library.tasks} />
     </main>
-  );
-}
-
-function TasksView({ library }: { library: ReturnType<typeof useLibraryData> }) {
-  return (
-    <section className="workspace simple-workspace" aria-label="Task workbench">
-      <header className="toolbar">
-        <div>
-          <div className="toolbar-title">Tasks</div>
-          <div className="toolbar-meta">{library.tasks.length} tracked tasks</div>
-        </div>
-      </header>
-      <div className="task-table">
-        {library.tasks.length > 0 ? (
-          library.tasks
-            .slice()
-            .reverse()
-            .map((task) => (
-              <div className="task-table-row" key={task.id}>
-                <span>{task.kind.replaceAll("_", " ")}</span>
-                <span>{task.status}</span>
-                <span>{task.itemsSeen} entries</span>
-                <span>{task.mediaFilesSeen} media</span>
-              </div>
-            ))
-        ) : (
-          <div className="empty-panel">No tasks</div>
-        )}
-      </div>
-    </section>
   );
 }
 

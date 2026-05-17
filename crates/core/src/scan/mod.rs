@@ -95,6 +95,7 @@ pub fn scan_root_with_options(
     let root_path = PathBuf::from(&root.path);
     check_scan_cancelled(&mut options)?;
     ensure_root_enabled(database, root.id)?;
+    let scan_generation = database.begin_root_scan_reconciliation(root.id)?;
     let root_batch = ScanWriteBatch {
         folders: vec![FolderUpsert {
             root_id: root.id,
@@ -104,6 +105,7 @@ pub fn scan_root_with_options(
             mtime: metadata_time(root_path.metadata().ok().as_ref(), TimeField::Modified),
         }],
         files: Vec::new(),
+        scan_generation: Some(scan_generation),
     };
     observe_scan_batch(&options, root_batch.folders.len(), root_batch.files.len());
     check_scan_cancelled(&mut options)?;
@@ -143,6 +145,7 @@ pub fn scan_root_with_options(
                     mtime: metadata_time(Some(&metadata), TimeField::Modified),
                 }],
                 files: Vec::new(),
+                scan_generation: Some(scan_generation),
             };
             observe_scan_batch(&options, batch.folders.len(), batch.files.len());
             check_scan_cancelled(&mut options)?;
@@ -189,20 +192,45 @@ pub fn scan_root_with_options(
         check_scan_cancelled(&mut options)?;
 
         if pending_files.len() >= write_batch_size {
-            flush_scan_files(database, root.id, &mut options, &mut pending_files)?;
+            flush_scan_files(
+                database,
+                root.id,
+                scan_generation,
+                &mut options,
+                &mut pending_files,
+            )?;
         }
     }
 
-    flush_scan_files(database, root.id, &mut options, &mut pending_files)?;
+    flush_scan_files(
+        database,
+        root.id,
+        scan_generation,
+        &mut options,
+        &mut pending_files,
+    )?;
     check_scan_cancelled(&mut options)?;
     ensure_root_enabled(database, root.id)?;
     if let Some(guard) = options.task_attempt_guard {
+        let reconciled = database.reconcile_root_scan_completion_for_task_attempt(
+            root.id,
+            scan_generation,
+            guard.task_id,
+            guard.attempt_generation,
+        )?;
+        if !reconciled {
+            return Err(anyhow::anyhow!(
+                "task {} attempt superseded before scan reconciliation",
+                guard.task_id
+            ));
+        }
         database.mark_root_scanned_for_task_attempt(
             root.id,
             guard.task_id,
             guard.attempt_generation,
         )?;
     } else {
+        database.reconcile_root_scan_completion(root.id, scan_generation)?;
         database.mark_root_scanned(root.id)?;
     }
     Ok(summary)
@@ -236,6 +264,7 @@ fn parent_folder_id(path: &Path, folder_ids: &HashMap<PathBuf, i64>) -> anyhow::
 fn flush_scan_files(
     database: &mut Database,
     root_id: i64,
+    scan_generation: i64,
     options: &mut ScanOptions<'_>,
     pending_files: &mut Vec<ScanFileUpsert>,
 ) -> anyhow::Result<()> {
@@ -251,6 +280,7 @@ fn flush_scan_files(
         ScanWriteBatch {
             folders: Vec::new(),
             files: std::mem::take(pending_files),
+            scan_generation: Some(scan_generation),
         },
         options,
     )?;
@@ -546,6 +576,75 @@ mod tests {
     }
 
     #[test]
+    fn completed_scan_marks_deleted_media_missing() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("keep.jpg"), b"keep").expect("write keep image");
+        fs::write(temp_root.join("delete.jpg"), b"delete").expect("write delete image");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "scan-reconcile-delete-test");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("first scan");
+        fs::remove_file(temp_root.join("delete.jpg")).expect("delete image");
+        scan_root(&mut database, &root).expect("second scan");
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        let names: Vec<&str> = media.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["keep.jpg"]);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn completed_scan_marks_moved_out_media_missing() {
+        let temp_root = unique_temp_dir();
+        let outside_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::create_dir_all(&outside_dir).expect("create outside dir");
+        fs::write(temp_root.join("move-out.jpg"), b"move").expect("write image");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "scan-reconcile-move-out-test");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("first scan");
+        fs::rename(
+            temp_root.join("move-out.jpg"),
+            outside_dir.join("move-out.jpg"),
+        )
+        .expect("move image outside root");
+        scan_root(&mut database, &root).expect("second scan");
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert!(media.items.is_empty());
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+        fs::remove_dir_all(outside_dir).expect("cleanup outside dir");
+    }
+
+    #[test]
     fn folder_boundaries_do_not_flush_pending_files_before_batch_threshold() {
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -644,6 +743,80 @@ mod tests {
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
         let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[test]
+    fn guarded_scan_completion_does_not_reconcile_when_task_attempt_is_superseded() {
+        // Regression for Blocker 2: a guarded scan whose task attempt has
+        // been superseded must not finish reconciliation. It must error out
+        // (the existing batch guard rejects writes against a stale attempt,
+        // and the new task-attempt-guarded reconciliation refuses to run
+        // against a stale attempt), and it must leave the new (retried)
+        // attempt and root state untouched: the root is not marked scanned
+        // and the retried attempt remains pending.
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("a.jpg"), b"fake jpg").expect("write image a");
+        fs::write(temp_root.join("b.jpg"), b"fake jpg").expect("write image b");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "stale-attempt-scan-test");
+        let root = test_root(&database, root_id);
+
+        // Persist a task and mark its first attempt running. The scan code
+        // expects the task to already be running before a guarded scan.
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        database
+            .mark_task_running_for_attempt(task_id, old_attempt)
+            .expect("mark running");
+
+        // Supersede the attempt before the scan starts: cancel + retry
+        // bumps the attempt generation, so the in-flight scan is now stale.
+        database.cancel_task(task_id).expect("cancel task");
+        database.retry_task(task_id).expect("retry task");
+
+        let error = scan_root_with_options(
+            &mut database,
+            &root,
+            ScanOptions {
+                write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
+                progress_callback: None,
+                cancellation_callback: None,
+                task_attempt_guard: Some(TaskAttemptGuard {
+                    task_id,
+                    attempt_generation: old_attempt,
+                }),
+                batch_observer: None,
+            },
+        )
+        .expect_err("stale attempt scan must not succeed");
+        let message = error.to_string();
+        assert!(
+            message.contains("attempt") || message.contains("superseded"),
+            "unexpected error message: {message}"
+        );
+
+        // The retried (current) attempt remains pending and unmodified.
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "pending");
+        assert!(task.attempt_generation > old_attempt);
+
+        // The root must not have been marked scanned by the stale path.
+        let root = database.get_root(root_id).expect("get root").expect("root");
+        assert_eq!(root.last_scan_at, None);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
 
     #[test]

@@ -10,7 +10,9 @@ function fail(message) {
 }
 
 function read(relativePath) {
-  return readFileSync(path.join(root, relativePath), "utf8");
+  // Normalize CRLF to LF so the contract regexes work the same on Windows
+  // (where git autocrlf=true checks files out with \r\n endings) and POSIX.
+  return readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 const openApi = read("contracts/core-api/openapi.yaml");

@@ -1,9 +1,11 @@
 pub mod migrations;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, Transaction, TransactionBehavior};
 use serde::Serialize;
 
 use crate::thumbnails::{
@@ -74,6 +76,7 @@ pub struct FileUpsert {
 pub struct ScanWriteBatch {
     pub folders: Vec<FolderUpsert>,
     pub files: Vec<ScanFileUpsert>,
+    pub scan_generation: Option<i64>,
 }
 
 pub struct ScanFileUpsert {
@@ -235,6 +238,11 @@ impl Database {
     }
 
     fn from_connection(connection: Connection, path: Option<PathBuf>) -> anyhow::Result<Self> {
+        // Set busy_timeout BEFORE any other operation so the busy handler
+        // is registered for every subsequent SQL statement, including the
+        // foreign_keys PRAGMA, migration writes, and transaction
+        // escalation.
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { connection, path })
     }
@@ -296,6 +304,9 @@ impl Database {
         if !self.migration_applied(8)? {
             self.apply_task_attempt_generation_migration()?;
         }
+        if !self.migration_applied(9)? {
+            self.apply_scan_reconciliation_migration()?;
+        }
         Ok(())
     }
 
@@ -332,6 +343,28 @@ impl Database {
                     .execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {definition}"))?;
             }
         }
+        Ok(())
+    }
+
+    fn apply_scan_reconciliation_migration(&self) -> anyhow::Result<()> {
+        if !self.table_has_column("roots", "active_scan_generation")? {
+            self.connection
+                .execute_batch(migrations::SCAN_RECONCILIATION_MIGRATION)?;
+        }
+        for table in ["folders", "files"] {
+            if !self.table_has_column(table, "scan_seen_at")? {
+                self.connection.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN scan_seen_at INTEGER"
+                ))?;
+            }
+        }
+        self.connection.execute(
+            r#"
+            INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+            VALUES (9, 'scan_reconciliation', unixepoch())
+            "#,
+            [],
+        )?;
         Ok(())
     }
 
@@ -1296,6 +1329,302 @@ impl Database {
         Ok(self.list_folder_children_page(folder_id, 500, None)?.items)
     }
 
+    pub(crate) fn get_folder_id_by_path(
+        &self,
+        root_id: i64,
+        root_path: &Path,
+        folder_path: &Path,
+    ) -> anyhow::Result<Option<i64>> {
+        let root = self
+            .get_root(root_id)?
+            .ok_or_else(|| anyhow::anyhow!("root not found: {root_id}"))?;
+        let Some(mut folder_id) = root.root_folder_id else {
+            return Ok(None);
+        };
+        let Ok(relative) = folder_path.strip_prefix(root_path) else {
+            return Ok(None);
+        };
+        if relative.as_os_str().is_empty() {
+            return Ok(Some(folder_id));
+        }
+
+        for component in relative.components() {
+            let name = component.as_os_str().to_string_lossy();
+            let Some(next_id) = self.find_folder_id(root_id, Some(folder_id), &name)? else {
+                return Ok(None);
+            };
+            folder_id = next_id;
+        }
+
+        Ok(Some(folder_id))
+    }
+
+    pub(crate) fn ensure_folder_chain_for_path(
+        &self,
+        root_id: i64,
+        root_path: &Path,
+        folder_path: &Path,
+    ) -> anyhow::Result<i64> {
+        let _root = self
+            .get_root(root_id)?
+            .ok_or_else(|| anyhow::anyhow!("root not found: {root_id}"))?;
+        let root_folder_id = self.upsert_folder(FolderUpsert {
+            root_id,
+            parent_id: None,
+            name: String::new(),
+            path_hash: hash_path(root_path),
+            mtime: metadata_time(root_path.metadata().ok().as_ref()),
+        })?;
+        let Ok(relative) = folder_path.strip_prefix(root_path) else {
+            return Err(anyhow::anyhow!(
+                "folder path is outside root {}: {}",
+                root_path.display(),
+                folder_path.display()
+            ));
+        };
+        if relative.as_os_str().is_empty() {
+            return Ok(root_folder_id);
+        }
+
+        let mut parent_id = root_folder_id;
+        let mut current_path = root_path.to_path_buf();
+        for component in relative.components() {
+            current_path.push(component.as_os_str());
+            let name = component.as_os_str().to_string_lossy().to_string();
+            parent_id = self.upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: Some(parent_id),
+                name,
+                path_hash: hash_path(&current_path),
+                mtime: metadata_time(current_path.metadata().ok().as_ref()),
+            })?;
+        }
+
+        Ok(parent_id)
+    }
+
+    pub(crate) fn mark_file_missing_by_path(
+        &self,
+        root_id: i64,
+        root_path: &Path,
+        file_path: &Path,
+    ) -> anyhow::Result<bool> {
+        let Some(parent_path) = file_path.parent() else {
+            return Ok(false);
+        };
+        let Some(folder_id) = self.get_folder_id_by_path(root_id, root_path, parent_path)? else {
+            return Ok(false);
+        };
+        let file_name = file_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let updated = self.connection.execute(
+            "UPDATE files SET status = 'missing' WHERE root_id = ?1 AND folder_id = ?2 AND name = ?3 AND status = 'active'",
+            (root_id, folder_id, file_name),
+        )?;
+        Ok(updated != 0)
+    }
+
+    pub(crate) fn mark_folder_subtree_missing_by_path(
+        &self,
+        root_id: i64,
+        root_path: &Path,
+        folder_path: &Path,
+    ) -> anyhow::Result<bool> {
+        let Some(folder_id) = self.get_folder_id_by_path(root_id, root_path, folder_path)? else {
+            return Ok(false);
+        };
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            r#"
+            WITH RECURSIVE subtree(id) AS (
+              SELECT id FROM folders WHERE id = ?1
+              UNION ALL
+              SELECT folders.id
+              FROM folders
+              JOIN subtree ON folders.parent_id = subtree.id
+            )
+            UPDATE folders
+            SET status = 'missing'
+            WHERE id IN (SELECT id FROM subtree)
+            "#,
+            [folder_id],
+        )?;
+        transaction.execute(
+            r#"
+            WITH RECURSIVE subtree(id) AS (
+              SELECT id FROM folders WHERE id = ?1
+              UNION ALL
+              SELECT folders.id
+              FROM folders
+              JOIN subtree ON folders.parent_id = subtree.id
+            )
+            UPDATE files
+            SET status = 'missing'
+            WHERE folder_id IN (SELECT id FROM subtree)
+            "#,
+            [folder_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn has_active_root_scan_task(&self, root_id: i64) -> anyhow::Result<bool> {
+        let exists: i64 = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+              SELECT 1
+              FROM tasks
+              WHERE kind = 'root_scan'
+                AND root_id = ?1
+                AND status IN ('pending', 'running')
+            )
+            "#,
+            [root_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    /// Returns true if there is already a `pending` root_scan task for the
+    /// given root. Unlike `has_active_root_scan_task`, this ignores `running`
+    /// tasks so the watcher can persist exactly one follow-up rescan to cover
+    /// directory create / move-in events that happened after WalkDir already
+    /// passed the affected path during a still-running scan.
+    pub(crate) fn has_pending_root_scan_task(&self, root_id: i64) -> anyhow::Result<bool> {
+        let exists: i64 = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+              SELECT 1
+              FROM tasks
+              WHERE kind = 'root_scan'
+                AND root_id = ?1
+                AND status = 'pending'
+            )
+            "#,
+            [root_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    pub(crate) fn begin_root_scan_reconciliation(&self, root_id: i64) -> anyhow::Result<i64> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        ensure_root_enabled_in_transaction(&transaction, root_id)?;
+        let scan_generation = next_root_scan_generation_in_transaction(&transaction, root_id)?;
+        transaction.execute(
+            "UPDATE roots SET active_scan_generation = ?1 WHERE id = ?2",
+            (scan_generation, root_id),
+        )?;
+        transaction.commit()?;
+        Ok(scan_generation)
+    }
+
+    pub(crate) fn reconcile_root_scan_completion(
+        &self,
+        root_id: i64,
+        scan_generation: i64,
+    ) -> anyhow::Result<()> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        ensure_root_enabled_in_transaction(&transaction, root_id)?;
+        let active_scan_generation = active_scan_generation_in_transaction(&transaction, root_id)?;
+        if active_scan_generation != Some(scan_generation) {
+            return Err(anyhow::anyhow!(
+                "root scan generation mismatch for root {root_id}; expected active generation {}, current active generation {:?}",
+                scan_generation,
+                active_scan_generation
+            ));
+        }
+        transaction.execute(
+            r#"
+            UPDATE files
+            SET status = 'missing'
+            WHERE root_id = ?1
+              AND status = 'active'
+              AND COALESCE(scan_seen_at, 0) != ?2
+            "#,
+            (root_id, scan_generation),
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE folders
+            SET status = 'missing'
+            WHERE root_id = ?1
+              AND parent_id IS NOT NULL
+              AND status = 'active'
+              AND COALESCE(scan_seen_at, 0) != ?2
+            "#,
+            (root_id, scan_generation),
+        )?;
+        transaction.execute(
+            "UPDATE roots SET active_scan_generation = NULL WHERE id = ?1 AND active_scan_generation = ?2",
+            (root_id, scan_generation),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Task-attempt-guarded counterpart to `reconcile_root_scan_completion`.
+    ///
+    /// Reconciliation runs only if the task attempt is still current and
+    /// running. A stale or superseded attempt returns `Ok(false)` without
+    /// reconciling rows or clearing `active_scan_generation`, so a retried
+    /// attempt's generation is preserved for the next run.
+    pub(crate) fn reconcile_root_scan_completion_for_task_attempt(
+        &self,
+        root_id: i64,
+        scan_generation: i64,
+        task_id: i64,
+        attempt_generation: i64,
+    ) -> anyhow::Result<bool> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        if !task_attempt_running_in_transaction(&transaction, task_id, attempt_generation)? {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        ensure_root_enabled_in_transaction(&transaction, root_id)?;
+        let active_scan_generation = active_scan_generation_in_transaction(&transaction, root_id)?;
+        if active_scan_generation != Some(scan_generation) {
+            return Err(anyhow::anyhow!(
+                "root scan generation mismatch for root {root_id}; expected active generation {}, current active generation {:?}",
+                scan_generation,
+                active_scan_generation
+            ));
+        }
+        transaction.execute(
+            r#"
+            UPDATE files
+            SET status = 'missing'
+            WHERE root_id = ?1
+              AND status = 'active'
+              AND COALESCE(scan_seen_at, 0) != ?2
+            "#,
+            (root_id, scan_generation),
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE folders
+            SET status = 'missing'
+            WHERE root_id = ?1
+              AND parent_id IS NOT NULL
+              AND status = 'active'
+              AND COALESCE(scan_seen_at, 0) != ?2
+            "#,
+            (root_id, scan_generation),
+        )?;
+        transaction.execute(
+            "UPDATE roots SET active_scan_generation = NULL WHERE id = ?1 AND active_scan_generation = ?2",
+            (root_id, scan_generation),
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
     pub fn folder_exists(&self, folder_id: i64) -> anyhow::Result<bool> {
         let exists: i64 = self.connection.query_row(
             r#"
@@ -1314,85 +1643,23 @@ impl Database {
 
     #[allow(dead_code)]
     pub fn upsert_folder(&self, folder: FolderUpsert) -> anyhow::Result<i64> {
-        if let Some(existing_id) =
-            self.find_folder_id(folder.root_id, folder.parent_id, &folder.name)?
-        {
-            self.connection.execute(
-                r#"
-                UPDATE folders
-                SET path_hash = ?1, mtime = ?2, status = 'active'
-                WHERE id = ?3
-                "#,
-                (&folder.path_hash, folder.mtime, existing_id),
-            )?;
-            return Ok(existing_id);
-        }
-
-        self.connection.execute(
-            r#"
-            INSERT INTO folders(root_id, parent_id, name, path_hash, mtime, status)
-            VALUES (?1, ?2, ?3, ?4, ?5, 'active')
-            "#,
-            (
-                folder.root_id,
-                folder.parent_id,
-                &folder.name,
-                &folder.path_hash,
-                folder.mtime,
-            ),
-        )?;
-        Ok(self.connection.last_insert_rowid())
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let scan_generation = active_scan_generation_in_transaction(&transaction, folder.root_id)?;
+        let folder_id = upsert_folder_in_transaction(&transaction, folder, scan_generation)?;
+        transaction.commit()?;
+        Ok(folder_id)
     }
 
     #[allow(dead_code)]
     pub fn upsert_file(&self, file: FileUpsert) -> anyhow::Result<i64> {
         let root_id = file.root_id;
-        let folder_id = file.folder_id;
-        let name = file.name.clone();
-        let size = file.size;
-        let mtime = file.mtime;
-        let file_key = file.file_key.clone();
-        self.connection.execute(
-            r#"
-            INSERT INTO files(root_id, folder_id, name, ext, size, mtime, ctime, file_key, status)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active')
-            ON CONFLICT(folder_id, name) DO UPDATE SET
-              ext = excluded.ext,
-              size = excluded.size,
-              mtime = excluded.mtime,
-              ctime = excluded.ctime,
-              file_key = excluded.file_key,
-              status = 'active'
-            "#,
-            (
-                file.root_id,
-                file.folder_id,
-                &file.name,
-                &file.ext,
-                file.size,
-                file.mtime,
-                file.ctime,
-                &file.file_key,
-            ),
-        )?;
-        let id = self.connection.query_row(
-            "SELECT id FROM files WHERE folder_id = ?1 AND name = ?2",
-            (file.folder_id, &file.name),
-            |row| row.get(0),
-        )?;
-        invalidate_stale_thumbnail_states_in_connection(
-            &self.connection,
-            CacheIdentity {
-                file_id: id,
-                root_id,
-                folder_id,
-                name: &name,
-                size,
-                mtime,
-                file_key: file_key.as_deref(),
-            },
-        )?;
-        Ok(id)
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let scan_generation = active_scan_generation_in_transaction(&transaction, root_id)?;
+        let file_id = upsert_file_in_transaction(&transaction, file, scan_generation)?;
+        transaction.commit()?;
+        Ok(file_id)
     }
 
     #[allow(dead_code)]
@@ -1422,7 +1689,16 @@ impl Database {
         &mut self,
         batch: ScanWriteBatch,
     ) -> anyhow::Result<ScanWriteBatchResult> {
-        let transaction = self.connection.transaction()?;
+        // Use BEGIN IMMEDIATE rather than the default DEFERRED transaction
+        // so the SQLite busy handler is engaged on transaction start. With
+        // multiple writer connections (API, scan worker, watcher) on the
+        // same WAL file, an in-flight DEFERRED transaction that later
+        // escalates to a write can return SQLITE_BUSY without honoring
+        // `busy_timeout`. Acquiring the write lock up front lets the busy
+        // handler retry transparently and prevents transient "database is
+        // locked" failures.
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let root_ids = scan_batch_root_ids(&batch);
         for root_id in root_ids {
             ensure_root_enabled_in_transaction(&transaction, root_id)?;
@@ -1430,12 +1706,18 @@ impl Database {
         let mut folder_ids = Vec::with_capacity(batch.folders.len());
         let mut file_ids = Vec::with_capacity(batch.files.len());
 
+        let scan_generation = batch.scan_generation;
+
         for folder in batch.folders {
-            folder_ids.push(upsert_folder_in_transaction(&transaction, folder)?);
+            folder_ids.push(upsert_folder_in_transaction(
+                &transaction,
+                folder,
+                scan_generation,
+            )?);
         }
 
         for file in batch.files {
-            let file_id = upsert_file_in_transaction(&transaction, file.file)?;
+            let file_id = upsert_file_in_transaction(&transaction, file.file, scan_generation)?;
             upsert_media_kind_in_transaction(&transaction, file_id, &file.media_kind)?;
             file_ids.push(file_id);
         }
@@ -1453,7 +1735,11 @@ impl Database {
         task_id: i64,
         attempt_generation: i64,
     ) -> anyhow::Result<ScanWriteBatchResult> {
-        let transaction = self.connection.transaction()?;
+        // Use BEGIN IMMEDIATE rather than the default DEFERRED transaction
+        // so the SQLite busy handler is engaged on transaction start; see
+        // `commit_scan_batch` for the full rationale.
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         ensure_task_attempt_running_in_transaction(&transaction, task_id, attempt_generation)?;
         let root_ids = scan_batch_root_ids(&batch);
         for root_id in root_ids {
@@ -1462,12 +1748,18 @@ impl Database {
         let mut folder_ids = Vec::with_capacity(batch.folders.len());
         let mut file_ids = Vec::with_capacity(batch.files.len());
 
+        let scan_generation = batch.scan_generation;
+
         for folder in batch.folders {
-            folder_ids.push(upsert_folder_in_transaction(&transaction, folder)?);
+            folder_ids.push(upsert_folder_in_transaction(
+                &transaction,
+                folder,
+                scan_generation,
+            )?);
         }
 
         for file in batch.files {
-            let file_id = upsert_file_in_transaction(&transaction, file.file)?;
+            let file_id = upsert_file_in_transaction(&transaction, file.file, scan_generation)?;
             upsert_media_kind_in_transaction(&transaction, file_id, &file.media_kind)?;
             file_ids.push(file_id);
         }
@@ -1657,6 +1949,7 @@ impl Database {
 fn upsert_folder_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     folder: FolderUpsert,
+    scan_generation: Option<i64>,
 ) -> anyhow::Result<i64> {
     if let Some(existing_id) =
         find_folder_id_in_transaction(transaction, folder.root_id, folder.parent_id, &folder.name)?
@@ -1664,18 +1957,23 @@ fn upsert_folder_in_transaction(
         transaction.execute(
             r#"
             UPDATE folders
-            SET path_hash = ?1, mtime = ?2, status = 'active'
-            WHERE id = ?3
+            SET path_hash = ?1, mtime = ?2, status = 'active', scan_seen_at = ?3
+            WHERE id = ?4
             "#,
-            (&folder.path_hash, folder.mtime, existing_id),
+            (
+                &folder.path_hash,
+                folder.mtime,
+                scan_generation,
+                existing_id,
+            ),
         )?;
         return Ok(existing_id);
     }
 
     transaction.execute(
         r#"
-        INSERT INTO folders(root_id, parent_id, name, path_hash, mtime, status)
-        VALUES (?1, ?2, ?3, ?4, ?5, 'active')
+        INSERT INTO folders(root_id, parent_id, name, path_hash, mtime, status, scan_seen_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6)
         "#,
         (
             folder.root_id,
@@ -1683,6 +1981,7 @@ fn upsert_folder_in_transaction(
             &folder.name,
             &folder.path_hash,
             folder.mtime,
+            scan_generation,
         ),
     )?;
     Ok(transaction.last_insert_rowid())
@@ -1718,6 +2017,46 @@ fn ensure_root_enabled_in_transaction(
     Err(anyhow::anyhow!("root is disabled: {root_id}"))
 }
 
+fn active_scan_generation_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    root_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    let generation = transaction.query_row(
+        "SELECT active_scan_generation FROM roots WHERE id = ?1",
+        [root_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )?;
+    Ok(generation)
+}
+
+fn next_root_scan_generation_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    root_id: i64,
+) -> anyhow::Result<i64> {
+    let max_existing: Option<i64> = transaction.query_row(
+        r#"
+        SELECT MAX(value)
+        FROM (
+          SELECT active_scan_generation AS value
+          FROM roots
+          WHERE id = ?1 AND active_scan_generation IS NOT NULL
+          UNION ALL
+          SELECT scan_seen_at AS value
+          FROM folders
+          WHERE root_id = ?1 AND scan_seen_at IS NOT NULL
+          UNION ALL
+          SELECT scan_seen_at AS value
+          FROM files
+          WHERE root_id = ?1 AND scan_seen_at IS NOT NULL
+        )
+        "#,
+        [root_id],
+        |row| row.get(0),
+    )?;
+    let next_after_existing = max_existing.unwrap_or(0) + 1;
+    Ok(unix_timestamp_millis().max(next_after_existing))
+}
+
 fn task_attempt_running_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     task_id: i64,
@@ -1737,6 +2076,20 @@ fn task_attempt_running_in_transaction(
     let status: String = row.get(0)?;
     let current_attempt: i64 = row.get(1)?;
     Ok(status == "running" && current_attempt == attempt_generation)
+}
+
+fn hash_path(path: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn metadata_time(metadata: Option<&std::fs::Metadata>) -> Option<i64> {
+    let metadata = metadata?;
+    let time = metadata.modified().ok()?;
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs() as i64)
 }
 
 fn ensure_task_attempt_running_in_transaction(
@@ -1786,6 +2139,7 @@ fn cancel_root_scan_tasks_in_transaction(
 fn upsert_file_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     file: FileUpsert,
+    scan_generation: Option<i64>,
 ) -> anyhow::Result<i64> {
     let root_id = file.root_id;
     let folder_id = file.folder_id;
@@ -1795,15 +2149,16 @@ fn upsert_file_in_transaction(
     let file_key = file.file_key.clone();
     transaction.execute(
         r#"
-        INSERT INTO files(root_id, folder_id, name, ext, size, mtime, ctime, file_key, status)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active')
+        INSERT INTO files(root_id, folder_id, name, ext, size, mtime, ctime, file_key, status, scan_seen_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9)
         ON CONFLICT(folder_id, name) DO UPDATE SET
           ext = excluded.ext,
           size = excluded.size,
           mtime = excluded.mtime,
           ctime = excluded.ctime,
           file_key = excluded.file_key,
-          status = 'active'
+          status = 'active',
+          scan_seen_at = excluded.scan_seen_at
         "#,
         (
             file.root_id,
@@ -1814,6 +2169,7 @@ fn upsert_file_in_transaction(
             file.mtime,
             file.ctime,
             &file.file_key,
+            scan_generation,
         ),
     )?;
     let id = transaction.query_row(
@@ -1860,18 +2216,6 @@ fn upsert_media_kind_in_transaction(
         (file_id, kind),
     )?;
     Ok(())
-}
-
-fn invalidate_stale_thumbnail_states_in_connection(
-    connection: &rusqlite::Connection,
-    identity: CacheIdentity<'_>,
-) -> anyhow::Result<()> {
-    invalidate_stale_thumbnail_states(
-        connection,
-        identity.file_id,
-        GRID_320_PROFILE,
-        &source_fingerprint_for(&identity, GRID_320_PROFILE),
-    )
 }
 
 fn invalidate_stale_thumbnail_states_in_transaction(
@@ -2552,6 +2896,13 @@ fn unix_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn unix_timestamp_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
 }
 
@@ -3921,6 +4272,7 @@ mod tests {
                     mtime: Some(10),
                 }],
                 files: Vec::new(),
+                scan_generation: None,
             })
             .expect("commit root folder");
 
@@ -3935,6 +4287,7 @@ mod tests {
                     mtime: Some(20),
                 }],
                 files: Vec::new(),
+                scan_generation: None,
             })
             .expect("commit child folder");
         let photos_folder_id = photos_result.folder_ids[0];
@@ -3969,6 +4322,7 @@ mod tests {
                         media_kind: "image".to_string(),
                     },
                 ],
+                scan_generation: None,
             })
             .expect("commit files");
         assert_eq!(second_result.file_ids.len(), 2);
@@ -3995,6 +4349,7 @@ mod tests {
                     },
                     media_kind: "image".to_string(),
                 }],
+                scan_generation: None,
             })
             .expect("upsert same rows");
 
@@ -4023,6 +4378,246 @@ mod tests {
         assert_eq!(file_count, 2);
         assert_eq!(media_count, 2);
         assert_eq!(updated_size, 300);
+    }
+
+    #[test]
+    fn incremental_upsert_during_active_scan_is_not_reconciled_missing() {
+        let mut database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+
+        let first_generation = database
+            .begin_root_scan_reconciliation(root_id)
+            .expect("begin first scan");
+        let root_result = database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: None,
+                    name: String::new(),
+                    path_hash: "root-hash".to_string(),
+                    mtime: Some(10),
+                }],
+                files: Vec::new(),
+                scan_generation: Some(first_generation),
+            })
+            .expect("commit first root folder");
+        let root_folder_id = root_result.folder_ids[0];
+        database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: Vec::new(),
+                files: vec![ScanFileUpsert {
+                    file: FileUpsert {
+                        root_id,
+                        folder_id: root_folder_id,
+                        name: "deleted.jpg".to_string(),
+                        ext: ".jpg".to_string(),
+                        size: 10,
+                        mtime: 10,
+                        ctime: None,
+                        file_key: None,
+                    },
+                    media_kind: "image".to_string(),
+                }],
+                scan_generation: Some(first_generation),
+            })
+            .expect("commit old media");
+        database
+            .reconcile_root_scan_completion(root_id, first_generation)
+            .expect("complete first scan");
+
+        let second_generation = database
+            .begin_root_scan_reconciliation(root_id)
+            .expect("begin second scan");
+        database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: None,
+                    name: String::new(),
+                    path_hash: "root-hash".to_string(),
+                    mtime: Some(20),
+                }],
+                files: Vec::new(),
+                scan_generation: Some(second_generation),
+            })
+            .expect("commit second root folder");
+
+        let concurrent_file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id: root_folder_id,
+                name: "concurrent.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 20,
+                mtime: 20,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("watcher-style upsert during active scan");
+        database
+            .upsert_media_kind(concurrent_file_id, "image")
+            .expect("watcher-style media upsert");
+
+        database
+            .reconcile_root_scan_completion(root_id, second_generation)
+            .expect("complete second scan");
+        let page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert_eq!(media_names(&page.items), vec!["concurrent.jpg"]);
+    }
+
+    #[test]
+    fn stale_task_attempt_cannot_reconcile_root_scan_completion() {
+        // Regression for Blocker 2: when a guarded scan finishes after its
+        // task attempt has been superseded (cancel + retry), reconciliation
+        // must NOT run. It must not mark rows missing for the new generation
+        // and must not clear the new attempt's `active_scan_generation`.
+        let mut database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+
+        // Seed an initial scan so we have rows to potentially clobber.
+        let seed_generation = database
+            .begin_root_scan_reconciliation(root_id)
+            .expect("begin seed scan");
+        let root_folder_id = database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id,
+                    parent_id: None,
+                    name: String::new(),
+                    path_hash: "root-hash".to_string(),
+                    mtime: Some(10),
+                }],
+                files: Vec::new(),
+                scan_generation: Some(seed_generation),
+            })
+            .expect("commit root folder")
+            .folder_ids[0];
+        database
+            .commit_scan_batch(ScanWriteBatch {
+                folders: Vec::new(),
+                files: vec![ScanFileUpsert {
+                    file: FileUpsert {
+                        root_id,
+                        folder_id: root_folder_id,
+                        name: "keep.jpg".to_string(),
+                        ext: ".jpg".to_string(),
+                        size: 10,
+                        mtime: 10,
+                        ctime: None,
+                        file_key: None,
+                    },
+                    media_kind: "image".to_string(),
+                }],
+                scan_generation: Some(seed_generation),
+            })
+            .expect("commit seed file");
+        database
+            .reconcile_root_scan_completion(root_id, seed_generation)
+            .expect("finish seed scan");
+
+        // Begin a guarded scan tied to a running task.
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+        let old_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        database
+            .mark_task_running_for_attempt(task_id, old_attempt)
+            .expect("mark old attempt running");
+        let stale_generation = database
+            .begin_root_scan_reconciliation(root_id)
+            .expect("begin stale scan");
+
+        // Supersede the task attempt mid-scan: cancel + retry bumps the
+        // attempt generation, so the in-flight scan is now stale.
+        database.cancel_task(task_id).expect("cancel task");
+        database.retry_task(task_id).expect("retry task");
+
+        // The guarded reconciliation must report not-current and must NOT
+        // clear `active_scan_generation` or mark seed rows missing.
+        let reconciled = database
+            .reconcile_root_scan_completion_for_task_attempt(
+                root_id,
+                stale_generation,
+                task_id,
+                old_attempt,
+            )
+            .expect("guarded reconciliation should not error on stale attempt");
+        assert!(
+            !reconciled,
+            "stale attempt must not reconcile after supersede"
+        );
+
+        // active_scan_generation must still be the stale generation; the
+        // stale attempt did not clear it.
+        let active_generation: Option<i64> = database
+            .connection
+            .query_row(
+                "SELECT active_scan_generation FROM roots WHERE id = ?1",
+                [root_id],
+                |row| row.get(0),
+            )
+            .expect("read active scan generation");
+        assert_eq!(active_generation, Some(stale_generation));
+
+        // Seed file must remain active (not marked missing by stale
+        // reconciliation against a generation that never wrote rows).
+        let keep_status: String = database
+            .connection
+            .query_row(
+                "SELECT status FROM files WHERE name = 'keep.jpg' AND root_id = ?1",
+                [root_id],
+                |row| row.get(0),
+            )
+            .expect("read keep.jpg status");
+        assert_eq!(keep_status, "active");
+
+        // The retried (current) attempt is still able to perform guarded
+        // reconciliation under its own generation.
+        let new_attempt = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists")
+            .attempt_generation;
+        assert!(new_attempt > old_attempt);
+        database
+            .mark_task_running_for_attempt(task_id, new_attempt)
+            .expect("mark new attempt running");
+        let new_generation = database
+            .begin_root_scan_reconciliation(root_id)
+            .expect("begin new attempt reconciliation");
+        assert!(new_generation >= stale_generation);
+        let reconciled_now = database
+            .reconcile_root_scan_completion_for_task_attempt(
+                root_id,
+                new_generation,
+                task_id,
+                new_attempt,
+            )
+            .expect("current attempt reconciliation");
+        assert!(reconciled_now);
     }
 
     #[test]
@@ -4057,6 +4652,7 @@ mod tests {
                     },
                     media_kind: "image".to_string(),
                 }],
+                scan_generation: None,
             })
             .expect_err("invalid folder id should rollback");
 
@@ -4094,6 +4690,7 @@ mod tests {
                     mtime: Some(10),
                 }],
                 files: Vec::new(),
+                scan_generation: None,
             })
             .expect_err("disabled root should reject scan batch");
         assert!(error.to_string().contains("disabled"));
@@ -5130,6 +5727,7 @@ mod tests {
                         mtime: Some(1),
                     }],
                     files: Vec::new(),
+                    scan_generation: None,
                 },
                 task_id,
                 old_attempt,

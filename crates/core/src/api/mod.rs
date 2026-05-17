@@ -9,6 +9,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::db::Database;
 use crate::tasks::{start_worker, TaskSender};
+use crate::watch::{start_watcher, WatcherHandle};
 
 pub mod routes;
 
@@ -20,6 +21,7 @@ pub const SESSION_HEADER: &str = "X-Megle-Session";
 pub struct AppState {
     pub database: Arc<Mutex<Database>>,
     pub task_queue: TaskSender,
+    _watcher: Option<Arc<WatcherHandle>>,
 }
 
 impl AppState {
@@ -33,15 +35,20 @@ impl AppState {
         Self {
             database: Arc::new(Mutex::new(database)),
             task_queue,
+            _watcher: None,
         }
     }
 
     pub fn new_with_worker(database: Database, worker_database: Database) -> Self {
+        let watcher_database = database.reopen().expect("reopen watcher database");
         let database = Arc::new(Mutex::new(database));
         let task_queue = start_worker(worker_database);
+        let watcher = watcher_database
+            .map(|watcher_database| Arc::new(start_watcher(watcher_database, task_queue.clone())));
         Self {
             database,
             task_queue,
+            _watcher: watcher,
         }
     }
 }

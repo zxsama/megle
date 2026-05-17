@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS roots (
   display_name TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
-  last_scan_at INTEGER
+  last_scan_at INTEGER,
+  active_scan_generation INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS folders (
   path_hash TEXT NOT NULL,
   mtime INTEGER,
   status TEXT NOT NULL DEFAULT 'active',
+  scan_seen_at INTEGER,
   UNIQUE(root_id, parent_id, name)
 );
 
@@ -38,6 +40,7 @@ CREATE TABLE IF NOT EXISTS files (
   ctime INTEGER,
   file_key TEXT,
   status TEXT NOT NULL DEFAULT 'active',
+  scan_seen_at INTEGER,
   UNIQUE(folder_id, name)
 );
 

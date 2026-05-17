@@ -38,6 +38,7 @@ export interface LibraryState {
   rescanningRootIds: Set<number>;
   scanActive: boolean;
   tasks: TaskRecord[];
+  busyTaskIds: Set<number>;
   error: string | null;
   lastScan: ScanSummary | null;
   setSelectedRootId: (rootId: number) => void;
@@ -48,6 +49,9 @@ export interface LibraryState {
   loadMoreFolderChildren: (folderId: number) => Promise<void>;
   loadMoreMedia: () => Promise<void>;
   rescanRoot: (rootId: number) => Promise<void>;
+  cancelTask: (taskId: number) => Promise<void>;
+  retryTask: (taskId: number) => Promise<void>;
+  refreshTasks: () => Promise<void>;
   refresh: () => Promise<void>;
   addRoot: (path: string) => Promise<void>;
 }
@@ -83,6 +87,7 @@ export function useLibraryData(): LibraryState {
   const [addingRoot, setAddingRoot] = useState(false);
   const [rescanningRootIds, setRescanningRootIds] = useState<Set<number>>(() => new Set());
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [busyTaskIds, setBusyTaskIds] = useState<Set<number>>(() => new Set());
   const [taskPollFailures, setTaskPollFailures] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<ScanSummary | null>(null);
@@ -303,27 +308,41 @@ export function useLibraryData(): LibraryState {
     requestThumbnailStates([selectedMediaId]);
   }, [requestThumbnailStates, selectedMediaId]);
 
+  const previousTaskStatusRef = useRef<Map<number, TaskRecord["status"]>>(new Map());
+  useEffect(() => {
+    const previous = previousTaskStatusRef.current;
+    let scanCompleted = false;
+    for (const task of tasks) {
+      const prior = previous.get(task.id);
+      if (
+        prior &&
+        prior !== task.status &&
+        task.status === "succeeded" &&
+        (task.kind === "root_scan" || task.kind === "thumbnail")
+      ) {
+        scanCompleted = true;
+        break;
+      }
+    }
+    previousTaskStatusRef.current = new Map(tasks.map((task) => [task.id, task.status]));
+    if (scanCompleted) {
+      void loadLibrary();
+    }
+  }, [tasks, loadLibrary]);
+
   useEffect(() => {
     if (!scanActive || taskPollFailures >= 3) {
       return;
     }
 
     const timer = window.setInterval(() => {
-      void loadTasks()
-        .then((nextTasks) => {
-          if (
-            !nextTasks.some((task) => task.status === "pending" || task.status === "running")
-          ) {
-            void loadLibrary();
-          }
-        })
-        .catch((cause) => {
-          setTaskPollFailures((failures) => failures + 1);
-          setError(errorMessage(cause));
-        });
+      void loadTasks().catch((cause) => {
+        setTaskPollFailures((failures) => failures + 1);
+        setError(errorMessage(cause));
+      });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [loadLibrary, loadTasks, scanActive, taskPollFailures]);
+  }, [loadTasks, scanActive, taskPollFailures]);
 
   const refresh = useCallback(async () => {
     await loadLibrary();
@@ -424,6 +443,58 @@ export function useLibraryData(): LibraryState {
     [client, loadTasks]
   );
 
+  const markTaskBusy = useCallback((taskId: number, busy: boolean) => {
+    setBusyTaskIds((current) => {
+      const next = new Set(current);
+      if (busy) {
+        next.add(taskId);
+      } else {
+        next.delete(taskId);
+      }
+      return next;
+    });
+  }, []);
+
+  const cancelTask = useCallback(
+    async (taskId: number) => {
+      markTaskBusy(taskId, true);
+      setError(null);
+      try {
+        await client.cancelTask(taskId);
+        await loadTasks();
+      } catch (cause) {
+        setError(errorMessage(cause));
+      } finally {
+        markTaskBusy(taskId, false);
+      }
+    },
+    [client, loadTasks, markTaskBusy]
+  );
+
+  const retryTask = useCallback(
+    async (taskId: number) => {
+      markTaskBusy(taskId, true);
+      setError(null);
+      try {
+        await client.retryTask(taskId);
+        await loadTasks();
+      } catch (cause) {
+        setError(errorMessage(cause));
+      } finally {
+        markTaskBusy(taskId, false);
+      }
+    },
+    [client, loadTasks, markTaskBusy]
+  );
+
+  const refreshTasks = useCallback(async () => {
+    try {
+      await loadTasks();
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }, [loadTasks]);
+
   return {
     roots,
     folders,
@@ -445,6 +516,7 @@ export function useLibraryData(): LibraryState {
     rescanningRootIds,
     scanActive,
     tasks,
+    busyTaskIds,
     error,
     lastScan,
     setSelectedRootId: (rootId: number) => {
@@ -480,6 +552,9 @@ export function useLibraryData(): LibraryState {
     loadMoreFolderChildren,
     loadMoreMedia,
     rescanRoot,
+    cancelTask,
+    retryTask,
+    refreshTasks,
     refresh,
     addRoot
   };

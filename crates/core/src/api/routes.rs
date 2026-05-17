@@ -803,6 +803,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            _watcher: None,
         };
         let app = router(state.clone());
 
@@ -843,6 +844,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            _watcher: None,
         };
         let app = router(state.clone());
 
@@ -1134,6 +1136,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            _watcher: None,
         };
         let app = router(state);
 
@@ -1623,6 +1626,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: _sender,
+            _watcher: None,
         };
         let app = router(state.clone());
 
@@ -1662,6 +1666,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: _sender,
+            _watcher: None,
         };
         let app = router(state.clone());
 
@@ -1706,6 +1711,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            _watcher: None,
         };
         let app = router(state.clone());
 

@@ -13,3 +13,5 @@ pub const TASK_STATUS_CONTRACT_MIGRATION: &str =
 #[allow(dead_code)]
 pub const TASK_ATTEMPT_GENERATION_MIGRATION: &str =
     include_str!("../../migrations/0008_task_attempt_generation.sql");
+pub const SCAN_RECONCILIATION_MIGRATION: &str =
+    include_str!("../../migrations/0009_scan_reconciliation.sql");

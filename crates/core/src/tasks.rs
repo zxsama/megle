@@ -26,6 +26,10 @@ pub fn start_worker(worker_database: Database) -> TaskSender {
     worker_database
         .reset_running_thumbnail_tasks_for_recovery()
         .expect("reset running thumbnail tasks for startup recovery");
+    // Take the startup pending-task snapshot synchronously, before spawning
+    // the worker task. This avoids a race where a freshly-enqueued task is
+    // both delivered through the channel and picked up by the in-spawn
+    // recovery drain.
     let recovery_task_ids = worker_database
         .list_pending_root_scan_task_ids()
         .expect("list pending root_scan tasks for startup recovery");
@@ -43,9 +47,43 @@ pub fn start_worker(worker_database: Database) -> TaskSender {
         }
         while let Some(task_id) = receiver.recv().await {
             run_task(&mut worker_database, task_id);
+            // Persisted pending tasks (e.g. ones the watcher created when
+            // the channel was full or closed) would otherwise wait forever
+            // for a queue message that never arrives. Drain them in
+            // scheduler order before going back to `recv().await`. The
+            // just-completed task is no longer in the pending list, so
+            // this does not double-process the channel-delivered task.
+            drain_pending_persisted_tasks(&mut worker_database);
         }
     });
     sender
+}
+
+/// Run any pending root_scan and thumbnail tasks persisted in the database
+/// that haven't already been observed via the in-memory channel. This covers
+/// the case where the watcher persisted a pending task but `try_send` failed
+/// (channel full or closed).
+fn drain_pending_persisted_tasks(database: &mut Database) {
+    let pending_root_scan_ids = match database.list_pending_root_scan_task_ids() {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(%error, "failed to list pending root_scan tasks for drain");
+            return;
+        }
+    };
+    for task_id in pending_root_scan_ids {
+        run_task(database, task_id);
+    }
+    let pending_thumbnail_ids = match database.list_pending_thumbnail_task_ids() {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(%error, "failed to list pending thumbnail tasks for drain");
+            return;
+        }
+    };
+    for task_id in pending_thumbnail_ids {
+        run_task(database, task_id);
+    }
 }
 
 fn run_task(database: &mut Database, task_id: i64) {
@@ -117,10 +155,12 @@ fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Resu
         return Ok(());
     }
     if task.status != "pending" {
-        return Err(anyhow::anyhow!(
-            "task {task_id} is not pending; current status is {}",
-            task.status
-        ));
+        // Another worker path (channel send vs scheduler drain) already
+        // moved this task out of `pending`. Skipping silently here is safe:
+        // whichever path actually claimed the task is responsible for its
+        // terminal status, and reporting "not pending" as a failure here
+        // would clobber that path's outcome.
+        return Ok(());
     }
     let attempt_generation = task.attempt_generation;
     match task.kind.as_str() {
@@ -859,6 +899,76 @@ mod tests {
         assert_eq!(thumbnail.error, None);
 
         fs::remove_dir_all(temp_root).expect("cleanup media root");
+    }
+
+    #[test]
+    fn worker_drain_picks_up_persisted_pending_root_scan_task_after_send_failed() {
+        // Regression for Blocker 3: when the watcher persists a pending
+        // root_scan task but the in-memory channel is Full or Closed, the
+        // task must not be stranded. The worker drains pending persisted
+        // tasks in scheduler order, so the next drain tick picks it up and
+        // runs it.
+        let temp_root = unique_temp_dir("root");
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        fs::write(temp_root.join("seed.jpg"), b"seed").expect("seed image");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().to_string(),
+                display_name: "drain-test".to_string(),
+            })
+            .expect("add root");
+
+        // Simulate the watcher persisting a pending root_scan task while
+        // its `try_send` to the worker channel fails (channel is full or
+        // closed). We model that by creating the bounded channel,
+        // exhausting it with a sentinel id, and persisting the task in DB
+        // without delivering it to the channel.
+        let (sender, mut receiver) = mpsc::channel::<i64>(1);
+        sender
+            .try_send(987654)
+            .expect("fill channel with sentinel id");
+        let task_id = database
+            .create_root_scan_task(root_id)
+            .expect("persist pending root scan task");
+        // The watcher would call `task_queue.try_send(task_id)` here — and
+        // it would fail because the channel is full. The task remains in
+        // DB as pending.
+        assert!(sender.try_send(task_id).is_err());
+
+        // Sanity: the task is in the persisted pending list.
+        let pending = database
+            .list_pending_root_scan_task_ids()
+            .expect("list pending root scans");
+        assert_eq!(pending, vec![task_id]);
+
+        // Drop the channel so the worker can never receive task_id from it.
+        drop(sender);
+        // Drain the sentinel from the receiver to mirror the worker's
+        // channel-fed behavior, but task_id was never sent.
+        assert_eq!(receiver.try_recv().expect("sentinel id"), 987654);
+
+        // Run the drain helper: it must pick up the persisted pending task
+        // and execute it, producing a terminal task status.
+        drain_pending_persisted_tasks(&mut database);
+
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert!(
+            matches!(task.status.as_str(), "succeeded" | "failed"),
+            "drained task should reach a terminal state, got {}",
+            task.status
+        );
+        assert!(database
+            .list_pending_root_scan_task_ids()
+            .expect("list pending root scans after drain")
+            .is_empty());
+
+        fs::remove_dir_all(&temp_root).expect("cleanup temp root");
     }
 
     fn seed_media_file(database: &Database, root_path: &Path, name: &str) -> i64 {

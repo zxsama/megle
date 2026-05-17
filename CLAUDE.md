@@ -1,0 +1,154 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Megle is a Windows-first local media browser that indexes existing folders without importing originals. It is contract-first: every cross-process boundary (HTTP API, plugin manifest, SQLite schema) is defined before implementation so the Electron shell, React UI, Rust Core, and tests stay aligned.
+
+The stack: Electron desktop shell, React + TypeScript + Vite UI, Rust + Axum Core service, SQLite WAL (with planned FTS5).
+
+## Common Commands
+
+Run from the repo root.
+
+```text
+npm test                  # full verification: structure, contracts, schema, typecheck, rust
+npm run dev               # vite dev server + build desktop + spawn electron (dev harness)
+npm run check:structure   # required dirs/files, package scripts, openapi paths, plugin caps
+npm run check:core-api    # validates contracts/core-api/openapi.yaml shape
+npm run check:core-client # @megle/core-client contract-vs-types check + typecheck
+npm run check:desktop     # desktop adapter check + typecheck
+npm run check:web         # web client check + typecheck
+npm run check:schema      # python: applies migrations to a temp sqlite, verifies tables/indexes
+npm run check:rust        # cargo fmt --check + cargo test --workspace (skips if cargo missing)
+```
+
+Workspace-scoped commands:
+
+```text
+npm --workspace @megle/web run build|dev|typecheck|preview
+npm --workspace @megle/desktop run build|typecheck
+npm --workspace @megle/core-client run check|typecheck
+cargo test -p megle-core <test_name>     # run a single Rust test
+cargo run  -p megle-core                 # requires MEGLE_SESSION_TOKEN env var
+```
+
+`check:schema` requires Python 3. `check:rust` falls back to `~/.cargo/bin` if cargo is not on PATH and prints `SKIP` rather than failing when the toolchain is unavailable.
+
+## High-Level Architecture
+
+Three processes, one contract:
+
+```text
+Electron main (apps/desktop)
+  spawns megle-core.exe via cargo run, holds session token + bind addr
+  opens BrowserWindow pointing at the vite dev server or built bundle
+    |
+React UI (apps/web)
+  uses @megle/core-client over HTTP only; never touches the filesystem
+    |
+Rust Core (crates/core)
+  axum router + sqlite + scan/thumbnails/fsops/plugins/watch modules
+```
+
+The desktop shell (`apps/desktop/src/main.ts`, `core-process.ts`, `core-session.ts`) generates a session token, allocates a bind address, sets `MEGLE_SESSION_TOKEN` / `MEGLE_CORE_ADDR` / `MEGLE_DB_PATH` / `MEGLE_ALLOWED_ORIGIN`, then spawns Core. `tools/dev/run-dev.mjs` is the dev orchestrator: it starts Vite (forced to `127.0.0.1:5173 --strictPort`), builds the desktop TS, then launches Electron against `apps/desktop/dist/main.js`.
+
+### Security Boundary
+
+- All Core API requests carry `X-Megle-Session: <token>`. Desktop owns the token lifecycle and passes it to both Core (env var) and the renderer (preload bridge).
+- Dev CORS is opt-in through `MEGLE_ALLOWED_ORIGIN` and must remain **exact origin only**. Do not introduce wildcard origins or disable Electron web security.
+- Electron picks a dynamic loopback port before spawning Core. Explicit `MEGLE_CORE_ADDR` / `MEGLE_CORE_URL` overrides are honored but must agree on host/port. Local URL bind derivation supports `localhost` normalization and IP literals only — arbitrary hostnames are rejected.
+- `MEGLE_CORE_EXTERNAL=1` runs against an externally launched Core; in that mode `MEGLE_CORE_URL` and `MEGLE_SESSION_TOKEN` must both be set explicitly. Desktop will not generate a token for external Core mode.
+- Token is currently exposed to renderer; future hardening will proxy Core requests through preload/main. Don't design new code around direct renderer-to-Core.
+
+### Contract-First Boundaries
+
+- `contracts/core-api/openapi.yaml` is the single source of truth for HTTP endpoints, DTO names, and status codes. UI, Core, and tests all flow from it.
+- `packages/core-client` (`@megle/core-client`) holds a hand-maintained `generated-contract.ts` aligned to the OpenAPI by `scripts/check-contract.mjs`. Treat it as a generator placeholder: edit when the contract changes, never the other way around.
+- `contracts/plugins/manifest.schema.json` defines plugin manifest fields and capabilities (`decoder`, `metadata`, `action`, `import-provider`).
+- SQLite schema lives in `crates/core/migrations/NNNN_*.sql`. Every new table or hot-path index needs a numbered migration and matching assertions in `tools/checks/validate_sqlite_schema.py`.
+
+When adding an API path, plugin capability, table, or index, update the contract and the corresponding check before wiring code.
+
+### Rust Core Layout (Phase 1)
+
+`crates/core/src` keeps `api`, `db`, `roots`, `scan`, `thumbnails`, `fsops`, `plugins`, `watch`, and `tasks` as **modules inside one crate**. Do not pre-split them into separate workspace crates — `validate-structure.mjs` actively rejects `crates/indexer` and `crates/thumbnails`. Crate-splitting comes only after module boundaries stabilize.
+
+`main.rs` reads `MEGLE_DB_PATH`, `MEGLE_CORE_ADDR`, `MEGLE_SESSION_TOKEN` (required), and `MEGLE_ALLOWED_ORIGIN`, opens the database, applies migrations, and serves `api::router_with_config` on the bind address.
+
+### Web UI Layout
+
+`apps/web/src` is split into `app/` (App shell), `core/` (HTTP client, types, query hooks), `design/` (tokens), and `features/` (`library`, `media-grid`, `preview`, `tasks`). The UI talks to Core via `@megle/core-client`; it must not import Node filesystem APIs or call raw `fetch`. Stack: TanStack Query for server state, TanStack Virtual for the grid, Zustand for UI state.
+
+`apps/web/src/core/client.ts` and `types.ts` are thin runtime config + re-export wrappers over `@megle/core-client`. UI code consumes hooks (`useLibraryData`) or the wrapped client — it must not declare duplicate Core DTOs, call raw `fetch`, or read `thumbnailCacheKey` directly. Web boundary checks (`check:web`) currently use lightweight source regexes; if they start producing false positives or negatives, escalate to AST parsing rather than weakening the rules.
+
+### Approved UI Direction
+
+UI must follow `docs/superpowers/specs/2026-05-16-megle-ui-liquid-glass-design.md`: Eagle-like information architecture, frameless Electron chrome, layered liquid glass design system, dense dark content stage. One design language across all screens, menus, dialogs, inspectors, settings, plugins, and task views. Liquid glass lives on chrome and control layers only — the media grid, preview canvas, and other heavy content surfaces stay dark and stable. Implementation stack: Radix UI primitives + Tailwind CSS + Lucide. Don't grow `apps/web/src/styles.css` into the permanent design system; introduce shared `design-tokens` and `ui` package boundaries instead. First implementation milestone is a reusable app shell covering Library, Settings, Plugins, and Tasks before per-feature polish.
+
+### Data Model Highlights
+
+The schema separates `roots` / `folders` / `files` / `media` / `user_metadata` / `tags` / `file_tags` / `thumbs` / `file_operations` so multi-million-file libraries do not duplicate full paths in one wide table. Queries must use keyset pagination, never large offsets. See `docs/architecture.md` for the full table list and required indexes.
+
+### Thumbnail and Preview Rules
+
+- Thumbnail profiles: `tiny` (96px), `grid` (320 short side), `retina` (640, post-MVP), `preview` (1600).
+- Originals smaller than 320px short side record `skipped_small` and the UI uses the original directly, except for non-displayable formats (RAW/PSD/HEIC) which still need WebP.
+- All generated thumbnails (including video posters) are WebP.
+- Preview switching never blocks the UI on original decoding: show cached preview first, prefetch neighbors, decode on a background queue with interactive preemption.
+
+### File Operations
+
+Megle maps real directories, so file ops are real:
+- Default delete goes to the Windows recycle bin; permanent delete needs a second confirmation.
+- Same-volume moves use rename; cross-volume uses copy+verify+delete.
+- Every operation writes a row to `file_operations` for tracking.
+
+## Anti-Patterns to Avoid
+
+These are enforced by checks or called out in `docs/project-structure.md`:
+
+- A separate `server/` product for Web/Docker — Web/Docker must reuse the same Core and `apps/web`.
+- Electron-only feature modules that bypass the Core HTTP API.
+- UI code importing `node:fs` or similar to access media.
+- DTOs duplicated between desktop, web, and Core instead of flowing from the OpenAPI contract.
+- SQLite schema changes without a migration + schema-check update.
+- Long-running scan, decode, or file ops on the Electron main or renderer thread.
+- Loading full result sets into the frontend; one unsegmented scroll container for large grids.
+- Generated thumbnails or DB sidecars written inside user media folders.
+- Pre-splitting `crates/media`, `crates/indexer`, `crates/thumbnails`, `crates/fsops`, `crates/plugins` before the `crates/core` modules stabilize.
+- Committing benchmark output: `bench-results/`, `tools/bench/*/results/`, generated `node_modules` under `tools/bench/*` are ignored and rejected by structural checks.
+
+## Docs to Read for Bigger Changes
+
+- `docs/architecture.md` — full process model, data model, indexing, thumbnail, and file-op rules.
+- `docs/project-structure.md` — directory ownership and what not to create yet.
+- `docs/testing-strategy.md` — current test layers and the gates required before feature work.
+- `docs/final-solution.md` — locked product rules (Windows first, no managed library, recycle-bin default, plugin-ready).
+- `docs/superpowers/specs/2026-05-16-megle-ui-liquid-glass-design.md` — approved UI design spec.
+- `docs/superpowers/plans/2026-05-16-megle-ui-foundation.md` — UI foundation implementation plan.
+- `docs/superpowers/plans/2026-05-16-megle-complete-product-plan.md` — master execution order spanning UI foundation through release hardening.
+
+## Current Implementation State (carried forward from Codex memory)
+
+Phase 1 skeleton with several routes already wired. When extending, build on what exists rather than rewriting:
+
+- `POST /api/roots` persists a `root_scan` task, enqueues it on the in-process Core background worker, and returns `202 { accepted, taskId, rootId, scan: null }`. The scan worker uses a separate SQLite connection so traversal does not hold the API route's `Arc<Mutex<Database>>`.
+- `GET /api/roots` returns rows including `rootFolderId` and `lastScanAt`.
+- `GET /api/folders/{folderId}/children` and `GET /api/media/{fileId}` return typed records and 404 on missing IDs (not placeholder 200s).
+- `GET /api/tasks` returns persisted task rows; `POST /api/tasks/scan` queues another root scan for an existing root.
+- Worker startup performs durable recovery: stale `running` root scans reset to `pending`, pending scans run in scheduler order, failed/succeeded tasks do not auto-retry. Enqueue send failure marks the created task `failed` before returning the API error.
+- Rust tests cover route display-name fallback, root upsert/listing, DB-backed media page/thumbnail state, scanning a temp root with image/video files (skipping non-media), token auth (missing/wrong/correct), and exact dev CORS preflight.
+- `npm test` currently passes end-to-end including `cargo fmt --all --check` and `cargo test --workspace`.
+- `npm audit` reports one high-severity issue. **Do not** run `npm audit fix --force` without reviewing package impact.
+
+Remaining scan work explicitly deferred: transactional scan batching, chunked commits, worker shutdown, progress counters, cancellation/retry semantics, clearer rescan failure/staleness behavior. The Phase 1 dynamic-port probe still has a small probe-and-close bind race before Core starts. Desktop dev still uses `cargo run -p megle-core`; a packaged Core sidecar replaces this for production.
+
+## Next Execution Order
+
+1. Execute the integrated complete-product plan at `docs/superpowers/plans/2026-05-16-megle-complete-product-plan.md`, starting with the UI foundation track.
+2. After UI foundation, write and execute the Phase 2 real-directory-browsing child plan.
+3. Harden scanning with transactional batching, recovery, progress, and failure semantics.
+4. Add a smoke path for `npm run dev` once GUI launch behavior is ready to verify manually.
+5. Harden the Desktop/Web security boundary by proxying Core requests through preload/main instead of exposing the token to the renderer.
