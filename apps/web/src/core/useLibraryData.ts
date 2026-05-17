@@ -751,7 +751,9 @@ export function useLibraryData(): LibraryState {
 
   const updateMetadata = useCallback(
     async (fileId: number, patch: UserMetadataUpdate) => {
-      const previous = selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata : null;
+      const previousMetadata =
+        selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata : null;
+      const previousMediaRow = media.find((item) => item.id === fileId) ?? null;
       reflectMetadataLocally(fileId, patch);
       setMetadataSaving(true);
       try {
@@ -760,13 +762,22 @@ export function useLibraryData(): LibraryState {
           current && current.fileId === fileId ? record : current
         );
       } catch (cause) {
-        if (previous) setSelectedMetadata(previous);
+        if (previousMetadata) {
+          setSelectedMetadata((current) =>
+            current && current.fileId === fileId ? previousMetadata : current
+          );
+        }
+        if (previousMediaRow) {
+          setMedia((current) =>
+            current.map((item) => (item.id === fileId ? previousMediaRow : item))
+          );
+        }
         setError(errorMessage(cause));
       } finally {
         setMetadataSaving(false);
       }
     },
-    [client, reflectMetadataLocally, selectedMetadata]
+    [client, media, reflectMetadataLocally, selectedMetadata]
   );
 
   const reflectFileTagsLocally = useCallback((fileId: number, tagIds: number[]) => {
@@ -778,10 +789,23 @@ export function useLibraryData(): LibraryState {
     );
   }, []);
 
+  const capturePreviousTagIds = useCallback(
+    (fileId: number): number[] | null => {
+      if (selectedMetadata && selectedMetadata.fileId === fileId) {
+        return selectedMetadata.tagIds;
+      }
+      const mediaRow = media.find((item) => item.id === fileId);
+      if (mediaRow && mediaRow.tagIds) {
+        return [...mediaRow.tagIds];
+      }
+      return null;
+    },
+    [media, selectedMetadata]
+  );
+
   const setFileTags = useCallback(
     async (fileId: number, tagIds: number[]) => {
-      const previous =
-        selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata.tagIds : null;
+      const previous = capturePreviousTagIds(fileId);
       reflectFileTagsLocally(fileId, tagIds);
       try {
         const response = await client.setFileTags(fileId, { tagIds });
@@ -791,13 +815,12 @@ export function useLibraryData(): LibraryState {
         setError(errorMessage(cause));
       }
     },
-    [client, reflectFileTagsLocally, selectedMetadata]
+    [capturePreviousTagIds, client, reflectFileTagsLocally]
   );
 
   const addFileTag = useCallback(
     async (fileId: number, tagId: number) => {
-      const previous =
-        selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata.tagIds : null;
+      const previous = capturePreviousTagIds(fileId);
       const optimistic = previous && previous.includes(tagId) ? previous : [...(previous ?? []), tagId];
       reflectFileTagsLocally(fileId, optimistic);
       try {
@@ -808,13 +831,12 @@ export function useLibraryData(): LibraryState {
         setError(errorMessage(cause));
       }
     },
-    [client, reflectFileTagsLocally, selectedMetadata]
+    [capturePreviousTagIds, client, reflectFileTagsLocally]
   );
 
   const removeFileTag = useCallback(
     async (fileId: number, tagId: number) => {
-      const previous =
-        selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata.tagIds : null;
+      const previous = capturePreviousTagIds(fileId);
       const optimistic = (previous ?? []).filter((id) => id !== tagId);
       reflectFileTagsLocally(fileId, optimistic);
       try {
@@ -825,7 +847,7 @@ export function useLibraryData(): LibraryState {
         setError(errorMessage(cause));
       }
     },
-    [client, reflectFileTagsLocally, selectedMetadata]
+    [capturePreviousTagIds, client, reflectFileTagsLocally]
   );
 
   const createTag = useCallback(

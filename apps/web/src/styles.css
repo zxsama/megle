@@ -1095,6 +1095,12 @@ button:disabled {
   background: rgba(255, 255, 255, 0.06);
 }
 
+.sort-menu-item:focus-visible {
+  outline: none;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
 .sort-menu-item-active {
   background: rgba(255, 255, 255, 0.08);
 }
@@ -1388,6 +1394,11 @@ button:disabled {
 
 .inspector-tag-suggestion:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+
+.inspector-tag-suggestion-active {
+  background: rgba(99, 142, 255, 0.18);
+  color: #f4f7f9;
 }
 
 .inspector-note-stack {

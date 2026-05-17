@@ -16,6 +16,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -67,9 +68,17 @@ pub enum FsOpsErrorCode {
     InvalidRequest,
     NotFound,
     NameConflict,
-    CrossVolume,
+    /// Source and target paths belong to different roots. The historical
+    /// "cross_volume" name was misleading — two roots can sit on the same
+    /// physical volume — so we surface this as "cross_root" on the wire.
+    /// TODO: detect actual cross-volume moves (different drive letters /
+    /// different mount points) and add a separate `cross_volume` code if we
+    /// later add copy+verify+delete fallback.
+    CrossRoot,
     FsError,
     OutsideRoot,
+    /// Refused to follow a symlink during a permanent delete.
+    SymlinkRefused,
 }
 
 impl FsOpsErrorCode {
@@ -79,9 +88,10 @@ impl FsOpsErrorCode {
             FsOpsErrorCode::InvalidRequest => "invalid_request",
             FsOpsErrorCode::NotFound => "not_found",
             FsOpsErrorCode::NameConflict => "name_conflict",
-            FsOpsErrorCode::CrossVolume => "cross_volume",
+            FsOpsErrorCode::CrossRoot => "cross_root",
             FsOpsErrorCode::FsError => "fs_error",
             FsOpsErrorCode::OutsideRoot => "outside_root",
+            FsOpsErrorCode::SymlinkRefused => "symlink_refused",
         }
     }
 }
@@ -146,7 +156,10 @@ pub struct DeleteRequest {
 
 // -------------- public entry points -------------------------------------
 
-pub fn rename(database: &mut Database, request: RenameRequest) -> FsOpsResult<FileOperationRecord> {
+pub fn rename(
+    database: &Mutex<Database>,
+    request: RenameRequest,
+) -> FsOpsResult<FileOperationRecord> {
     let new_name = request.new_name.trim().to_string();
     validate_name(&new_name)?;
 
@@ -165,7 +178,7 @@ pub fn rename(database: &mut Database, request: RenameRequest) -> FsOpsResult<Fi
 }
 
 pub fn move_items(
-    database: &mut Database,
+    database: &Mutex<Database>,
     request: MoveRequest,
 ) -> FsOpsResult<Vec<FileOperationRecord>> {
     if request.file_ids.is_empty() && request.folder_ids.is_empty() {
@@ -175,13 +188,17 @@ pub fn move_items(
         ));
     }
 
-    let target = load_folder_path(&database.connection_for_fsops(), request.target_folder_id)?
-        .ok_or_else(|| {
-            FsOpsError::new(
-                FsOpsErrorCode::NotFound,
-                format!("target folder not found: {}", request.target_folder_id),
-            )
-        })?;
+    let target = {
+        let guard = database.lock().expect("database mutex poisoned");
+        load_folder_path(&guard.connection_for_fsops(), request.target_folder_id)?.ok_or_else(
+            || {
+                FsOpsError::new(
+                    FsOpsErrorCode::NotFound,
+                    format!("target folder not found: {}", request.target_folder_id),
+                )
+            },
+        )?
+    };
 
     let mut records = Vec::new();
 
@@ -202,7 +219,7 @@ pub fn move_items(
 }
 
 pub fn delete(
-    database: &mut Database,
+    database: &Mutex<Database>,
     request: DeleteRequest,
 ) -> FsOpsResult<Vec<FileOperationRecord>> {
     if request.file_ids.is_empty() && request.folder_ids.is_empty() {
@@ -224,7 +241,7 @@ pub fn delete(
 }
 
 pub fn list_recent(
-    database: &Database,
+    database: &Mutex<Database>,
     limit: i64,
     cursor: Option<&str>,
 ) -> FsOpsResult<Page<FileOperationRecord>> {
@@ -234,7 +251,11 @@ pub fn list_recent(
         None => None,
     };
 
-    let conn = database.connection_for_fsops();
+    // Brief lock just for the SELECT — no FS work is performed here, so
+    // the listing call is short, but we still scope the guard explicitly so
+    // the lock is released the moment the Vec is materialized.
+    let guard = database.lock().expect("database mutex poisoned");
+    let conn = guard.connection_for_fsops();
     let sql = format!(
         "SELECT id, operation, source_path, target_path, status, created_at, finished_at, error \
          FROM file_operations {} ORDER BY id DESC LIMIT {}",
@@ -255,6 +276,8 @@ pub fn list_recent(
     for row in rows {
         records.push(row?);
     }
+    drop(statement);
+    drop(guard);
     let next_cursor = if records.len() > limit as usize {
         records.pop();
         records.last().map(|record| record.id.to_string())
@@ -270,45 +293,66 @@ pub fn list_recent(
 // -------------- internal: rename ----------------------------------------
 
 fn rename_file(
-    database: &mut Database,
+    database: &Mutex<Database>,
     file_id: i64,
     new_name: &str,
 ) -> FsOpsResult<FileOperationRecord> {
-    let conn = database.connection_for_fsops_mut();
-    let info = match load_file_info(conn, file_id)? {
-        Some(info) => info,
-        None => {
-            return Err(FsOpsError::new(
-                FsOpsErrorCode::NotFound,
-                format!("file not found: {file_id}"),
-            ))
-        }
+    // Step 1: brief lock to snapshot what we need for the FS rename and to
+    // run the conflict check. We commit nothing here.
+    let (info, source_path_string, target_path, target_path_string, conflict_in_db) = {
+        let guard = database.lock().expect("database mutex poisoned");
+        let conn = guard.connection_for_fsops();
+        let info = match load_file_info(conn, file_id)? {
+            Some(info) => info,
+            None => {
+                return Err(FsOpsError::new(
+                    FsOpsErrorCode::NotFound,
+                    format!("file not found: {file_id}"),
+                ))
+            }
+        };
+        let target_path = info.parent_dir.join(new_name);
+        let source_path_string = info.path.to_string_lossy().to_string();
+        let target_path_string = target_path.to_string_lossy().to_string();
+        let conflict_in_db = file_exists_in_folder_conn(conn, info.folder_id, new_name)?;
+        (
+            info,
+            source_path_string,
+            target_path,
+            target_path_string,
+            conflict_in_db,
+        )
     };
-    let target_path = info.parent_dir.join(new_name);
-    let source_path_string = info.path.to_string_lossy().to_string();
-    let target_path_string = target_path.to_string_lossy().to_string();
 
     if info.name == new_name {
         // Nothing to do; record an idempotent succeeded row.
-        return write_succeeded(
-            conn,
+        return write_succeeded_locked(
+            database,
             FileOperationKind::Rename,
             &source_path_string,
             Some(&target_path_string),
-            |_tx| Ok(()),
         );
     }
 
-    if file_exists_in_folder_conn(conn, info.folder_id, new_name)? || target_path.exists() {
+    // The TOCTOU window between this check and `fs::rename` remains real on
+    // Unix because `fs::rename` overwrites silently. `reserve_target_for_rename`
+    // probes atomically on Unix (`O_CREATE_NEW`) before the actual rename.
+    if conflict_in_db || target_path.exists() {
         return Err(FsOpsError::new(
             FsOpsErrorCode::NameConflict,
             format!("a file named '{new_name}' already exists in this folder"),
         ));
     }
 
+    // Step 2: do the FS work with the lock released.
+    let fs_result = atomic_rename(&info.path, &target_path);
+
+    // Step 3: brief lock to commit DB changes and write the log row.
+    let mut guard = database.lock().expect("database mutex poisoned");
+    let conn = guard.connection_for_fsops_mut();
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
-    if let Err(error) = fs::rename(&info.path, &target_path) {
+    if let Err(error) = fs_result {
         record_failure(
             &transaction,
             FileOperationKind::Rename,
@@ -344,59 +388,77 @@ fn rename_file(
 }
 
 fn rename_folder(
-    database: &mut Database,
+    database: &Mutex<Database>,
     folder_id: i64,
     new_name: &str,
 ) -> FsOpsResult<FileOperationRecord> {
-    let conn = database.connection_for_fsops_mut();
-    let info = match load_folder_info(conn, folder_id)? {
-        Some(info) => info,
-        None => {
+    // Step 1: snapshot under brief lock.
+    let (info, parent_dir, target_path, source_path_string, target_path_string, conflict_in_db) = {
+        let guard = database.lock().expect("database mutex poisoned");
+        let conn = guard.connection_for_fsops();
+        let info = match load_folder_info(conn, folder_id)? {
+            Some(info) => info,
+            None => {
+                return Err(FsOpsError::new(
+                    FsOpsErrorCode::NotFound,
+                    format!("folder not found: {folder_id}"),
+                ))
+            }
+        };
+        if info.parent_id.is_none() {
             return Err(FsOpsError::new(
-                FsOpsErrorCode::NotFound,
-                format!("folder not found: {folder_id}"),
-            ))
+                FsOpsErrorCode::InvalidRequest,
+                "cannot rename a root folder",
+            ));
         }
+        let parent_dir = info
+            .path
+            .parent()
+            .ok_or_else(|| {
+                FsOpsError::new(FsOpsErrorCode::InvalidRequest, "folder has no parent path")
+            })?
+            .to_path_buf();
+        let target_path = parent_dir.join(new_name);
+        let source_path_string = info.path.to_string_lossy().to_string();
+        let target_path_string = target_path.to_string_lossy().to_string();
+        let conflict_in_db =
+            folder_name_exists_in_parent_conn(conn, info.parent_id, info.root_id, new_name)?;
+        (
+            info,
+            parent_dir,
+            target_path,
+            source_path_string,
+            target_path_string,
+            conflict_in_db,
+        )
     };
-    if info.parent_id.is_none() {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::InvalidRequest,
-            "cannot rename a root folder",
-        ));
-    }
-    let parent_dir = info
-        .path
-        .parent()
-        .ok_or_else(|| {
-            FsOpsError::new(FsOpsErrorCode::InvalidRequest, "folder has no parent path")
-        })?
-        .to_path_buf();
-    let target_path = parent_dir.join(new_name);
-    let source_path_string = info.path.to_string_lossy().to_string();
-    let target_path_string = target_path.to_string_lossy().to_string();
+    let _ = parent_dir;
 
     if info.name == new_name {
-        return write_succeeded(
-            conn,
+        return write_succeeded_locked(
+            database,
             FileOperationKind::Rename,
             &source_path_string,
             Some(&target_path_string),
-            |_tx| Ok(()),
         );
     }
 
-    if folder_name_exists_in_parent_conn(conn, info.parent_id, info.root_id, new_name)?
-        || target_path.exists()
-    {
+    if conflict_in_db || target_path.exists() {
         return Err(FsOpsError::new(
             FsOpsErrorCode::NameConflict,
             format!("a folder named '{new_name}' already exists in this parent"),
         ));
     }
 
+    // Step 2: FS work outside the lock.
+    let fs_result = atomic_rename(&info.path, &target_path);
+
+    // Step 3: brief lock for the commit.
+    let mut guard = database.lock().expect("database mutex poisoned");
+    let conn = guard.connection_for_fsops_mut();
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
-    if let Err(error) = fs::rename(&info.path, &target_path) {
+    if let Err(error) = fs_result {
         record_failure(
             &transaction,
             FileOperationKind::Rename,
@@ -436,36 +498,46 @@ fn rename_folder(
 // -------------- internal: move ------------------------------------------
 
 fn move_file(
-    database: &mut Database,
+    database: &Mutex<Database>,
     file_id: i64,
     target: &FolderTarget,
 ) -> FsOpsResult<FileOperationRecord> {
-    let conn = database.connection_for_fsops_mut();
-    let info = match load_file_info(conn, file_id)? {
-        Some(info) => info,
-        None => {
+    // Step 1: snapshot under brief lock. Fail-fast on cross-root and
+    // collision; a same-folder move is treated as a no-op.
+    let snapshot = {
+        let guard = database.lock().expect("database mutex poisoned");
+        let conn = guard.connection_for_fsops();
+        let info = match load_file_info(conn, file_id)? {
+            Some(info) => info,
+            None => {
+                return Err(FsOpsError::new(
+                    FsOpsErrorCode::NotFound,
+                    format!("file not found: {file_id}"),
+                ))
+            }
+        };
+        if info.root_id != target.root_id {
             return Err(FsOpsError::new(
-                FsOpsErrorCode::NotFound,
-                format!("file not found: {file_id}"),
-            ))
+                FsOpsErrorCode::CrossRoot,
+                "cross_root: source and target are in different roots",
+            ));
         }
+        if info.folder_id == target.folder_id {
+            let source = info.path.to_string_lossy().to_string();
+            return write_succeeded_locked_with_guard(
+                guard,
+                FileOperationKind::Move,
+                &source,
+                Some(&source),
+            );
+        }
+        let collision_in_db = file_exists_in_folder_conn(conn, target.folder_id, &info.name)?;
+        (info, collision_in_db)
     };
-    if info.root_id != target.root_id {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::CrossVolume,
-            "cross_volume: source and target are in different roots",
-        ));
-    }
-    if info.folder_id == target.folder_id {
-        return write_succeeded(
-            conn,
-            FileOperationKind::Move,
-            &info.path.to_string_lossy(),
-            Some(&info.path.to_string_lossy()),
-            |_tx| Ok(()),
-        );
-    }
-    if file_exists_in_folder_conn(conn, target.folder_id, &info.name)? {
+    let (info, collision_in_db) = snapshot;
+
+    let target_path = target.path.join(&info.name);
+    if collision_in_db || target_path.exists() {
         return Err(FsOpsError::new(
             FsOpsErrorCode::NameConflict,
             format!(
@@ -474,23 +546,19 @@ fn move_file(
             ),
         ));
     }
-    let target_path = target.path.join(&info.name);
-    if target_path.exists() {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::NameConflict,
-            format!(
-                "a file named '{}' already exists at the target path",
-                info.name
-            ),
-        ));
-    }
 
     let source_path_string = info.path.to_string_lossy().to_string();
     let target_path_string = target_path.to_string_lossy().to_string();
 
+    // Step 2: FS work outside the lock.
+    let fs_result = atomic_rename(&info.path, &target_path);
+
+    // Step 3: commit under brief lock.
+    let mut guard = database.lock().expect("database mutex poisoned");
+    let conn = guard.connection_for_fsops_mut();
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
-    if let Err(error) = fs::rename(&info.path, &target_path) {
+    if let Err(error) = fs_result {
         record_failure(
             &transaction,
             FileOperationKind::Move,
@@ -524,39 +592,60 @@ fn move_file(
 }
 
 fn move_folder(
-    database: &mut Database,
+    database: &Mutex<Database>,
     folder_id: i64,
     target: &FolderTarget,
 ) -> FsOpsResult<FileOperationRecord> {
-    let conn = database.connection_for_fsops_mut();
-    let info = match load_folder_info(conn, folder_id)? {
-        Some(info) => info,
-        None => {
+    // Step 1: snapshot.
+    let (info, target_path, source_path_string, target_path_string, conflict_in_db) = {
+        let guard = database.lock().expect("database mutex poisoned");
+        let conn = guard.connection_for_fsops();
+        let info = match load_folder_info(conn, folder_id)? {
+            Some(info) => info,
+            None => {
+                return Err(FsOpsError::new(
+                    FsOpsErrorCode::NotFound,
+                    format!("folder not found: {folder_id}"),
+                ))
+            }
+        };
+        if info.parent_id.is_none() {
             return Err(FsOpsError::new(
-                FsOpsErrorCode::NotFound,
-                format!("folder not found: {folder_id}"),
-            ))
+                FsOpsErrorCode::InvalidRequest,
+                "cannot move a root folder",
+            ));
         }
+        if info.root_id != target.root_id {
+            return Err(FsOpsError::new(
+                FsOpsErrorCode::CrossRoot,
+                "cross_root: source and target are in different roots",
+            ));
+        }
+        if folder_is_ancestor_of(conn, folder_id, target.folder_id)? {
+            return Err(FsOpsError::new(
+                FsOpsErrorCode::InvalidRequest,
+                "cannot move a folder into its own descendant",
+            ));
+        }
+        let conflict_in_db = folder_name_exists_in_parent_conn(
+            conn,
+            Some(target.folder_id),
+            info.root_id,
+            &info.name,
+        )?;
+        let target_path = target.path.join(&info.name);
+        let source_path_string = info.path.to_string_lossy().to_string();
+        let target_path_string = target_path.to_string_lossy().to_string();
+        (
+            info,
+            target_path,
+            source_path_string,
+            target_path_string,
+            conflict_in_db,
+        )
     };
-    if info.parent_id.is_none() {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::InvalidRequest,
-            "cannot move a root folder",
-        ));
-    }
-    if info.root_id != target.root_id {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::CrossVolume,
-            "cross_volume: source and target are in different roots",
-        ));
-    }
-    if folder_is_ancestor_of(conn, folder_id, target.folder_id)? {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::InvalidRequest,
-            "cannot move a folder into its own descendant",
-        ));
-    }
-    if folder_name_exists_in_parent_conn(conn, Some(target.folder_id), info.root_id, &info.name)? {
+
+    if conflict_in_db || target_path.exists() {
         return Err(FsOpsError::new(
             FsOpsErrorCode::NameConflict,
             format!(
@@ -565,23 +654,16 @@ fn move_folder(
             ),
         ));
     }
-    let target_path = target.path.join(&info.name);
-    if target_path.exists() {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::NameConflict,
-            format!(
-                "a folder named '{}' already exists at the target path",
-                info.name
-            ),
-        ));
-    }
 
-    let source_path_string = info.path.to_string_lossy().to_string();
-    let target_path_string = target_path.to_string_lossy().to_string();
+    // Step 2: FS work outside the lock.
+    let fs_result = atomic_rename(&info.path, &target_path);
 
+    // Step 3: commit under brief lock.
+    let mut guard = database.lock().expect("database mutex poisoned");
+    let conn = guard.connection_for_fsops_mut();
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
-    if let Err(error) = fs::rename(&info.path, &target_path) {
+    if let Err(error) = fs_result {
         record_failure(
             &transaction,
             FileOperationKind::Move,
@@ -620,37 +702,55 @@ fn move_folder(
 // -------------- internal: delete ----------------------------------------
 
 fn delete_file(
-    database: &mut Database,
+    database: &Mutex<Database>,
     file_id: i64,
     permanent: bool,
 ) -> FsOpsResult<FileOperationRecord> {
-    let conn = database.connection_for_fsops_mut();
-    let info = match load_file_info(conn, file_id)? {
-        Some(info) => info,
-        None => {
-            return Err(FsOpsError::new(
-                FsOpsErrorCode::NotFound,
-                format!("file not found: {file_id}"),
-            ))
+    // Step 1: snapshot path + symlink state under brief lock; the symlink
+    // refusal must happen before the FS work even runs.
+    let (info, source_path_string) = {
+        let guard = database.lock().expect("database mutex poisoned");
+        let conn = guard.connection_for_fsops();
+        let info = match load_file_info(conn, file_id)? {
+            Some(info) => info,
+            None => {
+                return Err(FsOpsError::new(
+                    FsOpsErrorCode::NotFound,
+                    format!("file not found: {file_id}"),
+                ))
+            }
+        };
+        if permanent {
+            ensure_inside_enabled_root(conn, info.root_id, &info.path)?;
         }
+        let source = info.path.to_string_lossy().to_string();
+        (info, source)
     };
+
     let kind = if permanent {
         FileOperationKind::DeletePermanent
     } else {
         FileOperationKind::DeleteRecycle
     };
-    let source_path_string = info.path.to_string_lossy().to_string();
 
     if permanent {
-        ensure_inside_enabled_root(conn, info.root_id, &info.path)?;
+        // Refuse to follow symlinks even though the path was inside an
+        // enabled root: the link's *target* may not be. This check sits
+        // outside the lock because it only reads the filesystem.
+        refuse_if_symlink(&info.path)?;
     }
 
-    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    // Step 2: FS work outside the lock.
     let fs_result = if permanent {
         fs::remove_file(&info.path).map_err(|error| error.to_string())
     } else {
         trash::delete(&info.path).map_err(|error| error.to_string())
     };
+
+    // Step 3: commit under brief lock.
+    let mut guard = database.lock().expect("database mutex poisoned");
+    let conn = guard.connection_for_fsops_mut();
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     if let Err(error) = fs_result {
         record_failure(&transaction, kind, &source_path_string, None, &error)?;
@@ -680,43 +780,57 @@ fn delete_file(
 }
 
 fn delete_folder(
-    database: &mut Database,
+    database: &Mutex<Database>,
     folder_id: i64,
     permanent: bool,
 ) -> FsOpsResult<FileOperationRecord> {
-    let conn = database.connection_for_fsops_mut();
-    let info = match load_folder_info(conn, folder_id)? {
-        Some(info) => info,
-        None => {
+    // Step 1: snapshot.
+    let (info, source_path_string) = {
+        let guard = database.lock().expect("database mutex poisoned");
+        let conn = guard.connection_for_fsops();
+        let info = match load_folder_info(conn, folder_id)? {
+            Some(info) => info,
+            None => {
+                return Err(FsOpsError::new(
+                    FsOpsErrorCode::NotFound,
+                    format!("folder not found: {folder_id}"),
+                ))
+            }
+        };
+        if info.parent_id.is_none() {
             return Err(FsOpsError::new(
-                FsOpsErrorCode::NotFound,
-                format!("folder not found: {folder_id}"),
-            ))
+                FsOpsErrorCode::InvalidRequest,
+                "cannot delete a root folder",
+            ));
         }
+        if permanent {
+            ensure_inside_enabled_root(conn, info.root_id, &info.path)?;
+        }
+        let source = info.path.to_string_lossy().to_string();
+        (info, source)
     };
-    if info.parent_id.is_none() {
-        return Err(FsOpsError::new(
-            FsOpsErrorCode::InvalidRequest,
-            "cannot delete a root folder",
-        ));
-    }
+
     let kind = if permanent {
         FileOperationKind::DeletePermanent
     } else {
         FileOperationKind::DeleteRecycle
     };
-    let source_path_string = info.path.to_string_lossy().to_string();
 
     if permanent {
-        ensure_inside_enabled_root(conn, info.root_id, &info.path)?;
+        refuse_if_symlink(&info.path)?;
     }
 
-    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    // Step 2: FS work outside the lock.
     let fs_result = if permanent {
         fs::remove_dir_all(&info.path).map_err(|error| error.to_string())
     } else {
         trash::delete(&info.path).map_err(|error| error.to_string())
     };
+
+    // Step 3: commit under brief lock.
+    let mut guard = database.lock().expect("database mutex poisoned");
+    let conn = guard.connection_for_fsops_mut();
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     if let Err(error) = fs_result {
         record_failure(&transaction, kind, &source_path_string, None, &error)?;
@@ -1046,7 +1160,16 @@ fn ensure_inside_enabled_root(
             "permanent delete is not allowed in disabled roots",
         ));
     }
-    if !path.starts_with(&root_path) {
+    // Prefer canonicalized comparison so a symlink inside the root that
+    // points outside cannot smuggle a permanent delete past the boundary.
+    // If either side fails to canonicalize (e.g. the entry already
+    // disappeared), fall back to the raw prefix check; the caller's
+    // `refuse_if_symlink` guard catches the more dangerous symlink case.
+    let prefix_ok = match (fs::canonicalize(path), fs::canonicalize(&root_path)) {
+        (Ok(canonical_path), Ok(canonical_root)) => canonical_path.starts_with(&canonical_root),
+        _ => path.starts_with(&root_path),
+    };
+    if !prefix_ok {
         return Err(FsOpsError::new(
             FsOpsErrorCode::OutsideRoot,
             format!(
@@ -1056,6 +1179,72 @@ fn ensure_inside_enabled_root(
         ));
     }
     Ok(())
+}
+
+/// Refuse to permanently delete an entry whose `symlink_metadata` reports a
+/// symlink. We never want to follow a link out of the user's root; the
+/// canonicalize check in `ensure_inside_enabled_root` is best-effort, but
+/// this guard returns a clear error code so the UI can render it.
+fn refuse_if_symlink(path: &Path) -> FsOpsResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                Err(FsOpsError::new(
+                    FsOpsErrorCode::SymlinkRefused,
+                    format!(
+                        "permanent delete refused: '{}' is a symlink",
+                        path.display()
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // The entry vanished between snapshot and FS work — let the
+            // FS call surface the not-found error in its own time.
+            Ok(())
+        }
+        Err(error) => Err(FsOpsError::new(
+            FsOpsErrorCode::FsError,
+            format!("symlink check failed: {error}"),
+        )),
+    }
+}
+
+/// Rename a file or directory with a small TOCTOU defense on Unix.
+///
+/// `std::fs::rename` calls `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`
+/// on Windows, so an existing target raises an error. On Unix, however,
+/// `rename(2)` overwrites silently. Even after the database collision check,
+/// a concurrent writer can race a file into place. To narrow the window we
+/// reserve the destination via `OpenOptions::create_new` first, delete the
+/// placeholder, then perform the actual rename. If the placeholder cannot be
+/// reserved we surface a clear `name_conflict`. The remaining race window is
+/// only the gap between the placeholder removal and the rename, which is far
+/// smaller than the original DB-check + rename window.
+fn atomic_rename(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        match OpenOptions::new().write(true).create_new(true).open(target) {
+            Ok(file) => {
+                drop(file);
+                if let Err(error) = fs::remove_file(target) {
+                    // Removing our own placeholder failed — surface as IO.
+                    return Err(error);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("target already exists: {}", target.display()),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    fs::rename(source, target)
 }
 
 fn validate_name(name: &str) -> FsOpsResult<()> {
@@ -1122,9 +1311,13 @@ fn is_windows_reserved(name: &str) -> bool {
 }
 
 fn extension_from_name(name: &str) -> String {
+    // Match `scan::extension` so the on-disk name and the indexed `ext`
+    // column agree on case. Without this, renaming "image.jpg" to
+    // "image.MP4" would store ".MP4" while the rest of the indexer assumes
+    // lowercase.
     Path::new(name)
         .extension()
-        .map(|ext| format!(".{}", ext.to_string_lossy()))
+        .map(|ext| format!(".{}", ext.to_string_lossy().to_ascii_lowercase()))
         .unwrap_or_default()
 }
 
@@ -1182,15 +1375,33 @@ fn record_failure(
     Ok(())
 }
 
-fn write_succeeded(
-    conn: &mut rusqlite::Connection,
+/// Acquire the lock briefly, write a `succeeded` `file_operations` row,
+/// and release. Used for idempotent no-op paths (e.g. rename to same name,
+/// move into the same folder).
+fn write_succeeded_locked(
+    database: &Mutex<Database>,
     kind: FileOperationKind,
     source_path: &str,
     target_path: Option<&str>,
-    extra: impl FnOnce(&Transaction<'_>) -> FsOpsResult<()>,
 ) -> FsOpsResult<FileOperationRecord> {
+    let guard = database.lock().expect("database mutex poisoned");
+    write_succeeded_locked_with_guard(guard, kind, source_path, target_path)
+}
+
+/// Variant that operates on an already-held guard so callers that already
+/// snapshotted under a single lock can write the success row without
+/// dropping and re-acquiring.
+fn write_succeeded_locked_with_guard<G>(
+    mut guard: G,
+    kind: FileOperationKind,
+    source_path: &str,
+    target_path: Option<&str>,
+) -> FsOpsResult<FileOperationRecord>
+where
+    G: std::ops::DerefMut<Target = Database>,
+{
+    let conn = guard.connection_for_fsops_mut();
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    extra(&transaction)?;
     let record = insert_operation(
         &transaction,
         kind,
@@ -1224,7 +1435,7 @@ mod tests {
     use std::path::PathBuf;
 
     struct TestEnv {
-        database: Database,
+        database: Mutex<Database>,
         root_id: i64,
         root_folder_id: i64,
         root_path: PathBuf,
@@ -1252,17 +1463,19 @@ mod tests {
                 })
                 .expect("insert root folder");
             Self {
-                database,
+                database: Mutex::new(database),
                 root_id,
                 root_folder_id,
                 root_path,
             }
         }
 
-        fn add_file(&mut self, folder_id: i64, name: &str) -> i64 {
+        fn add_file(&self, folder_id: i64, name: &str) -> i64 {
             let path = self.folder_path(folder_id).join(name);
             stdfs::write(&path, b"x").expect("write test file");
             self.database
+                .lock()
+                .expect("db lock")
                 .upsert_file(FileUpsert {
                     root_id: self.root_id,
                     folder_id,
@@ -1276,10 +1489,12 @@ mod tests {
                 .expect("insert file")
         }
 
-        fn add_folder(&mut self, parent_id: i64, name: &str) -> i64 {
+        fn add_folder(&self, parent_id: i64, name: &str) -> i64 {
             let path = self.folder_path(parent_id).join(name);
             stdfs::create_dir_all(&path).expect("create child folder");
             self.database
+                .lock()
+                .expect("db lock")
                 .upsert_folder(FolderUpsert {
                     root_id: self.root_id,
                     parent_id: Some(parent_id),
@@ -1291,7 +1506,8 @@ mod tests {
         }
 
         fn folder_path(&self, folder_id: i64) -> PathBuf {
-            folder_path_for(&self.database.connection_for_fsops(), folder_id)
+            let guard = self.database.lock().expect("db lock");
+            folder_path_for(&guard.connection_for_fsops(), folder_id)
                 .expect("folder path lookup")
                 .expect("folder path resolved")
         }
@@ -1319,10 +1535,10 @@ mod tests {
 
     #[test]
     fn rename_file_updates_disk_db_and_log() {
-        let mut env = TestEnv::new("rename_ok");
+        let env = TestEnv::new("rename_ok");
         let file_id = env.add_file(env.root_folder_id, "old.jpg");
         let record = rename(
-            &mut env.database,
+            &env.database,
             RenameRequest {
                 file_id: Some(file_id),
                 folder_id: None,
@@ -1334,13 +1550,19 @@ mod tests {
         assert_eq!(record.status, "succeeded");
         assert!(env.root_path.join("new.jpg").exists());
         assert!(!env.root_path.join("old.jpg").exists());
-        let media = env.database.get_media(file_id).expect("get media").unwrap();
+        let media = env
+            .database
+            .lock()
+            .expect("db lock")
+            .get_media(file_id)
+            .expect("get media")
+            .unwrap();
         assert_eq!(media.name, "new.jpg");
     }
 
     #[test]
     fn rename_invalid_name_rejected() {
-        let mut env = TestEnv::new("rename_invalid");
+        let env = TestEnv::new("rename_invalid");
         let file_id = env.add_file(env.root_folder_id, "a.jpg");
         for bad in [
             "",
@@ -1351,7 +1573,7 @@ mod tests {
             "Prn.txt",
         ] {
             let error = rename(
-                &mut env.database,
+                &env.database,
                 RenameRequest {
                     file_id: Some(file_id),
                     folder_id: None,
@@ -1365,11 +1587,11 @@ mod tests {
 
     #[test]
     fn rename_collision_returns_conflict() {
-        let mut env = TestEnv::new("rename_conflict");
+        let env = TestEnv::new("rename_conflict");
         let _ = env.add_file(env.root_folder_id, "a.jpg");
         let other_id = env.add_file(env.root_folder_id, "b.jpg");
         let error = rename(
-            &mut env.database,
+            &env.database,
             RenameRequest {
                 file_id: Some(other_id),
                 folder_id: None,
@@ -1382,9 +1604,9 @@ mod tests {
 
     #[test]
     fn rename_missing_file_returns_not_found() {
-        let mut env = TestEnv::new("rename_404");
+        let env = TestEnv::new("rename_404");
         let error = rename(
-            &mut env.database,
+            &env.database,
             RenameRequest {
                 file_id: Some(99_999),
                 folder_id: None,
@@ -1397,11 +1619,11 @@ mod tests {
 
     #[test]
     fn move_file_within_root_succeeds() {
-        let mut env = TestEnv::new("move_ok");
+        let env = TestEnv::new("move_ok");
         let target_folder = env.add_folder(env.root_folder_id, "dst");
         let file_id = env.add_file(env.root_folder_id, "m.jpg");
         let records = move_items(
-            &mut env.database,
+            &env.database,
             MoveRequest {
                 file_ids: vec![file_id],
                 folder_ids: vec![],
@@ -1413,51 +1635,60 @@ mod tests {
         assert_eq!(records[0].status, "succeeded");
         assert!(env.root_path.join("dst").join("m.jpg").exists());
         assert!(!env.root_path.join("m.jpg").exists());
-        let media = env.database.get_media(file_id).expect("get").unwrap();
+        let media = env
+            .database
+            .lock()
+            .expect("db lock")
+            .get_media(file_id)
+            .expect("get")
+            .unwrap();
         assert_eq!(media.folder_id, target_folder);
     }
 
     #[test]
-    fn move_cross_volume_returns_cross_volume() {
-        let mut env_a = TestEnv::new("move_a");
+    fn move_cross_root_returns_cross_root() {
+        let env_a = TestEnv::new("move_a");
         let env_b = TestEnv::new("move_b");
         let file_id = env_a.add_file(env_a.root_folder_id, "x.jpg");
         // Register the second root in env_a's database to simulate two roots.
-        let other_root = env_a
-            .database
-            .add_root(NewRoot {
-                path: env_b.root_path.to_string_lossy().into_owned(),
-                display_name: "other".into(),
-            })
-            .expect("add second root");
-        let other_root_folder = env_a
-            .database
-            .upsert_folder(FolderUpsert {
-                root_id: other_root,
-                parent_id: None,
-                name: String::new(),
-                path_hash: "other-root".into(),
-                mtime: Some(1),
-            })
-            .expect("insert other root folder");
+        let (other_root, other_root_folder) = {
+            let guard = env_a.database.lock().expect("db lock");
+            let other_root = guard
+                .add_root(NewRoot {
+                    path: env_b.root_path.to_string_lossy().into_owned(),
+                    display_name: "other".into(),
+                })
+                .expect("add second root");
+            let other_root_folder = guard
+                .upsert_folder(FolderUpsert {
+                    root_id: other_root,
+                    parent_id: None,
+                    name: String::new(),
+                    path_hash: "other-root".into(),
+                    mtime: Some(1),
+                })
+                .expect("insert other root folder");
+            (other_root, other_root_folder)
+        };
+        let _ = other_root;
         let error = move_items(
-            &mut env_a.database,
+            &env_a.database,
             MoveRequest {
                 file_ids: vec![file_id],
                 folder_ids: vec![],
                 target_folder_id: other_root_folder,
             },
         )
-        .expect_err("expected cross_volume");
-        assert_eq!(error.code, FsOpsErrorCode::CrossVolume);
+        .expect_err("expected cross_root");
+        assert_eq!(error.code, FsOpsErrorCode::CrossRoot);
     }
 
     #[test]
     fn move_missing_target_returns_not_found() {
-        let mut env = TestEnv::new("move_404");
+        let env = TestEnv::new("move_404");
         let file_id = env.add_file(env.root_folder_id, "m.jpg");
         let error = move_items(
-            &mut env.database,
+            &env.database,
             MoveRequest {
                 file_ids: vec![file_id],
                 folder_ids: vec![],
@@ -1470,10 +1701,10 @@ mod tests {
 
     #[test]
     fn delete_permanent_removes_disk_and_marks_db() {
-        let mut env = TestEnv::new("delete_permanent");
+        let env = TestEnv::new("delete_permanent");
         let file_id = env.add_file(env.root_folder_id, "z.jpg");
         let records = delete(
-            &mut env.database,
+            &env.database,
             DeleteRequest {
                 file_ids: vec![file_id],
                 folder_ids: vec![],
@@ -1486,6 +1717,8 @@ mod tests {
         assert!(!env.root_path.join("z.jpg").exists());
         assert!(env
             .database
+            .lock()
+            .expect("db lock")
             .get_media(file_id)
             .expect("query media")
             .is_none());
@@ -1494,10 +1727,10 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn delete_recycle_removes_from_disk() {
-        let mut env = TestEnv::new("delete_recycle");
+        let env = TestEnv::new("delete_recycle");
         let file_id = env.add_file(env.root_folder_id, "r.jpg");
         let records = delete(
-            &mut env.database,
+            &env.database,
             DeleteRequest {
                 file_ids: vec![file_id],
                 folder_ids: vec![],
@@ -1511,11 +1744,11 @@ mod tests {
 
     #[test]
     fn delete_with_files_and_folders_processes_both() {
-        let mut env = TestEnv::new("delete_mixed");
+        let env = TestEnv::new("delete_mixed");
         let file_id = env.add_file(env.root_folder_id, "mixed.jpg");
         let child = env.add_folder(env.root_folder_id, "subdir");
         let records = delete(
-            &mut env.database,
+            &env.database,
             DeleteRequest {
                 file_ids: vec![file_id],
                 folder_ids: vec![child],
@@ -1529,11 +1762,11 @@ mod tests {
 
     #[test]
     fn list_recent_returns_descending_ids() {
-        let mut env = TestEnv::new("list_recent");
+        let env = TestEnv::new("list_recent");
         for index in 0..3 {
             let file_id = env.add_file(env.root_folder_id, &format!("f{index}.jpg"));
             rename(
-                &mut env.database,
+                &env.database,
                 RenameRequest {
                     file_id: Some(file_id),
                     folder_id: None,
@@ -1551,11 +1784,11 @@ mod tests {
 
     #[test]
     fn rename_folder_updates_disk_and_db() {
-        let mut env = TestEnv::new("rename_folder");
+        let env = TestEnv::new("rename_folder");
         let child = env.add_folder(env.root_folder_id, "old_dir");
         let _file_id = env.add_file(child, "inner.jpg");
         let record = rename(
-            &mut env.database,
+            &env.database,
             RenameRequest {
                 file_id: None,
                 folder_id: Some(child),
@@ -1566,5 +1799,137 @@ mod tests {
         assert_eq!(record.operation, "rename");
         assert!(env.root_path.join("new_dir").join("inner.jpg").exists());
         assert!(!env.root_path.join("old_dir").exists());
+    }
+
+    #[test]
+    fn extension_from_name_lowercases() {
+        // Match the indexer convention: scan/mod.rs lowercases the extension
+        // it stores in `files.ext`. Renames must do the same so the on-disk
+        // name and the DB column don't drift apart on mixed-case extensions.
+        assert_eq!(extension_from_name("image.MP4"), ".mp4");
+        assert_eq!(extension_from_name("photo.JPG"), ".jpg");
+        assert_eq!(extension_from_name("clip.MoV"), ".mov");
+        assert_eq!(extension_from_name("noext"), "");
+    }
+
+    #[test]
+    fn rename_to_mixed_case_extension_stores_lowercase_ext() {
+        let env = TestEnv::new("rename_mixed_case_ext");
+        let file_id = env.add_file(env.root_folder_id, "image.jpg");
+        let record = rename(
+            &env.database,
+            RenameRequest {
+                file_id: Some(file_id),
+                folder_id: None,
+                new_name: "image.MP4".into(),
+            },
+        )
+        .expect("rename");
+        assert_eq!(record.status, "succeeded");
+        assert!(env.root_path.join("image.MP4").exists());
+
+        // The on-disk name preserves user-typed case but `files.ext` must
+        // be lowercased to agree with the rest of the indexer.
+        let ext: String = env
+            .database
+            .lock()
+            .expect("db lock")
+            .connection_for_fsops()
+            .query_row(
+                "SELECT ext FROM files WHERE id = ?1",
+                params![file_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read ext");
+        assert_eq!(ext, ".mp4");
+    }
+
+    #[test]
+    fn rename_collision_does_not_clobber_existing_target_on_disk() {
+        // Defense-in-depth regression for the TOCTOU window between the
+        // collision check and `fs::rename`. Even on Windows where the
+        // underlying `MoveFileExW` rejects existing targets, we want a
+        // platform-agnostic test that asserts the existing target is not
+        // overwritten when both files exist on disk.
+        let env = TestEnv::new("rename_clobber_guard");
+        let alpha_id = env.add_file(env.root_folder_id, "alpha.jpg");
+        let _beta_id = env.add_file(env.root_folder_id, "beta.jpg");
+
+        // Pre-populate the target on disk with distinguishable content so
+        // we can prove it survived.
+        let target_path = env.root_path.join("beta.jpg");
+        stdfs::write(&target_path, b"beta-original").expect("seed beta");
+
+        let error = rename(
+            &env.database,
+            RenameRequest {
+                file_id: Some(alpha_id),
+                folder_id: None,
+                new_name: "beta.jpg".into(),
+            },
+        )
+        .expect_err("rename onto existing target must fail");
+        assert_eq!(error.code, FsOpsErrorCode::NameConflict);
+
+        // The existing target retained its original bytes — no clobber.
+        let bytes = stdfs::read(&target_path).expect("read beta");
+        assert_eq!(bytes, b"beta-original".to_vec());
+        // The source still exists too.
+        assert!(env.root_path.join("alpha.jpg").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permanent_delete_refuses_symlinked_entry() {
+        use std::os::unix::fs::symlink;
+
+        let env = TestEnv::new("symlink_refused");
+
+        // An out-of-root file the symlink points at — we must keep it intact.
+        let outside_dir = unique_temp_dir("symlink_outside");
+        stdfs::create_dir_all(&outside_dir).expect("create outside dir");
+        let outside_target = outside_dir.join("outside-target.bin");
+        stdfs::write(&outside_target, b"keep-me").expect("write outside target");
+
+        // Place a symlink inside the root that points at the outside target.
+        let link_path = env.root_path.join("link.jpg");
+        symlink(&outside_target, &link_path).expect("create symlink");
+
+        // Insert a `files` row for the symlink so fsops can look it up.
+        let file_id = env
+            .database
+            .lock()
+            .expect("db lock")
+            .upsert_file(FileUpsert {
+                root_id: env.root_id,
+                folder_id: env.root_folder_id,
+                name: "link.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 1,
+                mtime: 1,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert symlink file row");
+
+        let error = delete(
+            &env.database,
+            DeleteRequest {
+                file_ids: vec![file_id],
+                folder_ids: vec![],
+                permanent: true,
+            },
+        )
+        .expect_err("permanent delete of symlink must be refused");
+        assert_eq!(error.code, FsOpsErrorCode::SymlinkRefused);
+
+        // The link itself is untouched (we refused before any FS work).
+        assert!(link_path.exists());
+        // The outside target survived: we never followed the link.
+        assert!(outside_target.exists());
+        let bytes = stdfs::read(&outside_target).expect("read outside target");
+        assert_eq!(bytes, b"keep-me".to_vec());
+
+        let _ = stdfs::remove_dir_all(&outside_dir);
     }
 }

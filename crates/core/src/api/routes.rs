@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use axum_extra::extract::Query as ExtraQuery;
 use serde::{Deserialize, Serialize};
 use std::fs;
 
@@ -617,9 +618,8 @@ async fn rename_file(
     State(state): State<AppState>,
     Json(payload): Json<RenameRequestBody>,
 ) -> ApiResult<Json<FileOperationRecord>> {
-    let mut database = state.database.lock().expect("database mutex poisoned");
     let record = fsops::rename(
-        &mut database,
+        &state.database,
         RenameRequest {
             file_id: payload.file_id,
             folder_id: payload.folder_id,
@@ -634,9 +634,8 @@ async fn move_files(
     State(state): State<AppState>,
     Json(payload): Json<MoveRequestBody>,
 ) -> ApiResult<Json<FileOperationsResponse>> {
-    let mut database = state.database.lock().expect("database mutex poisoned");
     let operations = fsops::move_items(
-        &mut database,
+        &state.database,
         MoveRequest {
             file_ids: payload.file_ids.unwrap_or_default(),
             folder_ids: payload.folder_ids.unwrap_or_default(),
@@ -651,9 +650,8 @@ async fn delete_files(
     State(state): State<AppState>,
     Json(payload): Json<DeleteRequestBody>,
 ) -> ApiResult<Json<FileOperationsResponse>> {
-    let mut database = state.database.lock().expect("database mutex poisoned");
     let operations = fsops::delete(
-        &mut database,
+        &state.database,
         DeleteRequest {
             file_ids: payload.file_ids.unwrap_or_default(),
             folder_ids: payload.folder_ids.unwrap_or_default(),
@@ -668,15 +666,14 @@ async fn list_file_operations(
     State(state): State<AppState>,
     Query(query): Query<ListFileOperationsQuery>,
 ) -> ApiResult<Json<ListResponse<FileOperationRecord>>> {
-    let database = state.database.lock().expect("database mutex poisoned");
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit) {
         return Err(CoreError::bad_request(format!(
             "limit must be between 1 and 200: {limit}"
         )));
     }
-    let page =
-        fsops::list_recent(&database, limit, query.cursor.as_deref()).map_err(map_fsops_error)?;
+    let page = fsops::list_recent(&state.database, limit, query.cursor.as_deref())
+        .map_err(map_fsops_error)?;
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
@@ -781,7 +778,7 @@ async fn remove_file_tag(
 
 async fn search_media(
     State(state): State<AppState>,
-    Query(query): Query<SearchMediaQuery>,
+    ExtraQuery(query): ExtraQuery<SearchMediaQuery>,
 ) -> ApiResult<Json<ListResponse<MediaRecord>>> {
     let sort = parse_search_sort(query.sort.as_deref())?.to_string();
     let kind = parse_media_kind(query.kind.as_deref())?.map(str::to_string);
@@ -976,8 +973,9 @@ fn map_fsops_error(error: FsOpsError) -> CoreError {
         FsOpsErrorCode::InvalidName | FsOpsErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         FsOpsErrorCode::NotFound => StatusCode::NOT_FOUND,
         FsOpsErrorCode::NameConflict
-        | FsOpsErrorCode::CrossVolume
-        | FsOpsErrorCode::OutsideRoot => StatusCode::CONFLICT,
+        | FsOpsErrorCode::CrossRoot
+        | FsOpsErrorCode::OutsideRoot
+        | FsOpsErrorCode::SymlinkRefused => StatusCode::CONFLICT,
         FsOpsErrorCode::FsError => StatusCode::INTERNAL_SERVER_ERROR,
     };
     CoreError::coded(status, error.code.as_str(), error.message)
@@ -2675,6 +2673,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_with_multiple_tag_ids_filters_by_and() {
+        // The search route must collect repeated `tagId` query parameters
+        // into a Vec and AND them together. Stock `axum::extract::Query`
+        // collapses duplicate keys, so we use `axum_extra`'s Query for
+        // this handler. This regression test exercises that wiring with
+        // two `tagId` values.
+        let database = test_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Search Tags Root".to_string(),
+                display_name: "Search Tags".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "tags-route".to_string(),
+                mtime: Some(1),
+            })
+            .expect("seed folder");
+
+        let mut file_ids = Vec::new();
+        for (name, mtime) in [("alpha.jpg", 100), ("beta.jpg", 200), ("gamma.jpg", 300)] {
+            let id = database
+                .upsert_file(crate::db::FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: name.to_string(),
+                    ext: ".jpg".to_string(),
+                    size: 100,
+                    mtime,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("insert file");
+            database
+                .upsert_media_kind(id, "image")
+                .expect("upsert media kind");
+            file_ids.push(id);
+        }
+        let red = database.create_tag("red", None).expect("red");
+        let blue = database.create_tag("blue", None).expect("blue");
+        // alpha: red+blue, beta: red only, gamma: blue only.
+        database
+            .set_file_tags(file_ids[0], &[red.id, blue.id])
+            .expect("alpha tags");
+        database
+            .set_file_tags(file_ids[1], &[red.id])
+            .expect("beta tags");
+        database
+            .set_file_tags(file_ids[2], &[blue.id])
+            .expect("gamma tags");
+
+        let app = router(AppState::new(database));
+        let uri = format!(
+            "/api/search?rootId={root_id}&tagId={}&tagId={}",
+            red.id, blue.id
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("search");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let items = body["items"].as_array().expect("items");
+        assert_eq!(
+            items.len(),
+            1,
+            "expected only alpha to satisfy red AND blue, got {items:?}"
+        );
+        assert_eq!(items[0]["id"], file_ids[0]);
+        assert_eq!(items[0]["name"], "alpha.jpg");
+    }
+
+    #[tokio::test]
     async fn file_ops_rename_route_returns_record_and_404_400_409() {
         let temp_root = unique_temp_dir();
         fs::create_dir_all(&temp_root).expect("create root dir");
@@ -2802,7 +2883,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_ops_move_route_returns_operations_and_cross_volume_409() {
+    async fn file_ops_move_route_returns_operations_and_cross_root_409() {
         let temp_root = unique_temp_dir();
         let other_root = unique_temp_dir();
         fs::create_dir_all(&temp_root).expect("create root dir");
@@ -2891,10 +2972,10 @@ mod tests {
         assert_eq!(ops[0]["operation"], "move");
         assert_eq!(ops[0]["status"], "succeeded");
 
-        // Now try cross-volume: move from same source to other root's folder.
+        // Now try cross-root: move from same source to other root's folder.
         // Reseed a file at temp_root.
         fs::write(temp_root.join("x.jpg"), b"x").expect("write x");
-        let cross_volume_response = app
+        let cross_root_response = app
             .clone()
             .oneshot(
                 Request::builder()
@@ -2908,13 +2989,13 @@ mod tests {
                         })
                         .to_string(),
                     ))
-                    .expect("build cross-volume request"),
+                    .expect("build cross-root request"),
             )
             .await
-            .expect("cross volume");
-        assert_eq!(cross_volume_response.status(), StatusCode::CONFLICT);
-        let body = response_json(cross_volume_response).await;
-        assert_eq!(body["code"], "cross_volume");
+            .expect("cross root");
+        assert_eq!(cross_root_response.status(), StatusCode::CONFLICT);
+        let body = response_json(cross_root_response).await;
+        assert_eq!(body["code"], "cross_root");
 
         drop(app);
         let _ = fs::remove_dir_all(&temp_root);

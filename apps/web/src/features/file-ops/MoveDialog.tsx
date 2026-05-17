@@ -68,7 +68,7 @@ export function MoveDialog({
   }, [folderIds, library.folderChildrenByParent]);
 
   const itemCount = fileIds.length + folderIds.length;
-  const isCrossVolume = serverErrorCode === "cross_volume";
+  const isCrossVolume = serverErrorCode === "cross_root";
   const canSubmit = !busy && target !== null;
 
   if (!open) return null;
@@ -107,7 +107,7 @@ export function MoveDialog({
 
           {isCrossVolume ? (
             <div className="dialog-error">
-              {serverError ?? "Cross-volume moves are not supported yet. Pick a destination on the same drive."}
+              {serverError ?? "Cross-root moves are not supported yet. Pick a destination inside the same root."}
             </div>
           ) : serverError ? (
             <div className="dialog-error">{serverError}</div>

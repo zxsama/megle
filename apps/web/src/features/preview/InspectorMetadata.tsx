@@ -1,5 +1,6 @@
 import { Heart, Star } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import type { KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { TagRecord, UserMetadataRecord } from "@megle/core-client";
 import { TagChip } from "../library/TagChip";
 
@@ -34,7 +35,10 @@ export function InspectorMetadata({
 }: InspectorMetadataProps) {
   const [noteDraft, setNoteDraft] = useState<string>("");
   const [tagInput, setTagInput] = useState<string>("");
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState<number>(-1);
   const tagIds = metadata?.tagIds ?? [];
+  const suggestionsListId = useId();
+  const suggestionOptionId = (index: number) => `${suggestionsListId}-option-${index}`;
 
   useEffect(() => {
     setNoteDraft(metadata?.note ?? "");
@@ -42,6 +46,7 @@ export function InspectorMetadata({
 
   useEffect(() => {
     setTagInput("");
+    setActiveSuggestionIndex(-1);
   }, [fileId]);
 
   const rating = metadata?.rating ?? null;
@@ -60,6 +65,15 @@ export function InspectorMetadata({
     [tags, tagInput]
   );
 
+  // Reset highlight whenever the suggestion set changes.
+  useEffect(() => {
+    setActiveSuggestionIndex((current) => {
+      if (matchingTags.length === 0) return -1;
+      if (current < 0 || current >= matchingTags.length) return -1;
+      return current;
+    });
+  }, [matchingTags]);
+
   function commitNote() {
     const next = noteDraft.length > 2048 ? noteDraft.slice(0, 2048) : noteDraft;
     if ((metadata?.note ?? "") === next) return;
@@ -74,6 +88,14 @@ export function InspectorMetadata({
     }
   }
 
+  function attachSuggestion(tag: TagRecord) {
+    if (!tagIds.includes(tag.id)) {
+      void onAddTag(fileId, tag.id);
+    }
+    setTagInput("");
+    setActiveSuggestionIndex(-1);
+  }
+
   function handleTagSubmit() {
     const name = tagInput.trim();
     if (!name) return;
@@ -82,6 +104,7 @@ export function InspectorMetadata({
         void onAddTag(fileId, exactMatch.id);
       }
       setTagInput("");
+      setActiveSuggestionIndex(-1);
       return;
     }
     void (async () => {
@@ -89,9 +112,51 @@ export function InspectorMetadata({
       if (created) {
         await onAddTag(fileId, created.id);
         setTagInput("");
+        setActiveSuggestionIndex(-1);
       }
     })();
   }
+
+  function handleTagInputKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown" && matchingTags.length > 0) {
+      event.preventDefault();
+      setActiveSuggestionIndex((current) => {
+        if (current < 0) return 0;
+        return (current + 1) % matchingTags.length;
+      });
+      return;
+    }
+    if (event.key === "ArrowUp" && matchingTags.length > 0) {
+      event.preventDefault();
+      setActiveSuggestionIndex((current) => {
+        if (current < 0) return matchingTags.length - 1;
+        return (current - 1 + matchingTags.length) % matchingTags.length;
+      });
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (activeSuggestionIndex >= 0 && activeSuggestionIndex < matchingTags.length) {
+        attachSuggestion(matchingTags[activeSuggestionIndex]);
+      } else {
+        handleTagSubmit();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      if (tagInput.length > 0 || matchingTags.length > 0 || activeSuggestionIndex >= 0) {
+        event.preventDefault();
+        setTagInput("");
+        setActiveSuggestionIndex(-1);
+      }
+    }
+  }
+
+  const showSuggestions = matchingTags.length > 0;
+  const activeOptionId =
+    showSuggestions && activeSuggestionIndex >= 0
+      ? suggestionOptionId(activeSuggestionIndex)
+      : undefined;
 
   return (
     <section className="inspector-metadata" aria-label="Metadata editor">
@@ -164,16 +229,20 @@ export function InspectorMetadata({
           </div>
           <div className="inspector-tag-input-row">
             <input
+              aria-activedescendant={activeOptionId}
+              aria-autocomplete="list"
+              aria-controls={showSuggestions ? suggestionsListId : undefined}
+              aria-expanded={showSuggestions}
               aria-label="Add tag"
+              autoComplete="off"
               className="inspector-tag-input"
-              onChange={(e) => setTagInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  handleTagSubmit();
-                }
+              onChange={(e) => {
+                setTagInput(e.target.value);
+                setActiveSuggestionIndex(-1);
               }}
+              onKeyDown={handleTagInputKeyDown}
               placeholder={exactMatch ? "Add tag" : "Add or create tag"}
+              role="combobox"
               type="text"
               value={tagInput}
             />
@@ -186,29 +255,41 @@ export function InspectorMetadata({
               {exactMatch ? "Add" : "Create"}
             </button>
           </div>
-          {matchingTags.length > 0 ? (
-            <ul className="inspector-tag-suggestions">
-              {matchingTags.map((tag) => (
-                <li key={tag.id}>
-                  <button
-                    className="inspector-tag-suggestion"
-                    onClick={() => {
-                      void onAddTag(fileId, tag.id);
-                      setTagInput("");
-                    }}
-                    type="button"
+          {showSuggestions ? (
+            <ul
+              aria-label="Tag suggestions"
+              className="inspector-tag-suggestions"
+              id={suggestionsListId}
+              role="listbox"
+            >
+              {matchingTags.map((tag, index) => {
+                const isActive = index === activeSuggestionIndex;
+                return (
+                  <li
+                    aria-selected={isActive}
+                    id={suggestionOptionId(index)}
+                    key={tag.id}
+                    role="option"
                   >
-                    {tag.color ? (
-                      <span
-                        aria-hidden="true"
-                        className="tag-chip-swatch"
-                        style={{ background: tag.color }}
-                      />
-                    ) : null}
-                    {tag.name}
-                  </button>
-                </li>
-              ))}
+                    <button
+                      className={`inspector-tag-suggestion${isActive ? " inspector-tag-suggestion-active" : ""}`}
+                      onClick={() => attachSuggestion(tag)}
+                      onMouseEnter={() => setActiveSuggestionIndex(index)}
+                      tabIndex={-1}
+                      type="button"
+                    >
+                      {tag.color ? (
+                        <span
+                          aria-hidden="true"
+                          className="tag-chip-swatch"
+                          style={{ background: tag.color }}
+                        />
+                      ) : null}
+                      {tag.name}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           ) : null}
         </div>

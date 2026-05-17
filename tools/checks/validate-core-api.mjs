@@ -667,7 +667,7 @@ for (const value of [
   "FileOperationRecord",
   "FsOpsError",
   "FsOpsErrorCode",
-  "cross_volume",
+  "cross_root",
   "trash::delete",
   "remove_file",
   "remove_dir_all",

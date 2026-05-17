@@ -2124,10 +2124,34 @@ impl Database {
     }
 
     pub fn delete_tag(&self, id: i64) -> anyhow::Result<bool> {
-        let updated = self
-            .connection
-            .execute("DELETE FROM tags WHERE id = ?1", [id])?;
-        Ok(updated != 0)
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let mut affected_files: Vec<i64> = {
+            let mut statement = transaction
+                .prepare("SELECT file_id FROM file_tags WHERE tag_id = ?1 ORDER BY file_id ASC")?;
+            let rows = statement.query_map([id], |row| row.get::<_, i64>(0))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            ids
+        };
+        let updated = transaction.execute("DELETE FROM tags WHERE id = ?1", [id])?;
+        if updated == 0 {
+            // No transactional changes were made; commit the empty txn
+            // so we release locks promptly.
+            transaction.commit()?;
+            return Ok(false);
+        }
+        // CASCADE has already removed file_tags rows. Resync each affected
+        // file so media_fts.tags no longer carries the deleted tag's name.
+        affected_files.sort_unstable();
+        affected_files.dedup();
+        for file_id in &affected_files {
+            sync_media_fts_for_file_in_transaction(&transaction, *file_id)?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn list_file_tag_ids(&self, file_id: i64) -> anyhow::Result<Vec<i64>> {
@@ -2542,9 +2566,32 @@ impl Database {
             items.push(row?);
         }
 
-        // Populate per-file tag ids.
-        for item in items.iter_mut() {
-            item.tag_ids = self.list_file_tag_ids(item.id)?;
+        // Populate per-file tag ids in a single batched query so we avoid
+        // N+1 round-trips when the result set is large.
+        if !items.is_empty() {
+            let id_set: Vec<i64> = items.iter().map(|item| item.id).collect();
+            let placeholders = id_set.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            let sql = format!(
+                "SELECT file_id, tag_id FROM file_tags \
+                 WHERE file_id IN ({placeholders}) \
+                 ORDER BY file_id ASC, tag_id ASC"
+            );
+            let mut tag_index: std::collections::HashMap<i64, Vec<i64>> =
+                std::collections::HashMap::with_capacity(id_set.len());
+            let mut tag_statement = self.connection.prepare(&sql)?;
+            let parameters: Vec<Value> = id_set.iter().map(|id| Value::Integer(*id)).collect();
+            let rows = tag_statement.query_map(params_from_iter(parameters), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (file_id, tag_id) = row?;
+                tag_index.entry(file_id).or_default().push(tag_id);
+            }
+            for item in items.iter_mut() {
+                if let Some(tag_ids) = tag_index.remove(&item.id) {
+                    item.tag_ids = tag_ids;
+                }
+            }
         }
 
         let next_cursor = if items.len() > limit as usize {
@@ -7231,5 +7278,159 @@ mod tests {
             .iter()
             .all(|item| item.kind.as_deref() == Some("image")));
         assert!(result.items.iter().all(|item| item.id != files[2]));
+    }
+
+    #[test]
+    fn delete_tag_resyncs_fts_for_attached_files() {
+        let database = migrated_database();
+        let (root_id, _folder, files) = seed_search_fixture(&database);
+        let beach = files[1];
+
+        // Create a tag with a unique name and attach it to one file. Add a
+        // distinct note so the FTS row gets rebuilt to a known shape, and so
+        // we can assert the tag-only match disappears after deletion.
+        let tag = database.create_tag("ZebraTag", None).expect("create tag");
+        database
+            .add_file_tag(beach, tag.id)
+            .expect("attach tag to beach");
+
+        // Sanity check: the tag name matches via FTS before deletion.
+        let before = database
+            .search_media_page(SearchQuery {
+                q: Some("ZebraTag".to_string()),
+                root_id: Some(root_id),
+                folder_id: None,
+                kind: None,
+                min_rating: None,
+                favorite: None,
+                tag_ids: Vec::new(),
+                sort: "mtime_desc".to_string(),
+                limit: 50,
+                cursor: None,
+            })
+            .expect("search before delete");
+        let before_ids: Vec<i64> = before.items.iter().map(|item| item.id).collect();
+        assert!(
+            before_ids.contains(&beach),
+            "expected ZebraTag to match {beach} via FTS before deletion, got {before_ids:?}"
+        );
+
+        assert!(database.delete_tag(tag.id).expect("delete tag"));
+
+        // After deletion the FTS row for the previously tagged file must no
+        // longer carry "ZebraTag", so the search returns no hits.
+        let after = database
+            .search_media_page(SearchQuery {
+                q: Some("ZebraTag".to_string()),
+                root_id: Some(root_id),
+                folder_id: None,
+                kind: None,
+                min_rating: None,
+                favorite: None,
+                tag_ids: Vec::new(),
+                sort: "mtime_desc".to_string(),
+                limit: 50,
+                cursor: None,
+            })
+            .expect("search after delete");
+        let after_ids: Vec<i64> = after.items.iter().map(|item| item.id).collect();
+        assert!(
+            !after_ids.contains(&beach),
+            "expected ZebraTag to no longer match {beach} via FTS after deletion, got {after_ids:?}"
+        );
+    }
+
+    #[test]
+    fn search_media_page_populates_tag_ids_in_one_batch() {
+        let database = migrated_database();
+        let (root_id, folder_id, _files) = seed_search_fixture(&database);
+
+        // Five additional files with varying tag attachments so we can assert
+        // each tag_ids slice is correct without resorting to a second
+        // round-trip per row.
+        let mut file_ids = Vec::new();
+        for index in 0..5_i64 {
+            let name = format!("batch_{index}.jpg");
+            let id = database
+                .upsert_file(FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: name.clone(),
+                    ext: ".jpg".to_string(),
+                    size: 10 + index,
+                    mtime: 1000 + index,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("insert batch file");
+            database.upsert_media_kind(id, "image").expect("set kind");
+            file_ids.push(id);
+        }
+
+        let tag_red = database.create_tag("red", None).expect("create red");
+        let tag_blue = database.create_tag("blue", None).expect("create blue");
+        let tag_green = database.create_tag("green", None).expect("create green");
+
+        // Distinct attachments per file: empty, red, blue, red+blue, all three.
+        database
+            .set_file_tags(file_ids[0], &[])
+            .expect("set [] for f0");
+        database
+            .set_file_tags(file_ids[1], &[tag_red.id])
+            .expect("set red for f1");
+        database
+            .set_file_tags(file_ids[2], &[tag_blue.id])
+            .expect("set blue for f2");
+        database
+            .set_file_tags(file_ids[3], &[tag_red.id, tag_blue.id])
+            .expect("set red+blue for f3");
+        database
+            .set_file_tags(file_ids[4], &[tag_red.id, tag_blue.id, tag_green.id])
+            .expect("set all for f4");
+
+        let result = database
+            .search_media_page(SearchQuery {
+                q: None,
+                root_id: Some(root_id),
+                folder_id: Some(folder_id),
+                kind: Some("image".to_string()),
+                min_rating: None,
+                favorite: None,
+                tag_ids: Vec::new(),
+                sort: "mtime_asc".to_string(),
+                limit: 500,
+                cursor: None,
+            })
+            .expect("search batch");
+
+        let by_id: std::collections::HashMap<i64, Vec<i64>> = result
+            .items
+            .iter()
+            .map(|item| (item.id, item.tag_ids.clone()))
+            .collect();
+
+        let mut expected_f1 = vec![tag_red.id];
+        expected_f1.sort();
+        let mut actual_f1 = by_id.get(&file_ids[1]).cloned().unwrap_or_default();
+        actual_f1.sort();
+        assert_eq!(actual_f1, expected_f1);
+
+        let mut expected_f3 = vec![tag_red.id, tag_blue.id];
+        expected_f3.sort();
+        let mut actual_f3 = by_id.get(&file_ids[3]).cloned().unwrap_or_default();
+        actual_f3.sort();
+        assert_eq!(actual_f3, expected_f3);
+
+        let mut expected_f4 = vec![tag_red.id, tag_blue.id, tag_green.id];
+        expected_f4.sort();
+        let mut actual_f4 = by_id.get(&file_ids[4]).cloned().unwrap_or_default();
+        actual_f4.sort();
+        assert_eq!(actual_f4, expected_f4);
+
+        let actual_f0 = by_id.get(&file_ids[0]).cloned().unwrap_or_default();
+        assert!(
+            actual_f0.is_empty(),
+            "f0 must have no tags, got {actual_f0:?}"
+        );
     }
 }
