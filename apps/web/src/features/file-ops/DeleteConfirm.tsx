@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 import { useFocusTrap } from "./useFocusTrap";
 
 export interface DeleteConfirmProps {
@@ -65,13 +66,16 @@ export function DeleteConfirm({
         onCancel();
       }}
     >
-      <div
+      <LiquidGlassSurface
+        as="div"
         aria-labelledby="delete-dialog-title"
         aria-modal="true"
         className="dialog"
+        interactive
         onClick={(event) => event.stopPropagation()}
         ref={dialogRef}
         role="dialog"
+        tone="elevated"
       >
         <header className="dialog-header">
           <h2 className="dialog-title" id="delete-dialog-title">
@@ -138,7 +142,7 @@ export function DeleteConfirm({
             </button>
           </footer>
         </div>
-      </div>
+      </LiquidGlassSurface>
     </div>
   );
 }

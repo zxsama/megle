@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FolderRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 import { useFocusTrap } from "./useFocusTrap";
 
 export interface MoveDialogProps {
@@ -87,13 +88,16 @@ export function MoveDialog({
         onCancel();
       }}
     >
-      <div
+      <LiquidGlassSurface
+        as="div"
         aria-labelledby="move-dialog-title"
         aria-modal="true"
         className="dialog dialog-wide"
+        interactive
         onClick={(event) => event.stopPropagation()}
         ref={dialogRef}
         role="dialog"
+        tone="elevated"
       >
         <header className="dialog-header">
           <h2 id="move-dialog-title" className="dialog-title">
@@ -147,7 +151,7 @@ export function MoveDialog({
             </button>
           </footer>
         </div>
-      </div>
+      </LiquidGlassSurface>
     </div>
   );
 }

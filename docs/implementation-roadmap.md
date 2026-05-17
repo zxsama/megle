@@ -222,6 +222,7 @@ Phase 1 的 UI 重点：
 - 设置页、任务页、插件页和导入流程补齐完整产品细节。
 - 完成桌面壳 polish、空状态、错误态、快捷键和无障碍收尾。
 - 完成 Electron Windows acrylic 窗口材质、全局可操作控件鼠标反馈、菜单/Dialog/抽屉/Inspector 的统一液态玻璃交互语言。
+- 完成产品级 Liquid Glass primitive：独立折射/透镜层、SVG displacement filter、指针跟随高光、按压弹性、清晰内容层和无障碍降级。
 - 完成端到端回归、性能回归和手动验收清单。
 - 形成 Windows 桌面版 release candidate。
 
@@ -229,5 +230,5 @@ Phase 1 的 UI 重点：
 
 - 主工作流、异常流和危险操作流全部经过验证。
 - UI 设计系统覆盖完整产品而不是只覆盖主工作区。
-- `npm test` 必须通过 `check:ui-design`，防止后续界面、菜单和交互脱离液态玻璃设计语言。
+- `npm test` 必须通过 `check:ui-design`，防止后续界面、菜单和交互退化成单纯换色，或把玻璃材质错误应用到媒体网格 / 预览内容层。
 - 能给出可演示、可继续迭代、可发布的完整桌面产品版本。

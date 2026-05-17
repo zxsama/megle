@@ -1,5 +1,6 @@
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 export interface ContextMenuItem {
   id: string;
@@ -121,7 +122,7 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = "Item actions" }
     }
   }
 
-  function handleMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+  function handleMenuKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     const buttons = itemRefs.current;
     const active = document.activeElement;
     const currentIndex = buttons.findIndex((node) => node === active);
@@ -170,15 +171,18 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = "Item actions" }
   };
 
   return (
-    <div
+    <LiquidGlassSurface
+      as="div"
       aria-label={ariaLabel}
       className="context-menu"
+      interactive
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={handleMenuKeyDown}
       ref={ref}
       role="menu"
       style={style}
       tabIndex={-1}
+      tone="elevated"
     >
       {items.map((item, index) => (
         <button
@@ -200,7 +204,7 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = "Item actions" }
           <span className="context-menu-label">{item.label}</span>
         </button>
       ))}
-    </div>
+    </LiquidGlassSurface>
   );
 }
 

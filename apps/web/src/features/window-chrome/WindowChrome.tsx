@@ -1,6 +1,7 @@
 import { Maximize2, Minimize2, Minus, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getWindowControls } from "../../core/desktop";
+import { LiquidGlassButton } from "../../design/liquid-glass";
 
 /**
  * Frameless-window controls. Renders nothing when the desktop bridge does
@@ -42,30 +43,33 @@ export function WindowChrome() {
 
   return (
     <div className="window-chrome" role="group" aria-label="Window controls">
-      <button
+      <LiquidGlassButton
         aria-label="Minimize window"
         className="window-chrome-button"
         onClick={() => void controls.minimize()}
+        tone="control"
         type="button"
       >
         <Minus size={14} />
-      </button>
-      <button
+      </LiquidGlassButton>
+      <LiquidGlassButton
         aria-label={isMaximized ? "Restore window" : "Maximize window"}
         className="window-chrome-button"
         onClick={() => void handleMaximize()}
+        tone="control"
         type="button"
       >
         {isMaximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-      </button>
-      <button
+      </LiquidGlassButton>
+      <LiquidGlassButton
         aria-label="Close window"
         className="window-chrome-button window-chrome-button-close"
         onClick={() => void controls.close()}
+        tone="danger"
         type="button"
       >
         <X size={14} />
-      </button>
+      </LiquidGlassButton>
     </div>
   );
 }

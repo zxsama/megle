@@ -1,5 +1,6 @@
 import { FolderPlus } from "lucide-react";
 import { canPickNativeFolder, pickNativeFolder } from "../../core/desktop";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 export interface OnboardingHeroProps {
   rootCount: number;
@@ -35,13 +36,18 @@ export function OnboardingHero({ rootCount, loading, onAddRoot }: OnboardingHero
 
   return (
     <section className="workspace simple-workspace onboarding-hero" aria-label="Onboarding">
-      <header className="toolbar">
+      <LiquidGlassSurface as="header" className="toolbar" interactive tone="chrome">
         <div>
           <div className="toolbar-title">Welcome to Megle</div>
           <div className="toolbar-meta">No roots yet</div>
         </div>
-      </header>
-      <div className="onboarding-hero-card">
+      </LiquidGlassSurface>
+      <LiquidGlassSurface
+        as="div"
+        className="onboarding-hero-card"
+        interactive
+        tone="elevated"
+      >
         <div className="onboarding-hero-icon" aria-hidden="true">
           <FolderPlus size={28} />
         </div>
@@ -57,7 +63,7 @@ export function OnboardingHero({ rootCount, loading, onAddRoot }: OnboardingHero
         >
           Choose folder
         </button>
-      </div>
+      </LiquidGlassSurface>
     </section>
   );
 }

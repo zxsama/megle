@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
@@ -24,7 +25,12 @@ export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
 
   return (
     <section className="workspace" aria-label="Library workbench">
-      <header className="toolbar toolbar-library">
+      <LiquidGlassSurface
+        as="header"
+        className="toolbar toolbar-library"
+        interactive
+        tone="chrome"
+      >
         <div className="toolbar-titles">
           <div className="toolbar-title">
             {selectedFolder?.name ?? selectedRoot?.displayName ?? "Library"}
@@ -48,7 +54,7 @@ export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
             <RefreshCw size={16} />
           </button>
         </div>
-      </header>
+      </LiquidGlassSurface>
       <FilterChips
         kind={library.searchState.kind}
         minRating={library.searchState.minRating}

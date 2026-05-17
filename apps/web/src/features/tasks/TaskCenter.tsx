@@ -10,6 +10,7 @@ import {
   X
 } from "lucide-react";
 import type { TaskRecord, TaskStatus } from "@megle/core-client";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface TaskCenterProps {
   tasks: TaskRecord[];
@@ -68,7 +69,12 @@ export function TaskCenter({
 
   return (
     <section className="workspace simple-workspace" aria-label="Task workbench">
-      <header className="toolbar task-center-toolbar">
+      <LiquidGlassSurface
+        as="header"
+        className="toolbar task-center-toolbar"
+        interactive
+        tone="chrome"
+      >
         <div>
           <div className="toolbar-title">Task center</div>
           <div className="toolbar-meta">
@@ -85,7 +91,7 @@ export function TaskCenter({
           <RefreshCw size={14} />
           <span>Refresh</span>
         </button>
-      </header>
+      </LiquidGlassSurface>
 
       <div className="task-center">
         <div
@@ -153,10 +159,13 @@ function TaskCenterRow({ task, busy, onCancel, onRetry }: TaskCenterRowProps) {
   const hasError = Boolean(task.error);
 
   return (
-    <article
+    <LiquidGlassSurface
+      as="article"
       className={`task-card status-${task.status}`}
+      interactive
       role="listitem"
       aria-label={`${kindLabel(task.kind)} task ${task.id}`}
+      tone="panel"
     >
       <header className="task-card-header">
         <div className="task-card-heading">
@@ -268,7 +277,7 @@ function TaskCenterRow({ task, busy, onCancel, onRetry }: TaskCenterRowProps) {
           </div>
         </div>
       ) : null}
-    </article>
+    </LiquidGlassSurface>
   );
 }
 

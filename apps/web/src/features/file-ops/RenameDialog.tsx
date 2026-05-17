@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 import { useFocusTrap } from "./useFocusTrap";
 
 export interface RenameDialogProps {
@@ -101,13 +102,16 @@ export function RenameDialog({
         onCancel();
       }}
     >
-      <div
+      <LiquidGlassSurface
+        as="div"
         aria-labelledby="rename-dialog-title"
         aria-modal="true"
         className="dialog"
+        interactive
         onClick={(event) => event.stopPropagation()}
         ref={dialogRef}
         role="dialog"
+        tone="elevated"
       >
         <header className="dialog-header">
           <h2 id="rename-dialog-title" className="dialog-title">
@@ -149,7 +153,7 @@ export function RenameDialog({
             </button>
           </footer>
         </form>
-      </div>
+      </LiquidGlassSurface>
     </div>
   );
 }

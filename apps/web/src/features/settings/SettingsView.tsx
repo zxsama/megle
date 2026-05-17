@@ -1,5 +1,6 @@
 import { CheckCircle2, Database, FolderCog, Trash2, XCircle } from "lucide-react";
 import type { LibraryState } from "../../core/useLibraryData";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface SettingsViewProps {
   library: LibraryState;
@@ -14,14 +15,20 @@ export function SettingsView({ library }: SettingsViewProps) {
 
   return (
     <section className="workspace simple-workspace" aria-label="Settings workbench">
-      <header className="toolbar">
+      <LiquidGlassSurface as="header" className="toolbar" interactive tone="chrome">
         <div>
           <div className="toolbar-title">Settings</div>
           <div className="toolbar-meta">Local library settings and diagnostics</div>
         </div>
-      </header>
+      </LiquidGlassSurface>
       <div className="settings-body">
-        <section className="settings-section" aria-labelledby="settings-diagnostics-title">
+        <LiquidGlassSurface
+          as="section"
+          className="settings-section"
+          aria-labelledby="settings-diagnostics-title"
+          interactive
+          tone="panel"
+        >
           <h2 className="settings-section-title" id="settings-diagnostics-title">
             Diagnostics
           </h2>
@@ -60,9 +67,15 @@ export function SettingsView({ library }: SettingsViewProps) {
               </dd>
             </div>
           </dl>
-        </section>
+        </LiquidGlassSurface>
 
-        <section className="settings-section" aria-labelledby="settings-cache-title">
+        <LiquidGlassSurface
+          as="section"
+          className="settings-section"
+          aria-labelledby="settings-cache-title"
+          interactive
+          tone="panel"
+        >
           <h2 className="settings-section-title" id="settings-cache-title">
             Thumbnail cache
           </h2>
@@ -78,7 +91,7 @@ export function SettingsView({ library }: SettingsViewProps) {
             <Trash2 aria-hidden="true" size={14} />
             <span>Clear thumbnail cache</span>
           </button>
-        </section>
+        </LiquidGlassSurface>
       </div>
     </section>
   );

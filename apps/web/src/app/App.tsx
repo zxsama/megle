@@ -2,6 +2,7 @@ import { History, Images, ListChecks, Package, Settings } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { FolderRecord, MediaRecord } from "@megle/core-client";
 import { useLibraryData } from "../core/useLibraryData";
+import { LiquidGlassButton, LiquidGlassLayer, LiquidGlassSurface } from "../design/liquid-glass";
 import { ContextMenu, type ContextMenuItem } from "../features/file-ops/ContextMenu";
 import { DeleteConfirm } from "../features/file-ops/DeleteConfirm";
 import { MoveDialog } from "../features/file-ops/MoveDialog";
@@ -108,127 +109,145 @@ export function App() {
   const removeTarget = fileOps.remove.target;
 
   return (
-    <main className="app-shell">
-      <header className="topbar topbar-drag">
-        <div className="chrome-title">Megle</div>
-        <nav className="top-tabs" aria-label="Workbench sections">
-          {tabs.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                aria-current={activeView === tab.id ? "page" : undefined}
-                className={activeView === tab.id ? "top-tab active" : "top-tab"}
-                key={tab.id}
-                onClick={() => setActiveView(tab.id)}
-                type="button"
-              >
-                <Icon size={16} />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="topbar-spacer" />
-        <button
-          aria-label="Toggle recent file operations"
-          aria-pressed={recentOpsOpen}
-          className={`top-tab${recentOpsOpen ? " active" : ""}`}
-          onClick={() => {
-            setRecentOpsOpen((current) => {
-              const next = !current;
-              if (next) void library.loadRecentOps();
-              return next;
-            });
-          }}
-          type="button"
-          title="Recent file operations"
+    <LiquidGlassLayer>
+      <main className="app-shell">
+        <LiquidGlassSurface
+          as="header"
+          className="topbar topbar-drag"
+          interactive
+          tone="chrome"
         >
-          <History size={16} />
-          <span>Recent ops</span>
-        </button>
-        <WindowChrome />
-      </header>
+          <div className="chrome-title-block">
+            <div className="chrome-title">Megle</div>
+            <div className="chrome-subtitle">Local media workbench</div>
+          </div>
+          <nav className="top-tabs" aria-label="Workbench sections">
+            {tabs.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <LiquidGlassButton
+                  active={activeView === tab.id}
+                  aria-current={activeView === tab.id ? "page" : undefined}
+                  className={activeView === tab.id ? "top-tab active" : "top-tab"}
+                  key={tab.id}
+                  onClick={() => setActiveView(tab.id)}
+                  tone="control"
+                  type="button"
+                >
+                  <Icon size={16} />
+                  <span>{tab.label}</span>
+                </LiquidGlassButton>
+              );
+            })}
+          </nav>
+          <div className="topbar-spacer" />
+          <LiquidGlassButton
+            active={recentOpsOpen}
+            aria-label="Toggle recent file operations"
+            aria-pressed={recentOpsOpen}
+            className={`top-tab${recentOpsOpen ? " active" : ""}`}
+            onClick={() => {
+              setRecentOpsOpen((current) => {
+                const next = !current;
+                if (next) void library.loadRecentOps();
+                return next;
+              });
+            }}
+            type="button"
+            title="Recent file operations"
+          >
+            <History size={16} />
+            <span>Recent ops</span>
+          </LiquidGlassButton>
+          <WindowChrome />
+        </LiquidGlassSurface>
 
-      <LibrarySidebar library={library} onFolderContextMenu={handleFolderContextMenu} />
+        <LibrarySidebar library={library} onFolderContextMenu={handleFolderContextMenu} />
 
-      {activeView === "library" ? (
-        library.roots.length === 0 && !library.loading ? (
-          <OnboardingHero
-            rootCount={library.roots.length}
-            loading={library.loading}
-            onAddRoot={(path) => library.addRoot(path)}
+        {activeView === "library" ? (
+          library.roots.length === 0 && !library.loading ? (
+            <OnboardingHero
+              rootCount={library.roots.length}
+              loading={library.loading}
+              onAddRoot={(path) => library.addRoot(path)}
+            />
+          ) : (
+            <LibraryView library={library} onMediaContextMenu={handleMediaContextMenu} />
+          )
+        ) : null}
+        {activeView === "tasks" ? (
+          <TaskCenter
+            busyTaskIds={library.busyTaskIds}
+            onCancel={(taskId) => {
+              void library.cancelTask(taskId);
+            }}
+            onRefresh={() => {
+              void library.refreshTasks();
+            }}
+            onRetry={(taskId) => {
+              void library.retryTask(taskId);
+            }}
+            scanActive={library.scanActive}
+            tasks={library.tasks}
           />
-        ) : (
-          <LibraryView library={library} onMediaContextMenu={handleMediaContextMenu} />
-        )
-      ) : null}
-      {activeView === "tasks" ? (
-        <TaskCenter
-          busyTaskIds={library.busyTaskIds}
-          onCancel={(taskId) => {
-            void library.cancelTask(taskId);
-          }}
-          onRefresh={() => {
-            void library.refreshTasks();
-          }}
-          onRetry={(taskId) => {
-            void library.retryTask(taskId);
-          }}
-          scanActive={library.scanActive}
-          tasks={library.tasks}
+        ) : null}
+        {activeView === "plugins" ? <PluginsView /> : null}
+        {activeView === "settings" ? <SettingsView library={library} /> : null}
+
+        <TaskPanel scanActive={library.scanActive} tasks={library.tasks} />
+
+        {recentOpsOpen ? (
+          <LiquidGlassSurface
+            as="div"
+            className="recent-ops-drawer"
+            interactive
+            tone="elevated"
+          >
+            <RecentOpsPanel
+              loading={library.recentOpsLoading}
+              onDismiss={() => setRecentOpsOpen(false)}
+              onRefresh={() => void library.loadRecentOps()}
+              ops={library.recentOps}
+            />
+          </LiquidGlassSurface>
+        ) : null}
+
+        {menu ? <ContextMenu items={menu.items} onClose={closeMenu} x={menu.x} y={menu.y} /> : null}
+
+        <RenameDialog
+          busy={fileOps.rename.busy}
+          currentName={renameTarget ? targetSampleName(renameTarget) : ""}
+          kind={renameTarget?.kind === "folder" ? "folder" : "file"}
+          onCancel={fileOps.closeAll}
+          onSubmit={(newName) => void fileOps.submitRename(newName)}
+          open={renameTarget !== null}
+          serverError={fileOps.rename.serverError}
         />
-      ) : null}
-      {activeView === "plugins" ? <PluginsView /> : null}
-      {activeView === "settings" ? <SettingsView library={library} /> : null}
 
-      <TaskPanel scanActive={library.scanActive} tasks={library.tasks} />
+        <MoveDialog
+          busy={fileOps.move.busy}
+          fileIds={moveTarget ? collectFileIds(moveTarget) : []}
+          folderIds={moveTarget ? collectFolderIds(moveTarget) : []}
+          library={library}
+          onCancel={fileOps.closeAll}
+          onSubmit={(folderId) => void fileOps.submitMove(folderId)}
+          open={moveTarget !== null}
+          serverError={fileOps.move.serverError}
+          serverErrorCode={fileOps.move.serverErrorCode}
+        />
 
-      {recentOpsOpen ? (
-        <div className="recent-ops-drawer">
-          <RecentOpsPanel
-            loading={library.recentOpsLoading}
-            onDismiss={() => setRecentOpsOpen(false)}
-            onRefresh={() => void library.loadRecentOps()}
-            ops={library.recentOps}
-          />
-        </div>
-      ) : null}
-
-      {menu ? <ContextMenu items={menu.items} onClose={closeMenu} x={menu.x} y={menu.y} /> : null}
-
-      <RenameDialog
-        busy={fileOps.rename.busy}
-        currentName={renameTarget ? targetSampleName(renameTarget) : ""}
-        kind={renameTarget?.kind === "folder" ? "folder" : "file"}
-        onCancel={fileOps.closeAll}
-        onSubmit={(newName) => void fileOps.submitRename(newName)}
-        open={renameTarget !== null}
-        serverError={fileOps.rename.serverError}
-      />
-
-      <MoveDialog
-        busy={fileOps.move.busy}
-        fileIds={moveTarget ? collectFileIds(moveTarget) : []}
-        folderIds={moveTarget ? collectFolderIds(moveTarget) : []}
-        library={library}
-        onCancel={fileOps.closeAll}
-        onSubmit={(folderId) => void fileOps.submitMove(folderId)}
-        open={moveTarget !== null}
-        serverError={fileOps.move.serverError}
-        serverErrorCode={fileOps.move.serverErrorCode}
-      />
-
-      <DeleteConfirm
-        busy={fileOps.remove.busy}
-        fileCount={removeTarget ? targetCounts(removeTarget).files : 0}
-        folderCount={removeTarget ? targetCounts(removeTarget).folders : 0}
-        onCancel={fileOps.closeAll}
-        onConfirm={() => void fileOps.submitDelete()}
-        open={removeTarget !== null}
-        permanent={fileOps.remove.permanent}
-        serverError={fileOps.remove.serverError}
-      />
-    </main>
+        <DeleteConfirm
+          busy={fileOps.remove.busy}
+          fileCount={removeTarget ? targetCounts(removeTarget).files : 0}
+          folderCount={removeTarget ? targetCounts(removeTarget).folders : 0}
+          onCancel={fileOps.closeAll}
+          onConfirm={() => void fileOps.submitDelete()}
+          open={removeTarget !== null}
+          permanent={fileOps.remove.permanent}
+          serverError={fileOps.remove.serverError}
+        />
+      </main>
+    </LiquidGlassLayer>
   );
 }
 

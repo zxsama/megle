@@ -12,6 +12,7 @@ import { FormEvent, useState } from "react";
 import type { FolderRecord, RootRecord } from "../../core/types";
 import { canPickNativeFolder, pickNativeFolder } from "../../core/desktop";
 import type { LibraryState } from "../../core/useLibraryData";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface LibrarySidebarProps {
   library: LibraryState;
@@ -50,7 +51,13 @@ export function LibrarySidebar({ library, onFolderContextMenu }: LibrarySidebarP
   }
 
   return (
-    <aside className="library-sidebar" aria-label="Library folders">
+    <LiquidGlassSurface
+      as="aside"
+      className="library-sidebar"
+      aria-label="Library folders"
+      interactive
+      tone="panel"
+    >
       <div className="sidebar-heading">
         <div>
           <div className="panel-title">Library</div>
@@ -115,7 +122,7 @@ export function LibrarySidebar({ library, onFolderContextMenu }: LibrarySidebarP
         ))}
         {library.roots.length === 0 ? <div className="empty-panel">No roots</div> : null}
       </div>
-    </aside>
+    </LiquidGlassSurface>
   );
 }
 

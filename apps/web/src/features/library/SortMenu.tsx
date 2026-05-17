@@ -1,6 +1,7 @@
 import { ArrowDownUp } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 
 export type SortOption =
   | "mtime_desc"
@@ -97,18 +98,20 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
 
   return (
     <div className="sort-menu">
-      <button
+      <LiquidGlassButton
         ref={buttonRef}
+        active={open}
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label={`Sort: ${SORT_LABEL[value]}`}
         className={`sort-menu-trigger${open ? " sort-menu-trigger-open" : ""}`}
         onClick={() => setOpen((prev) => !prev)}
+        tone="control"
         type="button"
       >
         <ArrowDownUp aria-hidden="true" size={14} />
         <span>{SORT_LABEL[value]}</span>
-      </button>
+      </LiquidGlassButton>
 
       {open ? (
         <>
@@ -118,10 +121,13 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
             className="sort-menu-backdrop"
             onClick={() => closeAndReturnFocus()}
           />
-          <ul
+          <LiquidGlassSurface
+            as="ul"
             className="sort-menu-list"
+            interactive
             role="listbox"
             aria-label="Sort options"
+            tone="elevated"
           >
             {SORT_OPTIONS.map((option, index) => (
               <li key={option.value}>
@@ -140,7 +146,7 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
                 </button>
               </li>
             ))}
-          </ul>
+          </LiquidGlassSurface>
         </>
       ) : null}
     </div>

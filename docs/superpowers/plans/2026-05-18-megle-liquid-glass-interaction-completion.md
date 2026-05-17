@@ -14,11 +14,27 @@
 
 - The Windows desktop window uses a transparent acrylic material while retaining the self-drawn frameless chrome.
 - The React app uses one liquid-glass token set for canvas, panels, controls, elevated surfaces, borders, blur, shadows, and mouse interaction feedback.
+- The React app has a reusable liquid-glass primitive layer rather than relying on CSS variables alone.
+- Glass surfaces are composed from a refractive backdrop layer, lens/highlight layer, and sharp content layer.
+- The implementation uses SVG filter/displacement maps for edge refraction/lensing and pointer-driven illumination/compression for interaction.
+- Regular and clear variants are encoded by the primitive; clear includes a dimming layer and must be used selectively.
+- Selective tinting is represented by tones for primary and dangerous actions instead of tinting every control.
 - All operable controls have visible hover, active, focus-visible, disabled, and pointer behavior unless a component intentionally overrides it with a stronger state.
 - Main control layers use glass styling: topbar, sidebar, toolbar, inspector, and task panel.
 - Floating layers use elevated glass styling: context menu, sort menu, dialogs, recent operations drawer, plugin details, settings sections, and empty-state cards.
 - The media grid and preview content remain stable dark content surfaces without persistent large-area blur over thumbnails.
-- The root test suite includes a UI design boundary check so future work cannot silently regress the liquid-glass baseline.
+- The root test suite includes a UI design boundary check so future work cannot silently regress the liquid-glass baseline or move glass into the content layer.
+
+## 2026-05-18 Product-Grade Liquid Glass Pass
+
+The first committed Phase 10 pass intentionally established the acrylic shell and a CSS baseline. The follow-up implementation pass raises the bar to the user-requested Apple-documented Liquid Glass model:
+
+- Apple requirement: Liquid Glass is a dynamic material that bends, shapes, and refracts light. Megle now owns `apps/web/src/design/liquid-glass/LiquidGlassSurface.tsx`, which defines SVG turbulence, displacement, and color matrix filters under `megle-liquid-glass-refraction` and `megle-liquid-glass-edge`.
+- Apple requirement: glass is a distinct floating functional layer above content. Megle wraps chrome/navigation/floating control surfaces with `LiquidGlassSurface` / `LiquidGlassButton`; the media grid, thumbnails, and preview canvas remain normal content surfaces.
+- Apple requirement: glass adapts for legibility with tint, shadow, dynamic range, and separation. CSS tones now distinguish chrome, panels, elevated surfaces, primary actions, danger actions, and controls; global fallbacks cover reduced transparency, increased contrast, reduced motion, and forced colors.
+- Apple requirement: glass responds to interaction by flexing and illuminating. The primitive tracks pointer position through CSS variables, sets pressed state attributes, and drives hover/click lens illumination without blurring child content.
+- rdev/liquid-glass-react influence: Megle uses a local primitive inspired by SVG displacement, configurable blur/saturation/lens intensity, pointer tracking, and separated backdrop/content layers. It does not copy the package source.
+- Validator requirement: `tools/checks/validate-ui-design.mjs` now fails if the app lacks the primitive source, SVG refraction/displacement filters, pointer interaction handling, accessibility fallbacks, primitive consumption, or if grid/preview content selectors gain persistent backdrop filtering.
 
 ## Task 1: Guard The Design Contract
 

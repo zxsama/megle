@@ -1,5 +1,6 @@
 import { CheckCircle2, Clock3, Loader2, XCircle } from "lucide-react";
 import type { TaskRecord } from "../../core/types";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface TaskPanelProps {
   tasks: TaskRecord[];
@@ -14,7 +15,13 @@ export function TaskPanel({ tasks, scanActive }: TaskPanelProps) {
   const failed = tasks.filter((task) => task.status === "failed").length;
 
   return (
-    <aside className="task-panel" aria-label="Tasks">
+    <LiquidGlassSurface
+      as="aside"
+      className="task-panel"
+      aria-label="Tasks"
+      interactive
+      tone="panel"
+    >
       <div className="panel-heading">
         <div>
           <div className="panel-title">Tasks</div>
@@ -37,7 +44,7 @@ export function TaskPanel({ tasks, scanActive }: TaskPanelProps) {
           <div className="empty-panel">No tasks</div>
         )}
       </div>
-    </aside>
+    </LiquidGlassSurface>
   );
 }
 

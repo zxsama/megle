@@ -1,5 +1,6 @@
 import type { PluginRecord } from "@megle/core-client";
 import { Loader2 } from "lucide-react";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 import { StatusPill } from "./StatusPill";
 
 interface PluginCardProps {
@@ -22,10 +23,14 @@ export function PluginCard({
   const errorTooltip = plugin.lastError ?? undefined;
 
   return (
-    <article
+    <LiquidGlassSurface
+      as="article"
+      active={selected}
       className={`plugin-card${selected ? " selected" : ""}`}
+      interactive
       role="listitem"
       aria-label={`${plugin.name} plugin`}
+      tone="panel"
     >
       <button
         className="plugin-card-body"
@@ -78,6 +83,6 @@ export function PluginCard({
           </span>
         </label>
       </div>
-    </article>
+    </LiquidGlassSurface>
   );
 }

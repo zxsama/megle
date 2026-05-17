@@ -1,5 +1,6 @@
 import { Search, X } from "lucide-react";
 import { useRef } from "react";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface SearchBarProps {
   value: string;
@@ -11,7 +12,7 @@ export function SearchBar({ value, onChange, placeholder = "Search library…" }
   const inputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <div className="search-bar">
+    <LiquidGlassSurface as="div" className="search-bar" interactive tone="control">
       <Search aria-hidden="true" className="search-bar-icon" size={15} />
       <input
         ref={inputRef}
@@ -35,6 +36,6 @@ export function SearchBar({ value, onChange, placeholder = "Search library…" }
           <X size={13} />
         </button>
       ) : null}
-    </div>
+    </LiquidGlassSurface>
   );
 }

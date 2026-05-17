@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { AlertTriangle, Loader2, RefreshCw } from "lucide-react";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 import { PluginCard } from "./PluginCard";
 import { PluginDetail } from "./PluginDetail";
 import { usePluginsData } from "./usePluginsData";
@@ -24,7 +25,12 @@ export function PluginsView() {
 
   return (
     <section className="workspace simple-workspace" aria-label="Plugins workbench">
-      <header className="toolbar plugins-toolbar">
+      <LiquidGlassSurface
+        as="header"
+        className="toolbar plugins-toolbar"
+        interactive
+        tone="chrome"
+      >
         <div>
           <div className="toolbar-title">Plugins</div>
           <div className="toolbar-meta">
@@ -49,7 +55,7 @@ export function PluginsView() {
           )}
           <span>{discovering ? "Scanning…" : "Re-scan"}</span>
         </button>
-      </header>
+      </LiquidGlassSurface>
 
       <div className="plugins-body">
         {plugins.error ? (
@@ -108,7 +114,12 @@ export function PluginsView() {
               ))
             )}
           </div>
-          <div className="plugins-detail-pane">
+          <LiquidGlassSurface
+            as="div"
+            className="plugins-detail-pane"
+            interactive
+            tone="panel"
+          >
             {selected ? (
               <PluginDetail
                 busy={plugins.busyPluginIds.has(selected.id)}
@@ -122,7 +133,7 @@ export function PluginsView() {
                   : "Select a plugin to inspect capabilities, permissions, and manifest details."}
               </div>
             )}
-          </div>
+          </LiquidGlassSurface>
         </div>
       </div>
     </section>

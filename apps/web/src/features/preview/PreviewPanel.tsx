@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { createCoreClient } from "@megle/core-client";
 import { getCoreClientConfig } from "../../core/client";
+import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface PreviewPanelProps {
   selectedMedia: MediaRecord | null;
@@ -11,7 +12,13 @@ interface PreviewPanelProps {
 
 export function PreviewPanel({ selectedMedia, thumbnail, children }: PreviewPanelProps) {
   return (
-    <section className="inspector-panel preview-panel" aria-label="Preview">
+    <LiquidGlassSurface
+      as="section"
+      className="inspector-panel preview-panel"
+      aria-label="Preview"
+      interactive
+      tone="panel"
+    >
       <div className="panel-title">Preview</div>
       {selectedMedia ? (
         <>
@@ -35,7 +42,7 @@ export function PreviewPanel({ selectedMedia, thumbnail, children }: PreviewPane
       ) : (
         <div className="empty-panel">No selection</div>
       )}
-    </section>
+    </LiquidGlassSurface>
   );
 }
 
