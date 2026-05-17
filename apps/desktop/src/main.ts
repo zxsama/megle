@@ -86,7 +86,7 @@ async function createWindow(): Promise<void> {
     frame: false,
     titleBarStyle: "hidden",
     webPreferences: {
-      preload: fileURLToPath(new URL("./preload.js", import.meta.url)),
+      preload: fileURLToPath(new URL("./preload.cjs", import.meta.url)),
       contextIsolation: true,
       nodeIntegration: false,
       additionalArguments: [
@@ -297,9 +297,33 @@ function resolvePluginsDir(dbPath: string): string {
 }
 
 app.whenReady().then(async () => {
-  await ensureCoreReady();
+  const session = await ensureCoreReady();
+  await maybeAutoAddRoot(session);
   await createWindow();
 });
+
+async function maybeAutoAddRoot(session: CoreSession): Promise<void> {
+  const target = process.env.MEGLE_AUTO_ADD_ROOT?.trim();
+  if (!target) return;
+  try {
+    const response = await fetch(`${session.baseUrl}/roots`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-megle-session": session.sessionToken
+      },
+      body: JSON.stringify({ path: target, displayName: path.basename(target) })
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      console.warn(`[megle] MEGLE_AUTO_ADD_ROOT addRoot failed (${response.status}): ${text}`);
+    } else {
+      console.log(`[megle] auto-added root ${target}`);
+    }
+  } catch (error) {
+    console.warn("[megle] MEGLE_AUTO_ADD_ROOT request failed:", error);
+  }
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

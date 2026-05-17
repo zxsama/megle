@@ -1,8 +1,13 @@
-import { contextBridge, ipcRenderer } from "electron";
+// CommonJS preload script. Electron's sandboxed preload runtime requires
+// CJS, while the rest of the desktop module is ESM (because the workspace
+// root sets type: module). We ship this hand-maintained .cjs alongside the
+// tsc output so the renderer reliably gets the bridge.
 
-function readArg(prefix: string): string | undefined {
+const { contextBridge, ipcRenderer } = require("electron");
+
+function readArg(prefix) {
   const arg = process.argv.find((item) => item.startsWith(prefix));
-  return arg?.slice(prefix.length);
+  return arg ? arg.slice(prefix.length) : undefined;
 }
 
 contextBridge.exposeInMainWorld("megleDesktop", {

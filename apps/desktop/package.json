@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "npm --prefix ../.. run dev",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('src/preload.cjs', 'dist/preload.cjs')\""
   },
   "dependencies": {
     "electron": "^33.0.0"

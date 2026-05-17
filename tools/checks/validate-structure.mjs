@@ -57,7 +57,7 @@ const requiredFiles = [
   "apps/desktop/src/core-process.ts",
   "apps/desktop/src/core-session.ts",
   "apps/desktop/src/main.ts",
-  "apps/desktop/src/preload.ts",
+  "apps/desktop/src/preload.cjs",
   "apps/web/package.json",
   "apps/web/src/core/client.ts",
   "apps/web/src/core/types.ts",

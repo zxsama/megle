@@ -78,20 +78,12 @@ export function isFreshThumbnailForMediaRecord(
     return false;
   }
 
-  const mediaState = normalizeMediaThumbnailState(mediaRecord.thumbnailState);
-  if (thumbnail.state === "pending" || thumbnail.state === "queued") {
-    return mediaState === "pending" || mediaState === "queued";
-  }
-
-  if (mediaState === "pending" || mediaState === "queued" || !mediaRecord.thumbnailCacheKey) {
-    return false;
-  }
-
-  if (thumbnail.state === "ready") {
-    return thumbnail.asset?.cacheKey === mediaRecord.thumbnailCacheKey;
-  }
-
-  return thumbnail.state === mediaState;
+  // Trust the thumbnail response state directly. The /media listing
+  // endpoint omits per-row thumbnailState/thumbnailCacheKey for
+  // performance, so we cannot cross-validate against the media row.
+  // Pending/queued states are short-lived and are simply re-requested
+  // on the next poll.
+  return true;
 }
 
 function normalizeMediaThumbnailState(value: string | null | undefined): ThumbnailResponse["state"] {

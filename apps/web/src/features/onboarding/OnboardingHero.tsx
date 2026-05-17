@@ -1,21 +1,31 @@
 import { FolderPlus } from "lucide-react";
+import { canPickNativeFolder, pickNativeFolder } from "../../core/desktop";
 
 export interface OnboardingHeroProps {
   rootCount: number;
   loading: boolean;
+  onAddRoot: (path: string) => Promise<void> | void;
 }
 
 /**
  * Empty-state hero shown when the library has no roots configured.
- * Focuses the existing root path input in `LibrarySidebar` rather than
- * introducing a parallel form, so onboarding stays inside the same shell.
+ * Either fires the native folder picker (Electron) or focuses the existing
+ * root-path input in `LibrarySidebar` (browser fallback) so onboarding stays
+ * inside the same shell.
  */
-export function OnboardingHero({ rootCount, loading }: OnboardingHeroProps) {
+export function OnboardingHero({ rootCount, loading, onAddRoot }: OnboardingHeroProps) {
   if (loading || rootCount > 0) {
     return null;
   }
 
-  function focusRootInput() {
+  async function chooseFolder() {
+    if (canPickNativeFolder()) {
+      const folder = await pickNativeFolder();
+      if (folder) {
+        await onAddRoot(folder);
+        return;
+      }
+    }
     const input = document.querySelector<HTMLInputElement>('[aria-label="Root path"]');
     if (!input) return;
     input.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -42,7 +52,7 @@ export function OnboardingHero({ rootCount, loading }: OnboardingHeroProps) {
         </p>
         <button
           className="onboarding-hero-cta"
-          onClick={focusRootInput}
+          onClick={() => void chooseFolder()}
           type="button"
         >
           Choose folder

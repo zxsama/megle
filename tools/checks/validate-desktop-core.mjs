@@ -43,7 +43,7 @@ function functionBody(source, signature) {
 const main = read("apps/desktop/src/main.ts");
 const session = read("apps/desktop/src/core-session.ts");
 const processFile = read("apps/desktop/src/core-process.ts");
-const preload = read("apps/desktop/src/preload.ts");
+const preload = read("apps/desktop/src/preload.cjs");
 const desktopPackage = read("apps/desktop/package.json");
 const rootPackage = read("package.json");
 const devRunner = read("tools/dev/run-dev.mjs");

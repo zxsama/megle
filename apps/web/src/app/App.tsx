@@ -153,7 +153,11 @@ export function App() {
 
       {activeView === "library" ? (
         library.roots.length === 0 && !library.loading ? (
-          <OnboardingHero rootCount={library.roots.length} loading={library.loading} />
+          <OnboardingHero
+            rootCount={library.roots.length}
+            loading={library.loading}
+            onAddRoot={(path) => library.addRoot(path)}
+          />
         ) : (
           <LibraryView library={library} onMediaContextMenu={handleMediaContextMenu} />
         )

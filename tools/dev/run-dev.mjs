@@ -100,7 +100,11 @@ await waitForUrl(webUrl);
 
 run("npm", ["--workspace", "@megle/desktop", "run", "build"]);
 
-const electron = spawnChild(electronCommand(), ["apps/desktop/dist/main.js"]);
+const electronArgs = ["apps/desktop/dist/main.js"];
+if (process.env.MEGLE_REMOTE_DEBUG === "1") {
+  electronArgs.unshift("--remote-debugging-port=9222");
+}
+const electron = spawnChild(electronCommand(), electronArgs);
 electron.on("exit", (code) => {
   shutdown();
   process.exit(code ?? 0);
