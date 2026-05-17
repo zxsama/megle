@@ -17,9 +17,13 @@ import {
 } from "../features/file-ops/useFileOps";
 import { LibrarySidebar } from "../features/library/LibrarySidebar";
 import { LibraryView } from "../features/library/LibraryView";
+import { OnboardingHero } from "../features/onboarding/OnboardingHero";
 import { PluginsView } from "../features/plugins/PluginsView";
+import { SettingsView } from "../features/settings/SettingsView";
+import { useShortcuts } from "../features/shortcuts/useShortcuts";
 import { TaskCenter } from "../features/tasks/TaskCenter";
 import { TaskPanel } from "../features/tasks/TaskPanel";
+import { WindowChrome } from "../features/window-chrome/WindowChrome";
 
 type AppView = "library" | "tasks" | "plugins" | "settings";
 
@@ -42,6 +46,8 @@ export function App() {
   const fileOps = useFileOpsController(library);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [recentOpsOpen, setRecentOpsOpen] = useState(false);
+
+  useShortcuts({ library, fileOps });
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -103,7 +109,7 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
+      <header className="topbar topbar-drag">
         <div className="chrome-title">Megle</div>
         <nav className="top-tabs" aria-label="Workbench sections">
           {tabs.map((tab) => {
@@ -140,12 +146,17 @@ export function App() {
           <History size={16} />
           <span>Recent ops</span>
         </button>
+        <WindowChrome />
       </header>
 
       <LibrarySidebar library={library} onFolderContextMenu={handleFolderContextMenu} />
 
       {activeView === "library" ? (
-        <LibraryView library={library} onMediaContextMenu={handleMediaContextMenu} />
+        library.roots.length === 0 && !library.loading ? (
+          <OnboardingHero rootCount={library.roots.length} loading={library.loading} />
+        ) : (
+          <LibraryView library={library} onMediaContextMenu={handleMediaContextMenu} />
+        )
       ) : null}
       {activeView === "tasks" ? (
         <TaskCenter
@@ -164,7 +175,7 @@ export function App() {
         />
       ) : null}
       {activeView === "plugins" ? <PluginsView /> : null}
-      {activeView === "settings" ? <PlaceholderView title="Settings" detail="Local library settings" /> : null}
+      {activeView === "settings" ? <SettingsView library={library} /> : null}
 
       <TaskPanel scanActive={library.scanActive} tasks={library.tasks} />
 
@@ -325,7 +336,7 @@ function buildFolderItems({
   ];
 }
 
-function PlaceholderView({ title, detail }: { title: string; detail: string }) {
+export function PlaceholderView({ title, detail }: { title: string; detail: string }) {
   return (
     <section className="workspace simple-workspace" aria-label={`${title} workbench`}>
       <header className="toolbar">

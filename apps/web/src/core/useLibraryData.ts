@@ -14,6 +14,7 @@ import type {
 } from "@megle/core-client";
 import { CoreApiError } from "@megle/core-client";
 import { createCoreClient } from "./client";
+import { readDesktopDiagnostics, type DesktopDiagnostics } from "./desktop";
 import {
   isFreshThumbnailForMediaRecord,
   readCachedThumbnailStates,
@@ -83,6 +84,8 @@ export interface LibraryState {
   lastScan: ScanSummary | null;
   recentOps: FileOperationRecord[];
   recentOpsLoading: boolean;
+  diagnostics: DesktopDiagnostics | null;
+  diagnosticsProbed: boolean;
   loadRecentOps: () => Promise<void>;
   renameFile: (fileId: number, newName: string) => Promise<FileOpResult>;
   renameFolder: (folderId: number, newName: string) => Promise<FileOpResult>;
@@ -98,7 +101,7 @@ export interface LibraryState {
   }) => Promise<FileOpResult>;
   setSelectedRootId: (rootId: number) => void;
   setSelectedFolder: (folder: FolderRecord) => void;
-  setSelectedMediaId: (mediaId: number) => void;
+  setSelectedMediaId: (mediaId: number | null) => void;
   toggleFolderExpanded: (folderId: number) => void;
   requestThumbnailStates: (mediaIds: number[]) => void;
   loadMoreFolderChildren: (folderId: number) => Promise<void>;
@@ -173,6 +176,8 @@ export function useLibraryData(): LibraryState {
   const [metadataSaving, setMetadataSaving] = useState(false);
   const [recentOps, setRecentOps] = useState<FileOperationRecord[]>([]);
   const [recentOpsLoading, setRecentOpsLoading] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | null>(null);
+  const [diagnosticsProbed, setDiagnosticsProbed] = useState(false);
   const mediaById = useMemo(() => new Map(media.map((item) => [item.id, item])), [media]);
   const mediaByIdRef = useRef(mediaById);
   mediaByIdRef.current = mediaById;
@@ -899,6 +904,19 @@ export function useLibraryData(): LibraryState {
     void loadRecentOps();
   }, [loadRecentOps]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void readDesktopDiagnostics().then((result) => {
+      if (!cancelled) {
+        setDiagnostics(result);
+        setDiagnosticsProbed(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const renameFile = useCallback(
     async (fileId: number, newName: string): Promise<FileOpResult> => {
       const previousMedia = media;
@@ -1080,6 +1098,8 @@ export function useLibraryData(): LibraryState {
     lastScan,
     recentOps,
     recentOpsLoading,
+    diagnostics,
+    diagnosticsProbed,
     loadRecentOps,
     renameFile,
     renameFolder,

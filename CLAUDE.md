@@ -143,6 +143,21 @@ Phase 1 skeleton with several routes already wired. When extending, build on wha
 - `npm test` currently passes end-to-end including `cargo fmt --all --check` and `cargo test --workspace`.
 - `npm audit` reports one high-severity issue. **Do not** run `npm audit fix --force` without reviewing package impact.
 
+### Phase Summary (1–10)
+
+Phases 1–10 of the master plan are complete. Each phase ships both Core and UI work inside the same shell, not back-end first.
+
+1. **Phase 1 — App skeleton.** Electron + Vite + Axum + SQLite wired with session-token auth, exact dev CORS, durable scan-task queue, and routes/migrations under one Cargo crate.
+2. **Phase 2 — Real directory browsing.** Add root, scan, populate folders/files/media, browse the real folder tree and grid, open the preview shell.
+3. **Phase 3 — Thumbnails and preview.** Tiny/grid/preview pipeline, viewport-priority scheduling, neighbor prefetch, stable dark grid surface, no-layout-shift tile loading.
+4. **Phase 4 — Task center and watcher.** Background scan/thumbnail queue, persistent `notify` watcher with overflow recovery, task drawer + Task Center page with cancel/retry, recovery on Core restart.
+5. **Phase 5 — Metadata, search, organizing.** Tags, ratings, favorites, notes, full-text search, filter chips, sort-by-rating, inspector metadata editing.
+6. **Phase 6 — Real file operations.** Rename, move, recycle/permanent delete with validation, conflict handling, atomic DB+filesystem transactions, recent-ops panel.
+7. **Phase 7 — Advanced media.** Real image decoder + resizer and FFmpeg sidecar for video posters, populate `width/height/duration/codec`, graceful failure for unsupported formats.
+8. **Phase 8 — Plugin manager.** Manifest discovery, enable/disable, capabilities/permissions display, plugin detail inspector. No runtime yet — registration only.
+9. **Phase 9 — Web / Docker.** Headless Core mode, Basic auth, mounted roots, HTTP asset delivery, the same React app shell served as static files.
+10. **Phase 10 — Release hardening.** Onboarding hero, empty states, Settings page with diagnostics, keyboard shortcuts (F2 / Delete / Shift+Delete / Ctrl+F / Esc), frameless desktop chrome with restored window state, release checklist at `docs/release-checklist.md`.
+
 Remaining scan work explicitly deferred: transactional scan batching, chunked commits, worker shutdown, progress counters, cancellation/retry semantics, clearer rescan failure/staleness behavior. The Phase 1 dynamic-port probe still has a small probe-and-close bind race before Core starts. Desktop dev still uses `cargo run -p megle-core`; a packaged Core sidecar replaces this for production.
 
 ## Next Execution Order

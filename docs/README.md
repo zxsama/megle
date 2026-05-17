@@ -93,10 +93,17 @@ Archived documents:
 
 ## Current Work
 
-Phase 0 performance gates are complete. The next step is Phase 1 app skeleton, UI foundation track, and real-directory browsing groundwork.
+Phase 10 (Release Hardening) is complete: the master plan in
+[`superpowers/plans/2026-05-16-megle-complete-product-plan.md`](superpowers/plans/2026-05-16-megle-complete-product-plan.md)
+has all ten tasks ticked, and the manual smoke-test list lives in
+[`release-checklist.md`](release-checklist.md). Phases 1–10 ship the full product loop —
+add a root, browse, preview, organize, file-ops, watcher, plugins, Web/Docker reuse, and a
+demoable frameless desktop build.
 
-The approved UI direction is now layered liquid glass with a shared desktop app shell. The next UI-specific step is the foundation track in `docs/superpowers/plans/2026-05-16-megle-ui-foundation.md`.
-The full-product execution order now lives in `docs/superpowers/plans/2026-05-16-megle-complete-product-plan.md`.
+The approved UI direction is layered liquid glass with a shared desktop app shell. The
+foundation track lives in `docs/superpowers/plans/2026-05-16-megle-ui-foundation.md`. The
+full-product execution order lives in
+`docs/superpowers/plans/2026-05-16-megle-complete-product-plan.md`.
 
 Completed Phase 0 gates:
 

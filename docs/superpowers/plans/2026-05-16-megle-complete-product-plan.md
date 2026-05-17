@@ -53,11 +53,11 @@
 - Modify: `D:/Megle/.codex/memory.md`
 - Verify: `npm test`
 
-- [ ] **Step 1: Treat the UI foundation plan as the first implementation gate**
+- [x] **Step 1: Treat the UI foundation plan as the first implementation gate**
 
 Use `D:/Megle/docs/superpowers/plans/2026-05-16-megle-ui-foundation.md` as the first executable slice.
 
-- [ ] **Step 2: Do not start feature-specific page polish before the shell is real**
+- [x] **Step 2: Do not start feature-specific page polish before the shell is real**
 
 Required UI baseline before Phase 2:
 
@@ -67,7 +67,7 @@ Required UI baseline before Phase 2:
 - reusable `app-shell`
 - Library / Settings / Plugins / Tasks page scaffolding
 
-- [ ] **Step 3: Verify the foundation slice**
+- [x] **Step 3: Verify the foundation slice**
 
 Run:
 
@@ -91,7 +91,7 @@ Expected:
 - Modify: `D:/Megle/docs/implementation-roadmap.md`
 - Verify: `npm test`
 
-- [ ] **Step 1: Write the detailed Phase 2 browsing plan**
+- [x] **Step 1: Write the detailed Phase 2 browsing plan**
 
 Scope the child plan to:
 
@@ -103,14 +103,14 @@ Scope the child plan to:
 - open preview entry point
 - use the shared toolbar / sidebar / inspector / context menu shell
 
-- [ ] **Step 2: Keep UI and Core work coupled**
+- [x] **Step 2: Keep UI and Core work coupled**
 
 The Phase 2 child plan must cover both:
 
 - Core scan/query endpoints
 - UI workbench integration inside the shared shell
 
-- [ ] **Step 3: Verify the first product slice**
+- [x] **Step 3: Verify the first product slice**
 
 Acceptance target:
 
@@ -123,7 +123,7 @@ Acceptance target:
 - Create: `D:/Megle/docs/superpowers/plans/2026-05-16-megle-thumbnail-preview.md`
 - Verify: performance benchmark references under `D:/Megle/docs/performance-results/`
 
-- [ ] **Step 1: Write the thumbnail/preview child plan**
+- [x] **Step 1: Write the thumbnail/preview child plan**
 
 Scope it to:
 
@@ -133,7 +133,7 @@ Scope it to:
 - preview transition behavior
 - neighbor prefetch
 
-- [ ] **Step 2: Keep visual behavior inside the approved UI rules**
+- [x] **Step 2: Keep visual behavior inside the approved UI rules**
 
 The child plan must explicitly keep:
 
@@ -142,7 +142,7 @@ The child plan must explicitly keep:
 - no layout shift on tile load
 - no expensive blur over the grid
 
-- [ ] **Step 3: Verify against the existing performance gates**
+- [x] **Step 3: Verify against the existing performance gates**
 
 Acceptance target:
 
@@ -157,7 +157,7 @@ Acceptance target:
 - Create: `D:/Megle/docs/superpowers/plans/2026-05-16-megle-task-center-and-watcher.md`
 - Modify: `D:/Megle/.codex/memory.md`
 
-- [ ] **Step 1: Write the watcher/task-center child plan**
+- [x] **Step 1: Write the watcher/task-center child plan**
 
 Scope it to:
 
@@ -167,7 +167,7 @@ Scope it to:
 - task center page
 - retry / failure UI
 
-- [ ] **Step 2: Treat this as both backend and product work**
+- [x] **Step 2: Treat this as both backend and product work**
 
 This phase is not only queue design. It must also deliver:
 
@@ -175,7 +175,7 @@ This phase is not only queue design. It must also deliver:
 - traceable failures
 - consistent recovery UI
 
-- [ ] **Step 3: Verify product-level behavior**
+- [x] **Step 3: Verify product-level behavior**
 
 Acceptance target:
 
@@ -189,7 +189,7 @@ Acceptance target:
 - Create: `D:/Megle/docs/superpowers/plans/2026-05-16-megle-metadata-search.md`
 - Verify: `npm test`
 
-- [ ] **Step 1: Write the metadata/search child plan**
+- [x] **Step 1: Write the metadata/search child plan**
 
 Scope it to:
 
@@ -202,7 +202,7 @@ Scope it to:
 - sort menu
 - saved views
 
-- [ ] **Step 2: Keep organization features inside the shell language**
+- [x] **Step 2: Keep organization features inside the shell language**
 
 The child plan must cover:
 
@@ -211,7 +211,7 @@ The child plan must cover:
 - inspector metadata editing
 - no split between “pretty shell” and “plain settings-like forms”
 
-- [ ] **Step 3: Verify the organizing loop**
+- [x] **Step 3: Verify the organizing loop**
 
 Acceptance target:
 
@@ -224,7 +224,7 @@ Acceptance target:
 - Create: `D:/Megle/docs/superpowers/plans/2026-05-16-megle-file-operations.md`
 - Verify: file operation consistency checks and manual confirmation flows
 
-- [ ] **Step 1: Write the file-operations child plan**
+- [x] **Step 1: Write the file-operations child plan**
 
 Scope it to:
 
@@ -235,7 +235,7 @@ Scope it to:
 - operation logs
 - UI recovery flows
 
-- [ ] **Step 2: Make dangerous actions part of the UI system**
+- [x] **Step 2: Make dangerous actions part of the UI system**
 
 The child plan must include:
 
@@ -245,7 +245,7 @@ The child plan must include:
 - partial-failure reporting
 - task history
 
-- [ ] **Step 3: Verify the real-product bar**
+- [x] **Step 3: Verify the real-product bar**
 
 Acceptance target:
 
@@ -257,7 +257,7 @@ Acceptance target:
 
 - Create: `D:/Megle/docs/superpowers/plans/2026-05-16-megle-advanced-media.md`
 
-- [ ] **Step 1: Write the advanced-media child plan**
+- [x] **Step 1: Write the advanced-media child plan**
 
 Scope it to:
 
@@ -266,7 +266,7 @@ Scope it to:
 - video preview
 - long-tail image decoder path
 
-- [ ] **Step 2: Preserve the same product interaction model**
+- [x] **Step 2: Preserve the same product interaction model**
 
 The child plan must explain how video and advanced formats still fit:
 
@@ -275,7 +275,7 @@ The child plan must explain how video and advanced formats still fit:
 - the same inspector
 - the same task and failure model
 
-- [ ] **Step 3: Verify graceful degradation**
+- [x] **Step 3: Verify graceful degradation**
 
 Acceptance target:
 
@@ -287,7 +287,7 @@ Acceptance target:
 
 - Create: `D:/Megle/docs/superpowers/plans/2026-05-16-megle-plugin-manager.md`
 
-- [ ] **Step 1: Write the plugin-manager child plan**
+- [x] **Step 1: Write the plugin-manager child plan**
 
 Scope it to:
 
@@ -298,7 +298,7 @@ Scope it to:
 - plugin settings
 - plugin manager page
 
-- [ ] **Step 2: Keep plugins inside the approved shell**
+- [x] **Step 2: Keep plugins inside the approved shell**
 
 The child plan must deliver:
 
@@ -306,7 +306,7 @@ The child plan must deliver:
 - plugin detail inspector
 - error isolation and visibility
 
-- [ ] **Step 3: Verify the extensibility loop**
+- [x] **Step 3: Verify the extensibility loop**
 
 Acceptance target:
 
@@ -318,7 +318,7 @@ Acceptance target:
 
 - Create: `D:/Megle/docs/superpowers/plans/2026-05-16-megle-web-docker.md`
 
-- [ ] **Step 1: Write the Web/Docker child plan**
+- [x] **Step 1: Write the Web/Docker child plan**
 
 Scope it to:
 
@@ -328,7 +328,7 @@ Scope it to:
 - HTTP asset delivery
 - UI reuse
 
-- [ ] **Step 2: Treat this as adaptation, not redesign**
+- [x] **Step 2: Treat this as adaptation, not redesign**
 
 The child plan must preserve:
 
@@ -336,7 +336,7 @@ The child plan must preserve:
 - the same page structure
 - the same component system
 
-- [ ] **Step 3: Verify product continuity**
+- [x] **Step 3: Verify product continuity**
 
 Acceptance target:
 
@@ -350,7 +350,7 @@ Acceptance target:
 - Modify: `D:/Megle/docs/README.md`
 - Modify: `D:/Megle/.codex/memory.md`
 
-- [ ] **Step 1: Write the release-hardening child plan**
+- [x] **Step 1: Write the release-hardening child plan**
 
 Scope it to:
 
@@ -361,7 +361,7 @@ Scope it to:
 - regression pass
 - release checklist
 
-- [ ] **Step 2: Define full-product done**
+- [x] **Step 2: Define full-product done**
 
 The release-hardening plan must define “complete product” as:
 
@@ -371,7 +371,7 @@ The release-hardening plan must define “complete product” as:
 - design system covers the whole app
 - desktop build is demoable and releasable
 
-- [ ] **Step 3: Verify and update memory**
+- [x] **Step 3: Verify and update memory**
 
 Run:
 

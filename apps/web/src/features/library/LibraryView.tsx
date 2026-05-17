@@ -1,5 +1,5 @@
 import { RefreshCw } from "lucide-react";
-import type { MediaRecord } from "@megle/core-client";
+import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import { MediaGrid } from "../media-grid/MediaGrid";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
@@ -64,18 +64,20 @@ export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
 
       {library.error ? <div className="error-strip">{library.error}</div> : null}
       <div className="grid-surface">
-        <MediaGrid
-          hasMore={library.mediaHasMore}
-          items={library.media}
-          loading={library.loading}
-          loadingMore={library.loadingMoreMedia}
-          onContextMenu={onMediaContextMenu}
-          onRequestMore={library.loadMoreMedia}
-          onRequestThumbnailStates={library.requestThumbnailStates}
-          onSelect={library.setSelectedMediaId}
-          selectedMediaId={library.selectedMediaId}
-          thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
-        />
+        {renderEmptyState({ library, selectedRoot }) ?? (
+          <MediaGrid
+            hasMore={library.mediaHasMore}
+            items={library.media}
+            loading={library.loading}
+            loadingMore={library.loadingMoreMedia}
+            onContextMenu={onMediaContextMenu}
+            onRequestMore={library.loadMoreMedia}
+            onRequestThumbnailStates={library.requestThumbnailStates}
+            onSelect={library.setSelectedMediaId}
+            selectedMediaId={library.selectedMediaId}
+            thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
+          />
+        )}
       </div>
 
       <PreviewPanel
@@ -100,4 +102,51 @@ export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
       </PreviewPanel>
     </section>
   );
+}
+
+function renderEmptyState({
+  library,
+  selectedRoot
+}: {
+  library: LibraryState;
+  selectedRoot: RootRecord | null;
+}) {
+  if (library.loading || library.media.length > 0) {
+    return null;
+  }
+
+  if (library.searchActive) {
+    return (
+      <div className="grid-empty grid-empty-search" role="status">
+        <p className="grid-empty-title">Nothing matched.</p>
+        <p className="grid-empty-copy">
+          Try different filters, or clear the current ones.
+        </p>
+        <button
+          className="grid-empty-action"
+          onClick={() => library.clearFilters()}
+          type="button"
+        >
+          Clear filters
+        </button>
+      </div>
+    );
+  }
+
+  if (selectedRoot) {
+    return (
+      <div className="grid-empty grid-empty-folder" role="status">
+        <p className="grid-empty-title">Empty folder</p>
+        <p className="grid-empty-copy">
+          Add image or video files in{" "}
+          <code className="grid-empty-path" title={selectedRoot.path}>
+            {selectedRoot.path}
+          </code>{" "}
+          and they&rsquo;ll appear here.
+        </p>
+      </div>
+    );
+  }
+
+  return null;
 }
