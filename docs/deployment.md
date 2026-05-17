@@ -8,6 +8,14 @@ browse a mounted library from any browser on the same network.
 > HTTPS termination are explicitly out of scope. Run the container behind a
 > reverse proxy (Caddy, nginx, Traefik) when you need TLS or per-user access.
 
+The runtime container drops privileges and runs Megle as a non-root system
+user (`megle`, uid/gid `10001`). The named `megle-data` volume is `chown`ed
+to that user during the image build so the SQLite database, generated
+thumbnails, and plugin state are writable. If you bind-mount `/library` from
+the host with write access (no `:ro`), make sure the host directory is
+readable (and writable, when needed) by uid `10001` or use a permissive
+mode.
+
 ## Quickstart
 
 ```bash
@@ -53,6 +61,14 @@ Megle supports two opt-in auth mechanisms:
   Leave it **unset** in browser deployments where Basic auth is the only
   gate; the static UI bundle does not yet inject a session token from the
   page.
+
+> **Security: terminate TLS in a reverse proxy.** The Megle container speaks
+> plain HTTP. HTTP Basic auth credentials are sent base64-encoded in every
+> request and are trivially recoverable on the wire. Do **not** expose the
+> container directly to an untrusted network. Put it behind a reverse proxy
+> (Caddy, nginx, Traefik) that terminates TLS, or restrict it to a private
+> network you fully control. The same caveat applies to `MEGLE_SESSION_TOKEN`
+> over plain HTTP.
 
 Recommended browser-deploy posture: set `MEGLE_BASIC_AUTH`, leave
 `MEGLE_SESSION_TOKEN` unset.

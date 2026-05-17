@@ -17,33 +17,40 @@ use crate::api::BasicAuthCredentials;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let db_path = std::env::var_os("MEGLE_DB_PATH")
+    let db_path = std::env::var("MEGLE_DB_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("megle.sqlite"));
     let bind_addr: SocketAddr = std::env::var("MEGLE_CORE_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:47321".to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:47321".to_string())
         .parse()?;
-    let basic_auth = std::env::var("MEGLE_BASIC_AUTH").ok().and_then(|raw| {
-        BasicAuthCredentials::parse(&raw).or_else(|| {
-            tracing::warn!("MEGLE_BASIC_AUTH is set but is not in `user:pass` form; ignoring");
-            None
-        })
-    });
-    let session_token = match std::env::var("MEGLE_SESSION_TOKEN") {
-        Ok(token) => Some(token),
-        Err(_) => {
-            // When Basic auth is enabled the operator can opt out of the
-            // desktop session-token mechanism by leaving `MEGLE_SESSION_TOKEN`
-            // unset. Otherwise the token is mandatory.
-            if basic_auth.is_some() {
+    let basic_auth = std::env::var("MEGLE_BASIC_AUTH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .and_then(|raw| {
+            BasicAuthCredentials::parse(&raw).or_else(|| {
+                tracing::warn!("MEGLE_BASIC_AUTH is set but is not in `user:pass` form; ignoring");
                 None
-            } else {
-                anyhow::bail!("MEGLE_SESSION_TOKEN must be set before starting Megle Core");
-            }
-        }
-    };
+            })
+        });
+    // Treat unset and empty-string `MEGLE_SESSION_TOKEN` identically: an empty
+    // env var (e.g. from `${MEGLE_SESSION_TOKEN:-}` in compose) means "no
+    // session token configured", not "configured to the empty token".
+    let session_token = std::env::var("MEGLE_SESSION_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if session_token.is_none() && basic_auth.is_none() {
+        // When Basic auth is enabled the operator can opt out of the
+        // desktop session-token mechanism by leaving `MEGLE_SESSION_TOKEN`
+        // unset. Otherwise the token is mandatory.
+        anyhow::bail!("MEGLE_SESSION_TOKEN must be set before starting Megle Core");
+    }
     let allowed_origin = std::env::var("MEGLE_ALLOWED_ORIGIN")
         .ok()
+        .filter(|s| !s.is_empty())
         .map(|origin| origin.parse::<HeaderValue>())
         .transpose()?;
 
@@ -86,12 +93,15 @@ async fn main() -> anyhow::Result<()> {
 fn resolve_web_dir() -> Option<PathBuf> {
     let enabled = std::env::var("MEGLE_SERVE_WEB")
         .ok()
+        .filter(|s| !s.is_empty())
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if !enabled {
         return None;
     }
-    let configured = std::env::var_os("MEGLE_WEB_DIR")
+    let configured = std::env::var("MEGLE_WEB_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("apps/web/dist"));
     if !configured.is_dir() {

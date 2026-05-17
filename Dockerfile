@@ -33,6 +33,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates wget \
     && rm -rf /var/lib/apt/lists/*
 
+# Drop privileges: run Megle as a non-root system user. `/data` (the volume
+# mountpoint for the SQLite DB, generated thumbnails, and plugin state) needs
+# to be writable by this user. `/library` is mounted by the operator at run
+# time, so its ownership is the operator's responsibility (the read-only
+# default in compose keeps Megle from needing write access there).
+RUN groupadd --system --gid 10001 megle \
+    && useradd --system --uid 10001 --gid 10001 --home /home/megle --create-home megle \
+    && mkdir -p /data && chown -R megle:megle /data
+
 COPY --from=core-builder /src/target/release/megle-core /usr/local/bin/megle-core
 COPY --from=web-builder  /web/apps/web/dist             /opt/megle/web
 
@@ -48,5 +57,7 @@ VOLUME ["/data", "/library"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
     CMD wget -qO- http://127.0.0.1:47321/api/health >/dev/null 2>&1 || exit 1
+
+USER megle
 
 CMD ["/usr/local/bin/megle-core"]

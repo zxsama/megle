@@ -189,7 +189,7 @@ if (!startCoreSessionBody) {
     fail("desktop main must clear pending Core process after startup settles");
   }
 }
-const beforeQuitBody = functionBody(main, 'app.on("before-quit", () =>');
+const beforeQuitBody = functionBody(main, 'app.on("before-quit", (event) =>');
 if (!beforeQuitBody) {
   fail("desktop main must handle before-quit cleanup");
 } else if (!beforeQuitBody.includes("pendingCoreProcess?.stop()")) {

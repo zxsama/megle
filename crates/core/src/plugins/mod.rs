@@ -135,7 +135,10 @@ pub struct DiscoveryReport {
 ///    parent. This matches the previous behavior of the API handler so
 ///    existing dev setups keep working.
 pub fn resolve_plugins_dir(db_path: &Path) -> PathBuf {
-    if let Some(value) = std::env::var_os("MEGLE_PLUGINS_DIR") {
+    if let Some(value) = std::env::var("MEGLE_PLUGINS_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         return PathBuf::from(value);
     }
     if let Some(parent) = db_path.parent() {

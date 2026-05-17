@@ -817,7 +817,10 @@ fn resolve_plugins_dir(state: &AppState) -> std::path::PathBuf {
     // through `router_with_config` (test helpers, the deprecated `router`
     // alias). Match the same env-var precedence as
     // `plugins::resolve_plugins_dir` so behavior stays predictable.
-    if let Some(value) = std::env::var_os("MEGLE_PLUGINS_DIR") {
+    if let Some(value) = std::env::var("MEGLE_PLUGINS_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         return std::path::PathBuf::from(value);
     }
     std::path::PathBuf::from("./plugins")
@@ -2476,6 +2479,62 @@ mod tests {
             )
             .await
             .expect("correct token request");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Empty-string env vars (e.g. `${MEGLE_SESSION_TOKEN:-}` from
+    /// `compose.yaml`) used to be threaded into `ApiConfig.session_token` as
+    /// `Some("")`, which made the auth middleware compare every incoming
+    /// request to the empty string and reject `/api/health` with 401. Startup
+    /// in `main.rs` now filters empty strings out of the optional credential
+    /// vars so they collapse to `None`. This test documents the resulting
+    /// behavior: with an unconfigured token the API (and `/api/health`) is
+    /// reachable without any session header.
+    #[tokio::test]
+    async fn empty_string_session_token_does_not_reject_health() {
+        // What `main.rs` produces from `MEGLE_SESSION_TOKEN=""`: filtered to
+        // `None`, identical to the var being unset.
+        let session_token = Some(String::new()).filter(|s: &String| !s.is_empty());
+        assert!(
+            session_token.is_none(),
+            "empty string must collapse to None"
+        );
+
+        let app = router_with_config(
+            test_database(),
+            ApiConfig {
+                session_token,
+                ..ApiConfig::default()
+            },
+        );
+
+        // No `X-Megle-Session` header at all should now succeed.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("missing header request");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // An empty header value should also succeed since no token is
+        // configured.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/health")
+                    .header("x-megle-session", "")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("empty header request");
         assert_eq!(response.status(), StatusCode::OK);
     }
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen, type OpenDialogOptions } from "electron";
 import { spawn } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
@@ -12,6 +12,9 @@ let pendingCoreProcess: CoreProcessHandle | null = null;
 let coreSession: CoreSession | null = null;
 let coreReadyPromise: Promise<CoreSession> | null = null;
 let cachedFfmpegAvailable: boolean | null = null;
+let persisted = false;
+let persistDebounceTimer: NodeJS.Timeout | null = null;
+const PERSIST_DEBOUNCE_MS = 500;
 
 interface WindowState {
   width: number;
@@ -70,12 +73,13 @@ ipcMain.handle("megle:window-is-maximized", () => {
 async function createWindow(): Promise<void> {
   const session = await ensureCoreReady();
   const state = await loadWindowState();
+  const placement = clampWindowPlacement(state);
 
   mainWindow = new BrowserWindow({
-    width: state.width,
-    height: state.height,
-    x: state.x,
-    y: state.y,
+    width: placement.width,
+    height: placement.height,
+    x: placement.x,
+    y: placement.y,
     minWidth: 1100,
     minHeight: 720,
     backgroundColor: "#101215",
@@ -96,9 +100,11 @@ async function createWindow(): Promise<void> {
     mainWindow.maximize();
   }
 
-  mainWindow.on("close", () => {
-    void persistWindowState();
-  });
+  // Persist on move/resize so a forced shutdown loses at most
+  // PERSIST_DEBOUNCE_MS of window state. The `before-quit` handler still
+  // writes synchronously so a clean exit always flushes the latest bounds.
+  mainWindow.on("move", schedulePersistWindowState);
+  mainWindow.on("resize", schedulePersistWindowState);
 
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -162,6 +168,72 @@ async function loadWindowState(): Promise<WindowState> {
   }
 }
 
+/// Bounds-check a saved window placement against the currently connected
+/// displays. After a monitor disconnect a saved (x, y) can land entirely
+/// offscreen, so we look up a display that contains the saved rect and
+/// either clamp the position into its `workArea` or drop x/y entirely
+/// (Electron then picks a sensible default). Width/height are always
+/// honored — a too-wide window is still preferable to ignoring the user's
+/// preference outright.
+function clampWindowPlacement(state: WindowState): {
+  width: number;
+  height: number;
+  x?: number;
+  y?: number;
+} {
+  if (typeof state.x !== "number" || typeof state.y !== "number") {
+    return { width: state.width, height: state.height };
+  }
+
+  const savedBounds = {
+    x: state.x,
+    y: state.y,
+    width: state.width,
+    height: state.height
+  };
+  const display = screen.getDisplayMatching(savedBounds);
+  const workArea = display.workArea;
+
+  // Reject the saved x/y if the saved rect doesn't actually overlap the
+  // matched display's work area. `getDisplayMatching` always returns *a*
+  // display, even when the saved rect is far outside any monitor, so this
+  // overlap check is what catches the post-disconnect case.
+  const overlapsHorizontally =
+    savedBounds.x + savedBounds.width > workArea.x &&
+    savedBounds.x < workArea.x + workArea.width;
+  const overlapsVertically =
+    savedBounds.y + savedBounds.height > workArea.y &&
+    savedBounds.y < workArea.y + workArea.height;
+
+  if (!overlapsHorizontally || !overlapsVertically) {
+    return { width: state.width, height: state.height };
+  }
+
+  // Clamp x/y so the window is fully within the matched display's work
+  // area. Partial overlap becomes fully visible.
+  const maxX = workArea.x + workArea.width - savedBounds.width;
+  const maxY = workArea.y + workArea.height - savedBounds.height;
+  const clampedX = Math.max(workArea.x, Math.min(savedBounds.x, maxX));
+  const clampedY = Math.max(workArea.y, Math.min(savedBounds.y, maxY));
+
+  return {
+    width: state.width,
+    height: state.height,
+    x: clampedX,
+    y: clampedY
+  };
+}
+
+function schedulePersistWindowState(): void {
+  if (persistDebounceTimer) {
+    clearTimeout(persistDebounceTimer);
+  }
+  persistDebounceTimer = setTimeout(() => {
+    persistDebounceTimer = null;
+    void persistWindowState();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
 async function persistWindowState(): Promise<void> {
   if (!mainWindow) return;
   const maximized = mainWindow.isMaximized();
@@ -173,11 +245,23 @@ async function persistWindowState(): Promise<void> {
     y: bounds.y,
     maximized
   };
+  const targetPath = windowStatePath();
+  // Atomic write: render to a sibling temp file, then rename. A crash
+  // mid-write leaves `window-state.json` untouched instead of corrupting it
+  // to truncated JSON the next launch can't parse.
+  const tempPath = `${targetPath}.${process.pid}.tmp`;
   try {
-    await fsp.mkdir(path.dirname(windowStatePath()), { recursive: true });
-    await fsp.writeFile(windowStatePath(), JSON.stringify(state), "utf8");
+    await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+    await fsp.writeFile(tempPath, JSON.stringify(state), "utf8");
+    await fsp.rename(tempPath, targetPath);
   } catch {
-    // Best-effort persistence; never block app shutdown on this.
+    // Best-effort persistence; never block app shutdown on this. Try to
+    // clean up the temp file if we created one.
+    try {
+      await fsp.unlink(tempPath);
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -229,7 +313,32 @@ app.on("activate", () => {
   }
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
+  // Persist window state synchronously before tearing Core down. The
+  // `persisted` guard prevents the second `before-quit` (after `app.exit`)
+  // from re-entering this branch — Node would otherwise double-stop Core
+  // and double-flush the JSON.
+  if (!persisted) {
+    event.preventDefault();
+    persisted = true;
+    if (persistDebounceTimer) {
+      clearTimeout(persistDebounceTimer);
+      persistDebounceTimer = null;
+    }
+    void (async () => {
+      try {
+        await persistWindowState();
+      } finally {
+        pendingCoreProcess?.stop();
+        pendingCoreProcess = null;
+        coreProcess?.stop();
+        coreProcess = null;
+        app.exit(0);
+      }
+    })();
+    return;
+  }
+
   pendingCoreProcess?.stop();
   pendingCoreProcess = null;
   coreProcess?.stop();
