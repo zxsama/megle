@@ -17,6 +17,7 @@ import {
 } from "../features/file-ops/useFileOps";
 import { LibrarySidebar } from "../features/library/LibrarySidebar";
 import { LibraryView } from "../features/library/LibraryView";
+import { PluginsView } from "../features/plugins/PluginsView";
 import { TaskCenter } from "../features/tasks/TaskCenter";
 import { TaskPanel } from "../features/tasks/TaskPanel";
 
@@ -162,7 +163,7 @@ export function App() {
           tasks={library.tasks}
         />
       ) : null}
-      {activeView === "plugins" ? <PlaceholderView title="Plugins" detail="No plugins installed" /> : null}
+      {activeView === "plugins" ? <PluginsView /> : null}
       {activeView === "settings" ? <PlaceholderView title="Settings" detail="Local library settings" /> : null}
 
       <TaskPanel scanActive={library.scanActive} tasks={library.tasks} />

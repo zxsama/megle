@@ -1,0 +1,37 @@
+# Build artifacts
+target/
+**/target/
+**/node_modules/
+node_modules/
+dist/
+**/dist/
+
+# VCS / IDE noise
+.git/
+.gitignore
+.gitattributes
+.codex/
+.claude/
+.vscode/
+.idea/
+
+# Local data, caches, secrets
+.data/
+**/*.sqlite
+**/*.sqlite-journal
+**/*.sqlite-shm
+**/*.sqlite-wal
+*.log
+.env
+.env.*
+
+# Tests, benchmarks, planning docs not needed for the image
+tests/
+tools/bench/
+docs/superpowers/
+bench-results/
+
+# Editor scratch
+*.swp
+.DS_Store
+Thumbs.db

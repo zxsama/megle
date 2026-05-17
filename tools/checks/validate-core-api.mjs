@@ -174,6 +174,20 @@ if (!mainRs.includes("MEGLE_SESSION_TOKEN")) {
 if (!mainRs.includes("MEGLE_ALLOWED_ORIGIN")) {
   fail("main.rs must read MEGLE_ALLOWED_ORIGIN for dev CORS");
 }
+if (!mainRs.includes("MEGLE_SERVE_WEB")) {
+  fail("main.rs must read MEGLE_SERVE_WEB to opt into static UI serving");
+}
+if (!mainRs.includes("MEGLE_WEB_DIR")) {
+  fail("main.rs must read MEGLE_WEB_DIR to locate the built web UI");
+}
+if (!mainRs.includes("MEGLE_BASIC_AUTH")) {
+  fail("main.rs must read MEGLE_BASIC_AUTH to enable HTTP Basic auth");
+}
+for (const value of ["pub web_dir", "pub basic_auth", "BasicAuthCredentials", "ServeDir", "ServeFile"]) {
+  if (!apiModRs.includes(value)) {
+    fail(`Core API static-serve / basic-auth wiring missing ${value}`);
+  }
+}
 for (const value of ["X-Megle-Session", "tower_http::cors", "CorsLayer", "allow_headers"]) {
   if (!apiModRs.includes(value)) {
     fail(`Core API auth/CORS wiring missing ${value}`);

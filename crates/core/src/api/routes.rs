@@ -1227,10 +1227,11 @@ mod tests {
 
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Method, Request, StatusCode};
+    use base64::Engine as _;
     use tower::ServiceExt;
 
     use super::{fallback_display_name, router};
-    use crate::api::{router_with_config, ApiConfig, AppState};
+    use crate::api::{router_with_config, ApiConfig, AppState, BasicAuthCredentials};
     use crate::db::{Database, NewRoot};
 
     #[test]
@@ -2417,6 +2418,7 @@ mod tests {
             ApiConfig {
                 session_token: Some("test-session".to_string()),
                 allowed_origin: None,
+                ..ApiConfig::default()
             },
         );
 
@@ -2468,6 +2470,7 @@ mod tests {
             ApiConfig {
                 session_token: Some("test-session".to_string()),
                 allowed_origin: Some("http://127.0.0.1:5173".parse().expect("origin")),
+                ..ApiConfig::default()
             },
         );
 
@@ -3516,5 +3519,197 @@ mod tests {
             crate::plugins::discover_and_persist(&database, &plugins_dir).expect("discover");
         assert_eq!(report.discovered, 0);
         assert!(report.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn serve_web_disabled_does_not_intercept_api_routes() {
+        // With `web_dir` unset (the desktop default), the API router still
+        // owns the namespace and unknown paths return 404 instead of being
+        // rewritten to `index.html`.
+        let app = router_with_config(test_database(), ApiConfig::default());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("health request");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("root request");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serve_web_enabled_falls_back_to_index_html_for_unknown_paths() {
+        // Stand up a tiny `dist/` so ServeDir + ServeFile fallback can route
+        // an unknown SPA path back to `index.html`.
+        let web_dir = unique_temp_dir();
+        fs::create_dir_all(&web_dir).expect("create web dir");
+        fs::write(
+            web_dir.join("index.html"),
+            b"<!doctype html><title>spa</title>",
+        )
+        .expect("write index.html");
+        fs::create_dir_all(web_dir.join("assets")).expect("create assets dir");
+        fs::write(
+            web_dir.join("assets").join("app.abc123.js"),
+            b"console.log('hashed asset');",
+        )
+        .expect("write hashed asset");
+
+        let app = router_with_config(
+            test_database(),
+            ApiConfig {
+                web_dir: Some(web_dir.clone()),
+                ..ApiConfig::default()
+            },
+        );
+
+        // API routes still 404 for unknown API paths instead of falling back
+        // to index.html.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/does-not-exist")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("unknown api path");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // SPA route falls back to index.html.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/library/some/deep/route")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("spa fallback");
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(cache, "no-cache");
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read fallback body");
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(
+            body.contains("<title>spa</title>"),
+            "expected index.html fallback body, got: {body}"
+        );
+
+        // Hashed assets get the long-lived immutable cache header.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/assets/app.abc123.js")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("hashed asset");
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(cache, "public, max-age=31536000, immutable");
+
+        let _ = fs::remove_dir_all(web_dir);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_protects_routes_except_health() {
+        let credentials = BasicAuthCredentials::parse("alice:s3cret").expect("parse credentials");
+        let app = router_with_config(
+            test_database(),
+            ApiConfig {
+                basic_auth: Some(credentials),
+                ..ApiConfig::default()
+            },
+        );
+
+        // No credentials => 401 with WWW-Authenticate.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/roots")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("missing creds");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            challenge.contains("Basic"),
+            "expected Basic challenge, got: {challenge}"
+        );
+
+        // Correct credentials => API request goes through.
+        let token = base64::engine::general_purpose::STANDARD.encode(b"alice:s3cret");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/roots")
+                    .header(header::AUTHORIZATION, format!("Basic {token}"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("good creds");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // /api/health is always reachable without credentials so Docker
+        // healthchecks keep working.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("health no creds");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

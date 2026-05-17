@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 use axum::http::HeaderValue;
 
+use crate::api::BasicAuthCredentials;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let db_path = std::env::var_os("MEGLE_DB_PATH")
@@ -21,9 +23,25 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr: SocketAddr = std::env::var("MEGLE_CORE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:47321".to_string())
         .parse()?;
-    let session_token = std::env::var("MEGLE_SESSION_TOKEN").map_err(|_| {
-        anyhow::anyhow!("MEGLE_SESSION_TOKEN must be set before starting Megle Core")
-    })?;
+    let basic_auth = std::env::var("MEGLE_BASIC_AUTH").ok().and_then(|raw| {
+        BasicAuthCredentials::parse(&raw).or_else(|| {
+            tracing::warn!("MEGLE_BASIC_AUTH is set but is not in `user:pass` form; ignoring");
+            None
+        })
+    });
+    let session_token = match std::env::var("MEGLE_SESSION_TOKEN") {
+        Ok(token) => Some(token),
+        Err(_) => {
+            // When Basic auth is enabled the operator can opt out of the
+            // desktop session-token mechanism by leaving `MEGLE_SESSION_TOKEN`
+            // unset. Otherwise the token is mandatory.
+            if basic_auth.is_some() {
+                None
+            } else {
+                anyhow::bail!("MEGLE_SESSION_TOKEN must be set before starting Megle Core");
+            }
+        }
+    };
     let allowed_origin = std::env::var("MEGLE_ALLOWED_ORIGIN")
         .ok()
         .map(|origin| origin.parse::<HeaderValue>())
@@ -41,14 +59,18 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let web_dir = resolve_web_dir();
+
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     axum::serve(
         listener,
         api::router_with_config(
             database,
             api::ApiConfig {
-                session_token: Some(session_token),
+                session_token,
                 allowed_origin,
+                web_dir,
+                basic_auth,
             },
         ),
     )
@@ -66,4 +88,29 @@ fn resolve_plugins_dir(db_path: &std::path::Path) -> PathBuf {
         }
     }
     PathBuf::from("./plugins")
+}
+
+/// Resolve the directory holding the built web UI when static-serve mode is
+/// requested. Returns `None` (and the API runs without a static UI) when:
+/// - `MEGLE_SERVE_WEB` is not `1`,
+/// - or the configured directory does not exist on disk.
+fn resolve_web_dir() -> Option<PathBuf> {
+    let enabled = std::env::var("MEGLE_SERVE_WEB")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let configured = std::env::var_os("MEGLE_WEB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("apps/web/dist"));
+    if !configured.is_dir() {
+        tracing::warn!(
+            "MEGLE_SERVE_WEB=1 but {} is not a directory; static UI disabled",
+            configured.display()
+        );
+        return None;
+    }
+    Some(configured)
 }

@@ -1,0 +1,137 @@
+# Megle Deployment (Docker)
+
+This guide covers running Megle as a headless service in Docker. Core serves
+both the HTTP API and the built React UI, so a single container is enough to
+browse a mounted library from any browser on the same network.
+
+> Phase 9 deployment is **single-user**. Multi-tenancy, user accounts, and
+> HTTPS termination are explicitly out of scope. Run the container behind a
+> reverse proxy (Caddy, nginx, Traefik) when you need TLS or per-user access.
+
+## Quickstart
+
+```bash
+# from the repo root
+docker compose up --build
+```
+
+Open `http://localhost:47321` in a browser. You should see the same UI the
+desktop shell loads. Add a root that points at `/library` (the path inside
+the container, not on the host) to start scanning.
+
+## Mounting your library
+
+Megle never imports media; it indexes the directories you mount. Point the
+`MEGLE_LIBRARY_PATH` env var at the host directory you want exposed, and the
+container will see it at `/library` (read-only by default):
+
+```bash
+MEGLE_LIBRARY_PATH=/srv/photos docker compose up
+```
+
+Inside Megle, add a root with the path `/library` (or any subdirectory of it,
+e.g. `/library/2024`).
+
+If you need write access for file operations (rename / move / recycle), drop
+the `:ro` suffix in `compose.yaml`:
+
+```yaml
+- ${MEGLE_LIBRARY_PATH:-./library}:/library
+```
+
+## Authentication
+
+Megle supports two opt-in auth mechanisms:
+
+- **HTTP Basic auth** (`MEGLE_BASIC_AUTH=user:pass`) — front-of-house
+  protection for the browser UI and API. Applied to every request except
+  `/api/health` so Docker healthchecks keep working without credentials.
+  Returns `401 WWW-Authenticate: Basic realm="Megle"` on failure. Use this
+  when the container is reachable from anything other than your loopback.
+- **Session token** (`MEGLE_SESSION_TOKEN=<token>`) — the existing desktop
+  mechanism. When set, every request must carry `X-Megle-Session: <token>`.
+  Leave it **unset** in browser deployments where Basic auth is the only
+  gate; the static UI bundle does not yet inject a session token from the
+  page.
+
+Recommended browser-deploy posture: set `MEGLE_BASIC_AUTH`, leave
+`MEGLE_SESSION_TOKEN` unset.
+
+```bash
+MEGLE_BASIC_AUTH=alice:s3cret docker compose up
+```
+
+For the strictest configuration (e.g. a private LAN where you also run the
+desktop client), set both variables.
+
+## Persisting data
+
+The container writes its SQLite database, generated thumbnails, and plugin
+state into `/data`, backed by the named volume `megle-data`. The volume
+survives `docker compose down`; remove it explicitly with
+`docker volume rm megle-megle-data` if you want a clean slate.
+
+`/library` is the bind mount for your media. Nothing is written there unless
+you remove the `:ro` flag.
+
+## Environment variables
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `MEGLE_CORE_ADDR` | Bind address. | `0.0.0.0:47321` |
+| `MEGLE_DB_PATH` | SQLite path. | `/data/megle.sqlite` |
+| `MEGLE_PLUGINS_DIR` | Plugin discovery root. | `/data/plugins` |
+| `MEGLE_SERVE_WEB` | Serve the bundled UI when `1`. | `1` |
+| `MEGLE_WEB_DIR` | Directory containing `index.html` + `assets/`. | `/opt/megle/web` |
+| `MEGLE_BASIC_AUTH` | Optional `user:pass` for Basic auth. | _(unset)_ |
+| `MEGLE_SESSION_TOKEN` | Optional desktop session token. | _(unset)_ |
+| `MEGLE_ALLOWED_ORIGIN` | Optional dev CORS origin (exact match). | _(unset)_ |
+| `RUST_LOG` | Tracing filter. | `info` |
+
+Override any of them via `compose.yaml` or the `-e` flag on `docker run`.
+
+## Health checks
+
+The image ships with a `HEALTHCHECK` that polls `/api/health`. The endpoint
+is always exempt from Basic auth so the container reports healthy without
+credentials. To exercise it manually:
+
+```bash
+curl -f http://localhost:47321/api/health
+```
+
+## Updating
+
+The container caches Rust and npm dependencies between builds. To pick up
+new code:
+
+```bash
+docker compose build --pull
+docker compose up -d
+```
+
+The named `megle-data` volume is preserved across rebuilds.
+
+## Limitations
+
+- **Browser UI session token is not injected.** When `MEGLE_BASIC_AUTH` is
+  the front-of-house gate, leave `MEGLE_SESSION_TOKEN` unset; the static UI
+  cannot currently send `X-Megle-Session` from the browser. Tracking work
+  for cookie-based session-token wiring is in the master plan.
+- **No HTTPS in the image.** Terminate TLS in a reverse proxy.
+- **Single user.** All requests share one library, one set of tags, and one
+  task queue.
+- **Windows-only file ops still apply.** Linux containers can mount Windows
+  shares, but advanced file operations (recycle bin, OneDrive integration)
+  rely on Windows APIs and are no-ops on Linux.
+
+## Running without compose
+
+```bash
+docker build -t megle:dev .
+docker run --rm -p 47321:47321 \
+  -v megle-data:/data \
+  -v "$PWD/library:/library:ro" \
+  -e MEGLE_BASIC_AUTH=alice:s3cret \
+  megle:dev
+```

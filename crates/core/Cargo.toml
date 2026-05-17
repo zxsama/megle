@@ -9,6 +9,7 @@ repository.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 axum-extra = { version = "0.9", features = ["query"] }
+base64 = "0.22"
 image = "0.25"
 notify = "8.2.0"
 rusqlite.workspace = true

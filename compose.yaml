@@ -1,0 +1,27 @@
+services:
+  megle:
+    image: megle:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: megle-core
+    ports:
+      - "47321:47321"
+    environment:
+      # Front-of-house auth for browser access. Set to `user:pass` to enable.
+      # When unset, every request (except `/api/health`) is accepted on the
+      # bound interface, so make sure you only expose Megle to a network you
+      # control.
+      MEGLE_BASIC_AUTH: ${MEGLE_BASIC_AUTH:-}
+      # Desktop session-token enforcement. Leave unset when running a browser
+      # deployment behind Basic auth; set to a strong token if you also want
+      # the desktop X-Megle-Session check active.
+      MEGLE_SESSION_TOKEN: ${MEGLE_SESSION_TOKEN:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - megle-data:/data
+      - ${MEGLE_LIBRARY_PATH:-./library}:/library:ro
+    restart: unless-stopped
+
+volumes:
+  megle-data:
