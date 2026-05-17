@@ -17,3 +17,6 @@ pub const SCAN_RECONCILIATION_MIGRATION: &str =
     include_str!("../../migrations/0009_scan_reconciliation.sql");
 pub const MEDIA_FTS_CONTENTLESS_DELETE_MIGRATION: &str =
     include_str!("../../migrations/0010_media_fts_contentless_delete.sql");
+#[allow(dead_code)]
+pub const PLUGINS_EXTENDED_MIGRATION: &str =
+    include_str!("../../migrations/0011_plugins_extended.sql");

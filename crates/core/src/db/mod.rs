@@ -265,6 +265,36 @@ pub struct UserMetadataPatch {
     pub note: Option<Option<String>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRecord {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub status: String,
+    pub capabilities: Vec<String>,
+    pub permissions: Vec<String>,
+    pub manifest_path: String,
+    pub installed_at: i64,
+    pub updated_at: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PluginUpsert {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub capabilities: Vec<String>,
+    pub permissions: Vec<String>,
+    pub manifest_path: String,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
     pub q: Option<String>,
@@ -421,6 +451,9 @@ impl Database {
             self.connection
                 .execute_batch(migrations::MEDIA_FTS_CONTENTLESS_DELETE_MIGRATION)?;
         }
+        if !self.migration_applied(11)? {
+            self.apply_plugins_extended_migration()?;
+        }
         self.backfill_media_fts_if_empty()?;
         Ok(())
     }
@@ -507,6 +540,40 @@ impl Database {
             r#"
             INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
             VALUES (8, 'task_attempt_generation', unixepoch())
+            "#,
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn apply_plugins_extended_migration(&self) -> anyhow::Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for (column, definition) in [
+            ("description", "description TEXT"),
+            ("status", "status TEXT NOT NULL DEFAULT 'registered'"),
+            (
+                "capabilities_json",
+                "capabilities_json TEXT NOT NULL DEFAULT '[]'",
+            ),
+            (
+                "permissions_json",
+                "permissions_json TEXT NOT NULL DEFAULT '[]'",
+            ),
+            ("last_error", "last_error TEXT"),
+        ] {
+            if !table_has_column_in_transaction(&transaction, "plugins", column)? {
+                transaction
+                    .execute_batch(&format!("ALTER TABLE plugins ADD COLUMN {definition}"))?;
+            }
+        }
+        transaction.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_plugins_status ON plugins(status, updated_at)",
+        )?;
+        transaction.execute(
+            r#"
+            INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+            VALUES (11, 'plugins_extended', unixepoch())
             "#,
             [],
         )?;
@@ -2685,6 +2752,180 @@ impl Database {
         )?;
         Ok(exists != 0)
     }
+
+    pub fn list_plugins(&self) -> anyhow::Result<Vec<PluginRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, name, version, description, enabled, status,
+                   capabilities_json, permissions_json, manifest_path,
+                   installed_at, updated_at, last_error
+            FROM plugins
+            ORDER BY name ASC, id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], plugin_from_row)?;
+        let mut plugins = Vec::new();
+        for row in rows {
+            plugins.push(row?);
+        }
+        Ok(plugins)
+    }
+
+    pub fn get_plugin(&self, id: &str) -> anyhow::Result<Option<PluginRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, name, version, description, enabled, status,
+                   capabilities_json, permissions_json, manifest_path,
+                   installed_at, updated_at, last_error
+            FROM plugins
+            WHERE id = ?1
+            "#,
+        )?;
+        let mut rows = statement.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(plugin_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Insert or update a plugin row, preserving the existing `enabled` flag
+    /// when the row already exists.
+    pub fn upsert_plugin(&self, upsert: PluginUpsert) -> anyhow::Result<PluginRecord> {
+        let now = unix_timestamp();
+        let capabilities_json = serde_json::to_string(&upsert.capabilities)?;
+        let permissions_json = serde_json::to_string(&upsert.permissions)?;
+        let transaction = self.connection.unchecked_transaction()?;
+
+        let existing_enabled: Option<i64> = transaction
+            .query_row(
+                "SELECT enabled FROM plugins WHERE id = ?1",
+                [&upsert.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match existing_enabled {
+            Some(enabled) => {
+                transaction.execute(
+                    r#"
+                    UPDATE plugins
+                    SET name = ?2,
+                        version = ?3,
+                        description = ?4,
+                        status = ?5,
+                        capabilities_json = ?6,
+                        permissions_json = ?7,
+                        manifest_path = ?8,
+                        last_error = ?9,
+                        enabled = ?10,
+                        updated_at = ?11
+                    WHERE id = ?1
+                    "#,
+                    rusqlite::params![
+                        upsert.id,
+                        upsert.name,
+                        upsert.version,
+                        upsert.description,
+                        upsert.status,
+                        capabilities_json,
+                        permissions_json,
+                        upsert.manifest_path,
+                        upsert.last_error,
+                        enabled,
+                        now,
+                    ],
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    r#"
+                    INSERT INTO plugins(
+                        id, name, version, description, enabled, status,
+                        capabilities_json, permissions_json, manifest_path,
+                        last_error, installed_at, updated_at
+                    )
+                    VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                    "#,
+                    rusqlite::params![
+                        upsert.id,
+                        upsert.name,
+                        upsert.version,
+                        upsert.description,
+                        upsert.status,
+                        capabilities_json,
+                        permissions_json,
+                        upsert.manifest_path,
+                        upsert.last_error,
+                        now,
+                    ],
+                )?;
+            }
+        }
+
+        let record = transaction.query_row(
+            r#"
+            SELECT id, name, version, description, enabled, status,
+                   capabilities_json, permissions_json, manifest_path,
+                   installed_at, updated_at, last_error
+            FROM plugins
+            WHERE id = ?1
+            "#,
+            [&upsert.id],
+            plugin_from_row,
+        )?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    /// Toggle the enabled flag for an existing plugin row. Returns `None`
+    /// when no plugin with that id exists.
+    pub fn set_plugin_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> anyhow::Result<Option<PluginRecord>> {
+        let now = unix_timestamp();
+        let updated = self.connection.execute(
+            r#"
+            UPDATE plugins
+            SET enabled = ?2,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            rusqlite::params![id, enabled as i64, now],
+        )?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        self.get_plugin(id)
+    }
+
+    pub fn set_plugin_status(
+        &self,
+        id: &str,
+        status: &str,
+        last_error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let now = unix_timestamp();
+        self.connection.execute(
+            r#"
+            UPDATE plugins
+            SET status = ?2,
+                last_error = ?3,
+                updated_at = ?4
+            WHERE id = ?1
+            "#,
+            rusqlite::params![id, status, last_error, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_plugin(&self, id: &str) -> anyhow::Result<bool> {
+        let deleted = self
+            .connection
+            .execute("DELETE FROM plugins WHERE id = ?1", [id])?;
+        Ok(deleted > 0)
+    }
 }
 
 fn upsert_folder_in_transaction(
@@ -3506,6 +3747,37 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         thumbnail_source_fingerprint: row.get(13)?,
         attempt_generation: row.get(14)?,
         error: row.get(15)?,
+    })
+}
+
+fn plugin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRecord> {
+    let capabilities_json: String = row.get(6)?;
+    let permissions_json: String = row.get(7)?;
+    let capabilities =
+        serde_json::from_str::<Vec<String>>(&capabilities_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let permissions = serde_json::from_str::<Vec<String>>(&permissions_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let enabled: i64 = row.get(4)?;
+    Ok(PluginRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        version: row.get(2)?,
+        description: row.get(3)?,
+        enabled: enabled != 0,
+        status: row.get(5)?,
+        capabilities,
+        permissions,
+        manifest_path: row.get(8)?,
+        installed_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        last_error: row.get(11)?,
     })
 }
 
@@ -7506,5 +7778,105 @@ mod tests {
             actual_f0.is_empty(),
             "f0 must have no tags, got {actual_f0:?}"
         );
+    }
+
+    fn sample_plugin_upsert(id: &str) -> PluginUpsert {
+        PluginUpsert {
+            id: id.to_string(),
+            name: format!("Plugin {id}"),
+            version: "1.0.0".to_string(),
+            description: Some("test plugin".to_string()),
+            status: "registered".to_string(),
+            capabilities: vec!["decoder".to_string(), "metadata".to_string()],
+            permissions: vec!["read-media-file".to_string()],
+            manifest_path: format!("D:/plugins/{id}/plugin.json"),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn plugin_crud_round_trip() {
+        let database = migrated_database();
+
+        assert!(
+            database.list_plugins().expect("list plugins").is_empty(),
+            "list_plugins must start empty"
+        );
+
+        let inserted = database
+            .upsert_plugin(sample_plugin_upsert("com.example.alpha"))
+            .expect("upsert alpha");
+        assert_eq!(inserted.id, "com.example.alpha");
+        assert!(!inserted.enabled, "newly inserted plugin starts disabled");
+        assert_eq!(inserted.status, "registered");
+        assert_eq!(
+            inserted.capabilities,
+            vec!["decoder".to_string(), "metadata".to_string()]
+        );
+        assert_eq!(inserted.permissions, vec!["read-media-file".to_string()]);
+
+        let listed = database.list_plugins().expect("list plugins");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "com.example.alpha");
+
+        let fetched = database
+            .get_plugin("com.example.alpha")
+            .expect("get plugin")
+            .expect("plugin row exists");
+        assert_eq!(fetched.id, "com.example.alpha");
+        assert!(database
+            .get_plugin("com.example.missing")
+            .expect("get missing plugin")
+            .is_none());
+
+        let toggled = database
+            .set_plugin_enabled("com.example.alpha", true)
+            .expect("set enabled")
+            .expect("plugin row exists");
+        assert!(toggled.enabled);
+        assert!(database
+            .set_plugin_enabled("com.example.missing", true)
+            .expect("set missing enabled")
+            .is_none());
+
+        database
+            .set_plugin_status("com.example.alpha", "invalid", Some("manifest broke"))
+            .expect("set status");
+        let after_status = database
+            .get_plugin("com.example.alpha")
+            .expect("get plugin after status")
+            .expect("plugin row exists");
+        assert_eq!(after_status.status, "invalid");
+        assert_eq!(after_status.last_error.as_deref(), Some("manifest broke"));
+
+        assert!(database.delete_plugin("com.example.alpha").expect("delete"));
+        assert!(!database
+            .delete_plugin("com.example.alpha")
+            .expect("delete missing"));
+        assert!(database.list_plugins().expect("list plugins").is_empty());
+    }
+
+    #[test]
+    fn plugin_upsert_preserves_enabled_when_row_exists() {
+        let database = migrated_database();
+
+        let mut upsert = sample_plugin_upsert("com.example.beta");
+        upsert.status = "registered".to_string();
+        let initial = database.upsert_plugin(upsert.clone()).expect("upsert beta");
+        assert!(!initial.enabled);
+
+        let toggled = database
+            .set_plugin_enabled("com.example.beta", true)
+            .expect("enable beta")
+            .expect("plugin row exists");
+        assert!(toggled.enabled);
+
+        // Re-upsert (e.g., from a discovery pass) must not flip the enabled flag.
+        let mut updated = upsert.clone();
+        updated.name = "Plugin Beta v2".to_string();
+        updated.status = "registered".to_string();
+        let after = database.upsert_plugin(updated).expect("re-upsert beta");
+        assert!(after.enabled, "enabled must persist across upserts");
+        assert_eq!(after.name, "Plugin Beta v2");
     }
 }

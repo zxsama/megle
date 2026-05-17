@@ -633,6 +633,97 @@ paths:
       responses:
         "200":
           description: Installed plugin states.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginListResponse"
+  /plugins/discover:
+    post:
+      operationId: discoverPlugins
+      responses:
+        "202":
+          description: Plugin folder rescan completed; returns counts and per-manifest errors.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginDiscoveryResponse"
+  /plugins/{pluginId}:
+    get:
+      operationId: getPlugin
+      parameters:
+        - $ref: "#/components/parameters/pluginId"
+      responses:
+        "200":
+          description: Plugin record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginRecord"
+        "404":
+          description: Plugin not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deletePlugin
+      parameters:
+        - $ref: "#/components/parameters/pluginId"
+      responses:
+        "200":
+          description: Plugin row removed; on-disk folder is left untouched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletePluginResponse"
+        "404":
+          description: Plugin not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /plugins/{pluginId}/enable:
+    post:
+      operationId: enablePlugin
+      parameters:
+        - $ref: "#/components/parameters/pluginId"
+      responses:
+        "200":
+          description: Plugin enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginRecord"
+        "404":
+          description: Plugin not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Plugin manifest is invalid and cannot be enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /plugins/{pluginId}/disable:
+    post:
+      operationId: disablePlugin
+      parameters:
+        - $ref: "#/components/parameters/pluginId"
+      responses:
+        "200":
+          description: Plugin disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PluginRecord"
+        "404":
+          description: Plugin not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   securitySchemes:
     sessionToken:
@@ -675,6 +766,14 @@ components:
       schema:
         type: integer
         minimum: 1
+    pluginId:
+      name: pluginId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
     rootIdQuery:
       name: rootId
       in: query
@@ -1198,4 +1297,91 @@ components:
             type: integer
             minimum: 1
         permanent:
+          type: boolean
+    PluginCapability:
+      type: string
+      enum: [decoder, metadata, action, import-provider]
+    PluginStatus:
+      type: string
+      enum: [registered, invalid, enabled, disabled]
+    PluginRecord:
+      type: object
+      required:
+        [
+          id,
+          name,
+          version,
+          description,
+          enabled,
+          status,
+          capabilities,
+          permissions,
+          manifestPath,
+          installedAt,
+          updatedAt,
+          lastError
+        ]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+          nullable: true
+        enabled:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/PluginStatus"
+        capabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/PluginCapability"
+        permissions:
+          type: array
+          items:
+            type: string
+        manifestPath:
+          type: string
+        installedAt:
+          type: integer
+        updatedAt:
+          type: integer
+        lastError:
+          type: string
+          nullable: true
+    PluginListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PluginRecord"
+    PluginDiscoveryError:
+      type: object
+      required: [manifestPath, message]
+      properties:
+        manifestPath:
+          type: string
+        message:
+          type: string
+    PluginDiscoveryResponse:
+      type: object
+      required: [discovered, errors]
+      properties:
+        discovered:
+          type: integer
+          minimum: 0
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/PluginDiscoveryError"
+    DeletePluginResponse:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
           type: boolean

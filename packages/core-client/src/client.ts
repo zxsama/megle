@@ -2,6 +2,7 @@ import type {
   AcceptedRootResponse,
   AddFileTagRequest,
   CreateTagRequest,
+  DeletePluginResponse,
   DeleteRequest,
   DeleteTagResponse,
   FileOperationListResponse,
@@ -15,6 +16,9 @@ import type {
   MediaRecord,
   MoveRequest,
   Page,
+  PluginDiscoveryResponse,
+  PluginListResponse,
+  PluginRecord,
   RenameRequest,
   RootRecord,
   ScanTaskRequest,
@@ -151,7 +155,26 @@ export function createCoreClient(config: CoreClientConfig) {
         body: JSON.stringify(body)
       }),
     listFileOperations: (params: ListFileOperationsParams = {}) =>
-      request<FileOperationListResponse>(`/file-ops${fileOpsQuery(params)}`)
+      request<FileOperationListResponse>(`/file-ops${fileOpsQuery(params)}`),
+    listPlugins: () => request<PluginListResponse>("/plugins"),
+    getPlugin: (pluginId: string) =>
+      request<PluginRecord>(`/plugins/${encodeURIComponent(pluginId)}`),
+    discoverPlugins: () =>
+      request<PluginDiscoveryResponse>("/plugins/discover", {
+        method: "POST"
+      }),
+    enablePlugin: (pluginId: string) =>
+      request<PluginRecord>(`/plugins/${encodeURIComponent(pluginId)}/enable`, {
+        method: "POST"
+      }),
+    disablePlugin: (pluginId: string) =>
+      request<PluginRecord>(`/plugins/${encodeURIComponent(pluginId)}/disable`, {
+        method: "POST"
+      }),
+    deletePlugin: (pluginId: string) =>
+      request<DeletePluginResponse>(`/plugins/${encodeURIComponent(pluginId)}`, {
+        method: "DELETE"
+      })
   };
 }
 

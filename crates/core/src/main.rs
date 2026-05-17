@@ -32,6 +32,15 @@ async fn main() -> anyhow::Result<()> {
     let database = db::Database::open(&db_path)?;
     database.apply_migrations()?;
 
+    let plugins_dir = resolve_plugins_dir(&db_path);
+    if let Err(error) = plugins::discover_and_persist(&database, &plugins_dir) {
+        tracing::warn!(
+            "plugin discovery failed at startup ({}): {}",
+            plugins_dir.display(),
+            error
+        );
+    }
+
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     axum::serve(
         listener,
@@ -45,4 +54,16 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+fn resolve_plugins_dir(db_path: &std::path::Path) -> PathBuf {
+    if let Some(value) = std::env::var_os("MEGLE_PLUGINS_DIR") {
+        return PathBuf::from(value);
+    }
+    if let Some(parent) = db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.join("plugins");
+        }
+    }
+    PathBuf::from("./plugins")
 }

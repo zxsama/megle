@@ -84,7 +84,11 @@ const expectedAxumRoutes = [
   "/api/file-ops/rename",
   "/api/file-ops/move",
   "/api/file-ops/delete",
-  "/api/plugins"
+  "/api/plugins",
+  "/api/plugins/discover",
+  "/api/plugins/:plugin_id",
+  "/api/plugins/:plugin_id/enable",
+  "/api/plugins/:plugin_id/disable"
 ];
 
 for (const route of expectedAxumRoutes) {
@@ -147,6 +151,9 @@ if (!dbMigrationsRs.includes('include_str!("../../migrations/0008_task_attempt_g
 }
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0010_media_fts_contentless_delete.sql")')) {
   fail("db media_fts contentless_delete migration include path changed or missing");
+}
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0011_plugins_extended.sql")')) {
+  fail("db plugins extended migration include path changed or missing");
 }
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");

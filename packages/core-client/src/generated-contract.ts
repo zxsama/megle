@@ -229,3 +229,39 @@ export interface ListFileOperationsParams {
   limit?: number;
   cursor?: string;
 }
+
+export type PluginCapability = "decoder" | "metadata" | "action" | "import-provider";
+export type PluginStatus = "registered" | "invalid" | "enabled" | "disabled";
+
+export interface PluginRecord {
+  id: string;
+  name: string;
+  version: string;
+  description: string | null;
+  enabled: boolean;
+  status: PluginStatus;
+  capabilities: PluginCapability[];
+  permissions: string[];
+  manifestPath: string;
+  installedAt: number;
+  updatedAt: number;
+  lastError: string | null;
+}
+
+export interface PluginListResponse {
+  items: PluginRecord[];
+}
+
+export interface PluginDiscoveryError {
+  manifestPath: string;
+  message: string;
+}
+
+export interface PluginDiscoveryResponse {
+  discovered: number;
+  errors: PluginDiscoveryError[];
+}
+
+export interface DeletePluginResponse {
+  deleted: boolean;
+}

@@ -14,6 +14,7 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0006_thumbnail_task_attempt_fingerprint.sql",
     ROOT / "crates" / "core" / "migrations" / "0007_task_status_contract.sql",
     ROOT / "crates" / "core" / "migrations" / "0008_task_attempt_generation.sql",
+    ROOT / "crates" / "core" / "migrations" / "0011_plugins_extended.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -65,6 +66,7 @@ REQUIRED_INDEXES = {
     "idx_thumbs_state_updated",
     "idx_tasks_status_priority",
     "idx_file_operations_status_created",
+    "idx_plugins_status",
 }
 
 THUMBNAIL_STATUSES = {"pending", "queued", "ready", "failed", "skipped_small"}
@@ -151,6 +153,11 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 8 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 11"
+            ).fetchone()
+            if version is None:
+                fail("migration version 11 was not recorded")
 
             task_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
@@ -179,6 +186,27 @@ def main() -> None:
             missing_thumb_columns = required_thumb_columns - thumb_columns
             if missing_thumb_columns:
                 fail(f"missing thumbnail columns: {sorted(missing_thumb_columns)}")
+
+            plugin_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(plugins)").fetchall()
+            }
+            required_plugin_columns = {
+                "id",
+                "name",
+                "version",
+                "description",
+                "enabled",
+                "status",
+                "capabilities_json",
+                "permissions_json",
+                "manifest_path",
+                "installed_at",
+                "updated_at",
+                "last_error",
+            }
+            missing_plugin_columns = required_plugin_columns - plugin_columns
+            if missing_plugin_columns:
+                fail(f"missing plugin columns: {sorted(missing_plugin_columns)}")
 
             conn.execute(
                 """

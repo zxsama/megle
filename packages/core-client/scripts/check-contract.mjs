@@ -191,7 +191,12 @@ for (const name of [
   "FileOperationListResponse",
   "RenameRequest",
   "MoveRequest",
-  "DeleteRequest"
+  "DeleteRequest",
+  "PluginRecord",
+  "PluginListResponse",
+  "PluginDiscoveryError",
+  "PluginDiscoveryResponse",
+  "DeletePluginResponse"
 ]) {
   schema(name);
 }
@@ -218,6 +223,10 @@ assertInterfaceMatchesSchema("FileOperationListResponse");
 assertInterfaceMatchesSchema("RenameRequest");
 assertInterfaceMatchesSchema("MoveRequest");
 assertInterfaceMatchesSchema("DeleteRequest");
+assertInterfaceMatchesSchema("PluginRecord");
+assertInterfaceMatchesSchema("PluginDiscoveryError");
+assertInterfaceMatchesSchema("PluginDiscoveryResponse");
+assertInterfaceMatchesSchema("DeletePluginResponse");
 
 const pageBody = interfaceBody("Page");
 for (const line of ["items: T[];", "nextCursor: string | null;"]) {
@@ -276,7 +285,13 @@ for (const method of [
   "renameFileOp",
   "moveFileOps",
   "deleteFileOps",
-  "listFileOperations"
+  "listFileOperations",
+  "listPlugins",
+  "getPlugin",
+  "discoverPlugins",
+  "enablePlugin",
+  "disablePlugin",
+  "deletePlugin"
 ]) {
   if (!client.includes(`${method}:`)) {
     fail(`client.ts missing operation ${method}`);

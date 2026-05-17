@@ -9,13 +9,14 @@ use std::fs;
 
 use crate::api::AppState;
 use crate::db::{
-    FolderRecord, MediaPageQuery, MediaRecord, NewRoot, RootRecord, SearchQuery, TagError,
-    TagRecord, TaskRecord, ThumbnailRecord, UserMetadataPatch, UserMetadataRecord,
+    FolderRecord, MediaPageQuery, MediaRecord, NewRoot, PluginRecord, RootRecord, SearchQuery,
+    TagError, TagRecord, TaskRecord, ThumbnailRecord, UserMetadataPatch, UserMetadataRecord,
 };
 use crate::fsops::{
     self, DeleteRequest, FileOperationRecord, FsOpsError, FsOpsErrorCode, MoveRequest,
     RenameRequest,
 };
+use crate::plugins;
 use crate::scan::ScanSummary;
 use crate::thumbnails::{is_pending_status, normalize_profile};
 
@@ -85,6 +86,10 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/file-ops/delete",
     "/api/file-ops",
     "/api/plugins",
+    "/api/plugins/discover",
+    "/api/plugins/{pluginId}",
+    "/api/plugins/{pluginId}/enable",
+    "/api/plugins/{pluginId}/disable",
 ];
 
 #[derive(Debug, Serialize)]
@@ -111,9 +116,29 @@ struct AcceptedResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct PluginState {
-    id: String,
-    enabled: bool,
+#[serde(rename_all = "camelCase")]
+struct PluginListResponse {
+    items: Vec<PluginRecord>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginDiscoveryError {
+    manifest_path: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginDiscoveryResponse {
+    discovered: u64,
+    errors: Vec<PluginDiscoveryError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletePluginResponse {
+    deleted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,6 +382,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/file-ops/delete", post(delete_files))
         .route("/api/file-ops", get(list_file_operations))
         .route("/api/plugins", get(list_plugins))
+        .route("/api/plugins/discover", post(discover_plugins))
+        .route(
+            "/api/plugins/:plugin_id",
+            get(get_plugin).delete(delete_plugin),
+        )
+        .route("/api/plugins/:plugin_id/enable", post(enable_plugin))
+        .route("/api/plugins/:plugin_id/disable", post(disable_plugin))
         .with_state(state)
 }
 
@@ -680,8 +712,105 @@ async fn list_file_operations(
     }))
 }
 
-async fn list_plugins() -> Json<ListResponse<PluginState>> {
-    Json(empty_list())
+async fn list_plugins(State(state): State<AppState>) -> ApiResult<Json<PluginListResponse>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let items = database.list_plugins()?;
+    Ok(Json(PluginListResponse { items }))
+}
+
+async fn discover_plugins(
+    State(state): State<AppState>,
+) -> ApiResult<(StatusCode, Json<PluginDiscoveryResponse>)> {
+    let plugins_dir = resolve_plugins_dir();
+    let report = {
+        let database = state.database.lock().expect("database mutex poisoned");
+        plugins::discover_and_persist(&database, &plugins_dir)?
+    };
+    let errors = report
+        .errors
+        .into_iter()
+        .map(|entry| PluginDiscoveryError {
+            manifest_path: entry.manifest_path.to_string_lossy().into_owned(),
+            message: entry.message,
+        })
+        .collect();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(PluginDiscoveryResponse {
+            discovered: report.discovered as u64,
+            errors,
+        }),
+    ))
+}
+
+async fn get_plugin(
+    State(state): State<AppState>,
+    Path(plugin_id): Path<String>,
+) -> ApiResult<Json<PluginRecord>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let plugin = database
+        .get_plugin(&plugin_id)?
+        .ok_or_else(|| not_found_plugin(&plugin_id))?;
+    Ok(Json(plugin))
+}
+
+async fn enable_plugin(
+    State(state): State<AppState>,
+    Path(plugin_id): Path<String>,
+) -> ApiResult<Json<PluginRecord>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let existing = database
+        .get_plugin(&plugin_id)?
+        .ok_or_else(|| not_found_plugin(&plugin_id))?;
+    if existing.status == "invalid" {
+        return Err(CoreError::coded(
+            StatusCode::CONFLICT,
+            "manifest_invalid",
+            format!("plugin manifest is invalid and cannot be enabled: {plugin_id}"),
+        ));
+    }
+    let updated = database
+        .set_plugin_enabled(&plugin_id, true)?
+        .ok_or_else(|| not_found_plugin(&plugin_id))?;
+    Ok(Json(updated))
+}
+
+async fn disable_plugin(
+    State(state): State<AppState>,
+    Path(plugin_id): Path<String>,
+) -> ApiResult<Json<PluginRecord>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let updated = database
+        .set_plugin_enabled(&plugin_id, false)?
+        .ok_or_else(|| not_found_plugin(&plugin_id))?;
+    Ok(Json(updated))
+}
+
+async fn delete_plugin(
+    State(state): State<AppState>,
+    Path(plugin_id): Path<String>,
+) -> ApiResult<Json<DeletePluginResponse>> {
+    let database = state.database.lock().expect("database mutex poisoned");
+    let deleted = database.delete_plugin(&plugin_id)?;
+    if !deleted {
+        return Err(not_found_plugin(&plugin_id));
+    }
+    Ok(Json(DeletePluginResponse { deleted: true }))
+}
+
+fn not_found_plugin(plugin_id: &str) -> CoreError {
+    CoreError::coded(
+        StatusCode::NOT_FOUND,
+        "plugin_not_found",
+        format!("plugin not found: {plugin_id}"),
+    )
+}
+
+fn resolve_plugins_dir() -> std::path::PathBuf {
+    if let Some(value) = std::env::var_os("MEGLE_PLUGINS_DIR") {
+        return std::path::PathBuf::from(value);
+    }
+    std::path::PathBuf::from("./plugins")
 }
 
 async fn list_tags(State(state): State<AppState>) -> ApiResult<Json<ListResponse<TagRecord>>> {
@@ -823,6 +952,7 @@ async fn search_media(
     }))
 }
 
+#[allow(dead_code)]
 fn empty_list<T>() -> ListResponse<T> {
     ListResponse {
         items: Vec::new(),
@@ -3317,5 +3447,74 @@ mod tests {
                 .as_nanos(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
+    }
+
+    #[tokio::test]
+    async fn plugin_routes_basic_lifecycle() {
+        let database = test_database();
+        let state = AppState::new(database);
+        let app = router(state);
+
+        // GET /api/plugins -> empty list (no rows persisted).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/plugins")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list plugins");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["items"].as_array().expect("items").is_empty());
+
+        // POST /api/plugins/{id}/enable -> 404 with code plugin_not_found.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/plugins/com.example.missing/enable")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("enable missing plugin");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "plugin_not_found");
+
+        // DELETE /api/plugins/{id} -> 404 with code plugin_not_found.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/plugins/com.example.missing")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("delete missing plugin");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "plugin_not_found");
+    }
+
+    #[tokio::test]
+    async fn plugin_discover_route_returns_zero_for_missing_directory() {
+        // Confirm the discover handler reports zero/zero when the configured
+        // plugins folder does not exist on disk. We exercise the discovery
+        // function directly to avoid mutating process-wide environment
+        // variables, which would race with tests that share the runtime.
+        let database = test_database();
+        let plugins_dir = unique_temp_dir();
+        let report =
+            crate::plugins::discover_and_persist(&database, &plugins_dir).expect("discover");
+        assert_eq!(report.discovered, 0);
+        assert!(report.errors.is_empty());
     }
 }
