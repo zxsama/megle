@@ -26,6 +26,12 @@ pub const SESSION_HEADER: &str = "X-Megle-Session";
 pub struct AppState {
     pub database: Arc<Mutex<Database>>,
     pub task_queue: TaskSender,
+    /// Resolved at startup so route handlers (notably
+    /// `POST /api/plugins/discover`) agree with `main.rs` on where to look
+    /// for plugin manifests. `None` when the API is built without a
+    /// configured directory; the handler falls back to the same default
+    /// rules as startup.
+    pub plugins_dir: Option<PathBuf>,
     _watcher: Option<Arc<WatcherHandle>>,
 }
 
@@ -40,6 +46,7 @@ impl AppState {
         Self {
             database: Arc::new(Mutex::new(database)),
             task_queue,
+            plugins_dir: None,
             _watcher: None,
         }
     }
@@ -53,6 +60,7 @@ impl AppState {
         Self {
             database,
             task_queue,
+            plugins_dir: None,
             _watcher: watcher,
         }
     }
@@ -69,6 +77,11 @@ pub struct ApiConfig {
     /// When set, every request except `/api/health` requires HTTP Basic auth
     /// with these credentials. Format is `(user, pass)`.
     pub basic_auth: Option<BasicAuthCredentials>,
+    /// Plugins directory resolved at startup. Threaded into [`AppState`] so
+    /// the `POST /api/plugins/discover` handler agrees with the path
+    /// `main.rs` walked at startup. `None` falls back to the same default
+    /// (`<db_path.parent>/plugins`, then `./plugins`) inside the handler.
+    pub plugins_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +114,9 @@ pub fn router(database: Database) -> Router {
 }
 
 pub fn router_with_config(database: Database, config: ApiConfig) -> Router {
-    let api_router = routes::router(AppState::new(database)).layer(middleware::from_fn_with_state(
+    let mut state = AppState::new(database);
+    state.plugins_dir = config.plugins_dir.clone();
+    let api_router = routes::router(state).layer(middleware::from_fn_with_state(
         config.clone(),
         require_session_token,
     ));

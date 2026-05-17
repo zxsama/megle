@@ -1910,6 +1910,12 @@ impl Database {
     /// or its root has been disabled. Used by the thumbnail worker to find the
     /// source bytes without holding a separate copy of the path on disk.
     pub fn resolve_file_source_path(&self, file_id: i64) -> anyhow::Result<Option<PathBuf>> {
+        // Hard cap on the parent walk to defend against a corrupt DB (a
+        // self-parent or a cycle). 4096 is well above any realistic folder
+        // tree depth on Windows or POSIX while still bounding the worker
+        // round-trip in pathological cases.
+        const FOLDER_WALK_DEPTH_CAP: usize = 4096;
+
         let mut statement = self.connection.prepare(
             r#"
             SELECT roots.path, files.folder_id, files.name
@@ -1930,7 +1936,17 @@ impl Database {
         let mut folder_statement = self
             .connection
             .prepare("SELECT name, parent_id FROM folders WHERE id = ?1")?;
+        let mut depth = 0usize;
         loop {
+            if depth >= FOLDER_WALK_DEPTH_CAP {
+                tracing::warn!(
+                    file_id,
+                    depth_cap = FOLDER_WALK_DEPTH_CAP,
+                    "resolve_file_source_path exceeded folder depth cap; treating file as unresolved"
+                );
+                return Ok(None);
+            }
+            depth += 1;
             let mut folder_rows = folder_statement.query([folder_id])?;
             let Some(folder_row) = folder_rows.next()? else {
                 return Ok(None);
@@ -7878,5 +7894,74 @@ mod tests {
         let after = database.upsert_plugin(updated).expect("re-upsert beta");
         assert!(after.enabled, "enabled must persist across upserts");
         assert_eq!(after.name, "Plugin Beta v2");
+    }
+
+    #[test]
+    fn resolve_file_source_path_returns_none_on_self_parent_cycle() {
+        // Simulate a corrupt DB where a folder points at itself. Without the
+        // depth cap added in this hotfix, the parent walk would loop forever.
+        // The cap keeps the worker responsive and surfaces a warn log instead.
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "cycle-root".to_string(),
+                mtime: Some(0),
+            })
+            .expect("insert root folder");
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "looped.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 1,
+                mtime: 1,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media kind");
+
+        // Force the cycle: folder.parent_id points at itself. The walk
+        // must terminate via the depth cap and return Ok(None) rather than
+        // hang.
+        database
+            .connection
+            .execute(
+                "UPDATE folders SET parent_id = id WHERE id = ?1",
+                [folder_id],
+            )
+            .expect("inject self-parent cycle");
+
+        // Bound the test wall-clock so a regression that re-introduces the
+        // unbounded walk fails fast instead of hanging the suite.
+        let (sender, receiver) = std::sync::mpsc::channel::<anyhow::Result<Option<PathBuf>>>();
+        let database = std::sync::Arc::new(std::sync::Mutex::new(database));
+        let resolver = std::sync::Arc::clone(&database);
+        std::thread::spawn(move || {
+            let guard = resolver.lock().expect("lock database");
+            let result = guard.resolve_file_source_path(file_id);
+            let _ = sender.send(result);
+        });
+
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("resolve_file_source_path must terminate within 5s on a cycle");
+        let resolved = outcome.expect("resolve returns Ok even on cycles");
+        assert!(
+            resolved.is_none(),
+            "cyclic folder graph must resolve to None, got: {resolved:?}"
+        );
     }
 }

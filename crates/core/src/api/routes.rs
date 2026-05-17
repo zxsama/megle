@@ -721,11 +721,11 @@ async fn list_plugins(State(state): State<AppState>) -> ApiResult<Json<PluginLis
 async fn discover_plugins(
     State(state): State<AppState>,
 ) -> ApiResult<(StatusCode, Json<PluginDiscoveryResponse>)> {
-    let plugins_dir = resolve_plugins_dir();
-    let report = {
-        let database = state.database.lock().expect("database mutex poisoned");
-        plugins::discover_and_persist(&database, &plugins_dir)?
-    };
+    let plugins_dir = resolve_plugins_dir(&state);
+    // The locked variant performs the disk walk before acquiring the
+    // mutex, then reacquires per upsert. This keeps other API endpoints
+    // responsive while a large `plugins/` directory is enumerated.
+    let report = plugins::discover_and_persist_locked(&state.database, &plugins_dir)?;
     let errors = report
         .errors
         .into_iter()
@@ -806,7 +806,17 @@ fn not_found_plugin(plugin_id: &str) -> CoreError {
     )
 }
 
-fn resolve_plugins_dir() -> std::path::PathBuf {
+fn resolve_plugins_dir(state: &AppState) -> std::path::PathBuf {
+    // Prefer the directory the startup code already resolved against the
+    // active database path. Falling back to the env var or `./plugins`
+    // would diverge from `main.rs` and was the root cause of Batch G HIGH 1.
+    if let Some(configured) = state.plugins_dir.as_ref() {
+        return configured.clone();
+    }
+    // Defensive fallback for callers that built `AppState` without going
+    // through `router_with_config` (test helpers, the deprecated `router`
+    // alias). Match the same env-var precedence as
+    // `plugins::resolve_plugins_dir` so behavior stays predictable.
     if let Some(value) = std::env::var_os("MEGLE_PLUGINS_DIR") {
         return std::path::PathBuf::from(value);
     }
@@ -1396,6 +1406,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            plugins_dir: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -1437,6 +1448,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            plugins_dir: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -1729,6 +1741,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            plugins_dir: None,
             _watcher: None,
         };
         let app = router(state);
@@ -2219,6 +2232,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: _sender,
+            plugins_dir: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -2259,6 +2273,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: _sender,
+            plugins_dir: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -2304,6 +2319,7 @@ mod tests {
         let state = AppState {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
+            plugins_dir: None,
             _watcher: None,
         };
         let app = router(state.clone());

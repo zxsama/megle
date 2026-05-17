@@ -298,7 +298,7 @@ fn flush_scan_files(
         },
         options,
     )?;
-    probe_image_dimensions(database, &result.file_ids, &paths);
+    probe_image_dimensions(database, options, &result.file_ids, &paths)?;
     Ok(())
 }
 
@@ -306,7 +306,17 @@ fn flush_scan_files(
 /// most recent scan batch. Failures are demoted to a debug log so a single
 /// unreadable file never aborts the scan; metadata stays `pending` and a
 /// later metadata task can retry.
-fn probe_image_dimensions(database: &Database, file_ids: &[i64], paths: &[Option<PathBuf>]) {
+///
+/// The probe is cancellation-aware: we check for cancellation between files
+/// (and at a coarser cadence between every 100 entries) so a request issued
+/// while a multi-million-file root is mid-batch is honored without waiting
+/// for the next WalkDir boundary.
+fn probe_image_dimensions(
+    database: &Database,
+    options: &mut ScanOptions<'_>,
+    file_ids: &[i64],
+    paths: &[Option<PathBuf>],
+) -> anyhow::Result<()> {
     if file_ids.len() != paths.len() {
         // Defensive: if the parallel vectors ever drift we'd rather skip the
         // probe than misattribute dimensions. The scan still succeeds.
@@ -315,9 +325,21 @@ fn probe_image_dimensions(database: &Database, file_ids: &[i64], paths: &[Option
             paths = paths.len(),
             "scan dimension probe arrays out of sync; skipping"
         );
-        return;
+        return Ok(());
     }
-    for (file_id, path) in file_ids.iter().zip(paths.iter()) {
+    // Cancellation cap: at most this many probes between cancellation
+    // checks. The check is also performed before every probe entry so a
+    // tight cancellation window still gets honored within ~1 file.
+    const PROBE_CANCEL_CHECK_INTERVAL: usize = 100;
+
+    for (index, (file_id, path)) in file_ids.iter().zip(paths.iter()).enumerate() {
+        check_scan_cancelled(options)?;
+        if index > 0 && index % PROBE_CANCEL_CHECK_INTERVAL == 0 {
+            // Redundant on the surface, but kept explicit so a future
+            // edit that loosens the per-iteration check above still has a
+            // batch-grained safety net the issue called out.
+            check_scan_cancelled(options)?;
+        }
         let Some(path) = path.as_deref() else {
             continue;
         };
@@ -343,6 +365,7 @@ fn probe_image_dimensions(database: &Database, file_ids: &[i64], paths: &[Option
             }
         }
     }
+    Ok(())
 }
 
 fn ensure_root_enabled(database: &Database, root_id: i64) -> anyhow::Result<()> {
@@ -1022,6 +1045,61 @@ mod tests {
         assert_eq!(source.metadata_status.as_deref(), Some("pending"));
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn probe_image_dimensions_honors_cancellation_inside_the_loop() {
+        // Direct unit-level coverage for the dimension-probe cancellation
+        // hotfix. Without the cancel check inside the loop, an in-flight
+        // probe over a freshly committed batch would not see a cancellation
+        // request until the next WalkDir boundary; with a 1M-file root that
+        // is far too coarse. Asserting the probe itself errors on cancel
+        // pins the intended behavior at the function boundary.
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+
+        // The first call returns Ok so the loop reaches the second
+        // iteration; the second call signals cancellation. This pins the
+        // requirement that the cancel check fires on every iteration, not
+        // only on entry.
+        let calls = Rc::new(Cell::new(0u32));
+        let calls_for_cb = Rc::clone(&calls);
+        let mut callback = move || -> anyhow::Result<()> {
+            let next = calls_for_cb.get() + 1;
+            calls_for_cb.set(next);
+            if next >= 2 {
+                return Err(anyhow::anyhow!("task cancelled: probe-test"));
+            }
+            Ok(())
+        };
+        let mut options = ScanOptions {
+            write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
+            progress_callback: None,
+            cancellation_callback: Some(&mut callback),
+            task_attempt_guard: None,
+            #[cfg(test)]
+            batch_observer: None,
+        };
+
+        // Two synthetic file ids with no associated paths. The probe will
+        // hit the cancel check at the top of every iteration; on the
+        // second iteration the callback returns Err.
+        let file_ids = vec![1_i64, 2_i64];
+        let paths: Vec<Option<PathBuf>> = vec![None, None];
+        let error = probe_image_dimensions(&database, &mut options, &file_ids, &paths)
+            .expect_err("cancellation must surface as Err from the probe loop");
+        assert!(
+            error.to_string().contains("cancelled"),
+            "expected cancellation error, got: {error}"
+        );
+        assert_eq!(
+            calls.get(),
+            2,
+            "cancellation must be checked on every probe iteration"
+        );
     }
 
     fn add_test_root(database: &Database, temp_root: &Path, display_name: &str) -> i64 {

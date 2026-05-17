@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "./useFocusTrap";
 
 export interface DeleteConfirmProps {
   open: boolean;
@@ -24,6 +25,12 @@ export function DeleteConfirm({
 }: DeleteConfirmProps) {
   const total = fileCount + folderCount;
   const [confirmText, setConfirmText] = useState("");
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const confirmInputRef = useRef<HTMLInputElement | null>(null);
+
+  useFocusTrap(open, dialogRef, {
+    initialFocusRef: permanent ? confirmInputRef : undefined
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -34,13 +41,14 @@ export function DeleteConfirm({
     if (!open) return;
     function handleKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (busy) return;
         event.preventDefault();
         onCancel();
       }
     }
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [open, onCancel]);
+  }, [open, onCancel, busy]);
 
   if (!open) return null;
 
@@ -49,12 +57,20 @@ export function DeleteConfirm({
   const canConfirm = !busy && total > 0 && (!permanent || matches);
 
   return (
-    <div className="dialog-backdrop" role="presentation" onClick={onCancel}>
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onClick={() => {
+        if (busy) return;
+        onCancel();
+      }}
+    >
       <div
         aria-labelledby="delete-dialog-title"
         aria-modal="true"
         className="dialog"
         onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
       >
         <header className="dialog-header">
@@ -80,6 +96,7 @@ export function DeleteConfirm({
                   className="dialog-input"
                   disabled={busy}
                   onChange={(event) => setConfirmText(event.target.value)}
+                  ref={confirmInputRef}
                   type="text"
                   value={confirmText}
                 />

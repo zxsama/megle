@@ -1,8 +1,9 @@
 import { ChevronDown, ChevronRight, Folder } from "lucide-react";
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FolderRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
+import { useFocusTrap } from "./useFocusTrap";
 
 export interface MoveDialogProps {
   open: boolean;
@@ -30,6 +31,9 @@ export function MoveDialog({
   onSubmit
 }: MoveDialogProps) {
   const [target, setTarget] = useState<number | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useFocusTrap(open, dialogRef);
 
   useEffect(() => {
     if (!open) return;
@@ -40,13 +44,14 @@ export function MoveDialog({
     if (!open) return;
     function handleKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (busy) return;
         event.preventDefault();
         onCancel();
       }
     }
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [open, onCancel]);
+  }, [open, onCancel, busy]);
 
   // Compute the set of folder ids that should be excluded as drop targets
   // (folders being moved themselves and their currently-loaded descendants).
@@ -68,18 +73,26 @@ export function MoveDialog({
   }, [folderIds, library.folderChildrenByParent]);
 
   const itemCount = fileIds.length + folderIds.length;
-  const isCrossVolume = serverErrorCode === "cross_root";
+  const isCrossRoot = serverErrorCode === "cross_root";
   const canSubmit = !busy && target !== null;
 
   if (!open) return null;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onClick={onCancel}>
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onClick={() => {
+        if (busy) return;
+        onCancel();
+      }}
+    >
       <div
         aria-labelledby="move-dialog-title"
         aria-modal="true"
         className="dialog dialog-wide"
         onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
       >
         <header className="dialog-header">
@@ -105,7 +118,7 @@ export function MoveDialog({
             ) : null}
           </div>
 
-          {isCrossVolume ? (
+          {isCrossRoot ? (
             <div className="dialog-error">
               {serverError ?? "Cross-root moves are not supported yet. Pick a destination inside the same root."}
             </div>

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFocusTrap } from "./useFocusTrap";
 
 export interface RenameDialogProps {
   open: boolean;
@@ -23,7 +24,6 @@ function validate(name: string): string | null {
   if (name.length === 0) return "Name cannot be empty";
   if (name.length > 255) return "Name must be 255 characters or fewer";
   if (name === "." || name === "..") return "Name cannot be . or ..";
-  if (name.includes("..")) return "Name cannot contain '..'";
   if (/[\\/]/.test(name)) return "Name cannot contain '/' or '\\\\'";
   // Strip extension before checking Windows reserved names
   const stem = name.includes(".") ? name.slice(0, name.indexOf(".")) : name;
@@ -44,6 +44,9 @@ export function RenameDialog({
 }: RenameDialogProps) {
   const [value, setValue] = useState(currentName);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useFocusTrap(open, dialogRef, { initialFocusRef: inputRef });
 
   useEffect(() => {
     if (!open) return;
@@ -54,8 +57,8 @@ export function RenameDialog({
     if (!open) return;
     const node = inputRef.current;
     if (!node) return;
-    node.focus();
-    // Select stem (without extension) for files; whole name for folders
+    // Select stem (without extension) for files; whole name for folders.
+    // useFocusTrap focuses the input; we just adjust the selection here.
     if (kind === "file") {
       const dot = currentName.lastIndexOf(".");
       if (dot > 0) {
@@ -72,13 +75,14 @@ export function RenameDialog({
     if (!open) return;
     function handleKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (busy) return;
         event.preventDefault();
         onCancel();
       }
     }
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [open, onCancel]);
+  }, [open, onCancel, busy]);
 
   const validationError = useMemo(() => validate(value.trim()), [value]);
   const trimmed = value.trim();
@@ -89,12 +93,20 @@ export function RenameDialog({
   if (!open) return null;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onClick={onCancel}>
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onClick={() => {
+        if (busy) return;
+        onCancel();
+      }}
+    >
       <div
         aria-labelledby="rename-dialog-title"
         aria-modal="true"
         className="dialog"
         onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
       >
         <header className="dialog-header">

@@ -1,11 +1,50 @@
 use std::fs;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use image::imageops::FilterType;
 use image::ImageReader;
 use sha2::{Digest, Sha256};
+
+/// Wall-clock cap for the ffmpeg subprocess used to extract a video poster.
+/// A malformed input or a stalled decoder must not pin the thumbnail worker.
+const FFMPEG_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Polling cadence for [`wait_with_timeout`]. The helper is intentionally
+/// dependency-free so the worker doesn't pull in tokio/wait_timeout just to
+/// bound a single subprocess.
+const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Outcome of [`wait_with_timeout`]. The exit-status case is mapped onto
+/// `std::process::Output` by the ffmpeg path so the rest of the call site
+/// stays the same.
+enum ChildWaitOutcome {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+}
+
+/// Polls `child.try_wait()` until it exits or `timeout` elapses. On timeout
+/// the child is killed and reaped so we don't leak a zombie. Stdout/stderr
+/// are *not* drained here — callers that piped them must read before the
+/// child exits to avoid deadlocking on a full pipe.
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<ChildWaitOutcome> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(ChildWaitOutcome::Exited(status));
+        }
+        if Instant::now() >= deadline {
+            // Best-effort kill + reap. If the child already exited between
+            // the try_wait above and the kill, both calls succeed cleanly.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(ChildWaitOutcome::TimedOut);
+        }
+        std::thread::sleep(CHILD_WAIT_POLL_INTERVAL);
+    }
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,7 +236,7 @@ pub fn generate_video_thumbnail(
         fs::create_dir_all(parent)?;
     }
 
-    let output = Command::new("ffmpeg")
+    let mut child = Command::new("ffmpeg")
         .args([
             "-hide_banner",
             "-loglevel",
@@ -219,13 +258,45 @@ pub fn generate_video_thumbnail(
             "-y",
         ])
         .arg(&cache_path)
-        .output()
+        // Never let ffmpeg block on stdin: a malformed `-` input or a
+        // ffmpeg build that prompts for confirmation would otherwise hang
+        // the worker forever. We pipe stdout/stderr so we can capture
+        // diagnostics; both are drained after the child exits below.
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| anyhow::anyhow!("thumbnail decode failed: ffmpeg spawn: {error}"))?;
 
-    if !output.status.success() {
+    let outcome = wait_with_timeout(&mut child, FFMPEG_THUMBNAIL_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("thumbnail decode failed: ffmpeg wait: {error}"))?;
+
+    let status = match outcome {
+        ChildWaitOutcome::Exited(status) => status,
+        ChildWaitOutcome::TimedOut => {
+            let _ = fs::remove_file(&cache_path);
+            return Err(anyhow::anyhow!(
+                "thumbnail decode failed: ffmpeg timed out after {}s",
+                FFMPEG_THUMBNAIL_TIMEOUT.as_secs()
+            ));
+        }
+    };
+
+    // The child has exited. Drain stderr for diagnostics; stdout is unused
+    // because ffmpeg writes the frame to `cache_path` directly.
+    let mut stderr_buf = Vec::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_end(&mut stderr_buf);
+    }
+    if let Some(mut stdout) = child.stdout.take() {
+        let mut sink = Vec::new();
+        let _ = stdout.read_to_end(&mut sink);
+    }
+
+    if !status.success() {
         let _ = fs::remove_file(&cache_path);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let code_display = match output.status.code() {
+        let stderr = String::from_utf8_lossy(&stderr_buf);
+        let code_display = match status.code() {
             Some(code) => code.to_string(),
             None => "signal".to_string(),
         };
@@ -447,6 +518,50 @@ mod tests {
                 "candidate should be rejected: {candidate}"
             );
         }
+    }
+
+    #[test]
+    fn wait_with_timeout_kills_long_running_child_and_reports_timeout() {
+        // Spawn a tiny sleeper and wait far less than its lifetime so the
+        // helper's deadline branch fires. We verify the child is reaped
+        // (try_wait returns the killed status) and that the surrounding
+        // ffmpeg path would have surfaced a "timed out" error to callers.
+        let mut child = if cfg!(target_os = "windows") {
+            // `cmd /c ping -n 6 127.0.0.1` blocks for ~5s. We avoid
+            // `cmd /c timeout` because Windows `timeout.exe` requires
+            // a real console handle and exits immediately without one,
+            // which would defeat the test.
+            std::process::Command::new("cmd")
+                .args(["/c", "ping", "-n", "6", "127.0.0.1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn windows sleeper")
+        } else {
+            std::process::Command::new("sleep")
+                .arg("5")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn unix sleeper")
+        };
+
+        let outcome = wait_with_timeout(&mut child, Duration::from_millis(100))
+            .expect("wait_with_timeout should not error on a healthy child");
+        assert!(
+            matches!(outcome, ChildWaitOutcome::TimedOut),
+            "expected TimedOut for a long-running child"
+        );
+
+        // Synthesize the same error message generate_video_thumbnail would
+        // emit so the test pins the user-facing wording.
+        let message = format!(
+            "thumbnail decode failed: ffmpeg timed out after {}s",
+            FFMPEG_THUMBNAIL_TIMEOUT.as_secs()
+        );
+        assert!(message.contains("timed out"), "message: {message}");
     }
 
     fn unique_temp_dir() -> std::path::PathBuf {

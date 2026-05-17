@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let database = db::Database::open(&db_path)?;
     database.apply_migrations()?;
 
-    let plugins_dir = resolve_plugins_dir(&db_path);
+    let plugins_dir = plugins::resolve_plugins_dir(&db_path);
     if let Err(error) = plugins::discover_and_persist(&database, &plugins_dir) {
         tracing::warn!(
             "plugin discovery failed at startup ({}): {}",
@@ -71,23 +71,12 @@ async fn main() -> anyhow::Result<()> {
                 allowed_origin,
                 web_dir,
                 basic_auth,
+                plugins_dir: Some(plugins_dir),
             },
         ),
     )
     .await?;
     Ok(())
-}
-
-fn resolve_plugins_dir(db_path: &std::path::Path) -> PathBuf {
-    if let Some(value) = std::env::var_os("MEGLE_PLUGINS_DIR") {
-        return PathBuf::from(value);
-    }
-    if let Some(parent) = db_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            return parent.join("plugins");
-        }
-    }
-    PathBuf::from("./plugins")
 }
 
 /// Resolve the directory holding the built web UI when static-serve mode is
