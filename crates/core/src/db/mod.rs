@@ -1814,6 +1814,80 @@ impl Database {
         Ok(())
     }
 
+    /// Records image header dimensions and marks media metadata `ready`.
+    /// Used by the scanner after a header-only probe of width/height. Leaves
+    /// pixel-level metadata (duration_ms, codec) untouched so a later metadata
+    /// task can still fill those in.
+    pub fn update_media_dimensions(
+        &self,
+        file_id: i64,
+        width: i64,
+        height: i64,
+    ) -> anyhow::Result<bool> {
+        let updated = self.connection.execute(
+            r#"
+            UPDATE media
+            SET width = ?1,
+                height = ?2,
+                metadata_status = 'ready'
+            WHERE file_id = ?3
+            "#,
+            (width, height, file_id),
+        )?;
+        Ok(updated != 0)
+    }
+
+    /// Reconstructs the absolute filesystem path for an active media file by
+    /// walking `folders.parent_id` back to the root and prepending `roots.path`.
+    /// Returns `None` if the file no longer exists, has been marked missing,
+    /// or its root has been disabled. Used by the thumbnail worker to find the
+    /// source bytes without holding a separate copy of the path on disk.
+    pub fn resolve_file_source_path(&self, file_id: i64) -> anyhow::Result<Option<PathBuf>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT roots.path, files.folder_id, files.name
+            FROM files
+            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+            WHERE files.id = ?1 AND files.status = 'active'
+            "#,
+        )?;
+        let mut rows = statement.query([file_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let root_path: String = row.get(0)?;
+        let mut folder_id: i64 = row.get(1)?;
+        let file_name: String = row.get(2)?;
+
+        let mut segments: Vec<String> = Vec::new();
+        let mut folder_statement = self
+            .connection
+            .prepare("SELECT name, parent_id FROM folders WHERE id = ?1")?;
+        loop {
+            let mut folder_rows = folder_statement.query([folder_id])?;
+            let Some(folder_row) = folder_rows.next()? else {
+                return Ok(None);
+            };
+            let name: String = folder_row.get(0)?;
+            let parent_id: Option<i64> = folder_row.get(1)?;
+            if !name.is_empty() {
+                segments.push(name);
+            }
+            match parent_id {
+                Some(id) => folder_id = id,
+                None => break,
+            }
+        }
+        segments.reverse();
+
+        let mut path = PathBuf::from(root_path);
+        for segment in segments {
+            path.push(segment);
+        }
+        path.push(file_name);
+        Ok(Some(path))
+    }
+
     pub fn commit_scan_batch(
         &mut self,
         batch: ScanWriteBatch,

@@ -6,16 +6,29 @@ use std::path::Path;
 use crate::db::{Database, TaskScanProgress, ThumbnailStateUpsert};
 use crate::scan::{ScanOptions, TaskAttemptGuard};
 use crate::thumbnails::{
-    cache_key_for, write_placeholder_thumbnail, ThumbnailDecision, ThumbnailPolicy,
-    GRID_320_PROFILE,
+    cache_key_for, generate_image_thumbnail, generate_video_thumbnail, ThumbnailDecision,
+    ThumbnailPolicy, GRID_320_PROFILE,
 };
 
 const TASK_PROGRESS_FLUSH_INTERVAL_ITEMS: i64 = 100;
 const THUMBNAIL_SOURCE_CHANGED_ERROR: &str = "thumbnail source changed while processing";
+const FFMPEG_NOT_AVAILABLE_ERROR: &str = "ffmpeg not available";
 
 pub type TaskSender = mpsc::Sender<i64>;
 
 pub fn start_worker(worker_database: Database) -> TaskSender {
+    start_worker_with_ffmpeg(worker_database, crate::thumbnails::ffmpeg_available())
+}
+
+/// Variant that lets callers (and tests) decide whether the worker should
+/// attempt video poster generation. Used by Core startup to detect ffmpeg
+/// once and forward the result without re-spawning per task.
+pub fn start_worker_with_ffmpeg(worker_database: Database, ffmpeg_available: bool) -> TaskSender {
+    if !ffmpeg_available {
+        tracing::warn!(
+            "ffmpeg binary not found on PATH; video thumbnail tasks will fail with \"{FFMPEG_NOT_AVAILABLE_ERROR}\""
+        );
+    }
     let mut worker_database = worker_database;
     worker_database
         .reset_running_root_scan_tasks_for_recovery()
@@ -40,20 +53,20 @@ pub fn start_worker(worker_database: Database) -> TaskSender {
     let (sender, mut receiver) = mpsc::channel(128);
     tokio::spawn(async move {
         for task_id in recovery_task_ids {
-            run_task(&mut worker_database, task_id);
+            run_task(&mut worker_database, task_id, ffmpeg_available);
         }
         for task_id in recovery_thumbnail_task_ids {
-            run_task(&mut worker_database, task_id);
+            run_task(&mut worker_database, task_id, ffmpeg_available);
         }
         while let Some(task_id) = receiver.recv().await {
-            run_task(&mut worker_database, task_id);
+            run_task(&mut worker_database, task_id, ffmpeg_available);
             // Persisted pending tasks (e.g. ones the watcher created when
             // the channel was full or closed) would otherwise wait forever
             // for a queue message that never arrives. Drain them in
             // scheduler order before going back to `recv().await`. The
             // just-completed task is no longer in the pending list, so
             // this does not double-process the channel-delivered task.
-            drain_pending_persisted_tasks(&mut worker_database);
+            drain_pending_persisted_tasks(&mut worker_database, ffmpeg_available);
         }
     });
     sender
@@ -63,7 +76,7 @@ pub fn start_worker(worker_database: Database) -> TaskSender {
 /// that haven't already been observed via the in-memory channel. This covers
 /// the case where the watcher persisted a pending task but `try_send` failed
 /// (channel full or closed).
-fn drain_pending_persisted_tasks(database: &mut Database) {
+fn drain_pending_persisted_tasks(database: &mut Database, ffmpeg_available: bool) {
     let pending_root_scan_ids = match database.list_pending_root_scan_task_ids() {
         Ok(ids) => ids,
         Err(error) => {
@@ -72,7 +85,7 @@ fn drain_pending_persisted_tasks(database: &mut Database) {
         }
     };
     for task_id in pending_root_scan_ids {
-        run_task(database, task_id);
+        run_task(database, task_id, ffmpeg_available);
     }
     let pending_thumbnail_ids = match database.list_pending_thumbnail_task_ids() {
         Ok(ids) => ids,
@@ -82,13 +95,13 @@ fn drain_pending_persisted_tasks(database: &mut Database) {
         }
     };
     for task_id in pending_thumbnail_ids {
-        run_task(database, task_id);
+        run_task(database, task_id, ffmpeg_available);
     }
 }
 
-fn run_task(database: &mut Database, task_id: i64) {
+fn run_task(database: &mut Database, task_id: i64, ffmpeg_available: bool) {
     let attempt_generation = database.current_task_attempt_generation(task_id).ok();
-    if let Err(error) = run_task_with_database(database, task_id) {
+    if let Err(error) = run_task_with_database(database, task_id, ffmpeg_available) {
         if let Some(attempt_generation) = attempt_generation {
             handle_task_error_for_attempt(database, task_id, attempt_generation, error);
         } else {
@@ -147,7 +160,11 @@ fn handle_task_error_for_attempt(
     let _ = database.mark_task_failed_for_attempt(task_id, attempt_generation, &error_message);
 }
 
-fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Result<()> {
+fn run_task_with_database(
+    database: &mut Database,
+    task_id: i64,
+    ffmpeg_available: bool,
+) -> anyhow::Result<()> {
     let task = database
         .get_task(task_id)?
         .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
@@ -256,6 +273,7 @@ fn run_task_with_database(database: &mut Database, task_id: i64) -> anyhow::Resu
                 task_id,
                 attempt_generation,
                 &cache_root,
+                ffmpeg_available,
             )
         }
         other => Err(anyhow::anyhow!("unsupported task kind: {other}")),
@@ -266,9 +284,16 @@ fn run_thumbnail_task_with_cache(
     database: &mut Database,
     task_id: i64,
     cache_root: &Path,
+    ffmpeg_available: bool,
 ) -> anyhow::Result<()> {
     let attempt_generation = database.current_task_attempt_generation(task_id)?;
-    run_thumbnail_task_with_cache_for_attempt(database, task_id, attempt_generation, cache_root)
+    run_thumbnail_task_with_cache_for_attempt(
+        database,
+        task_id,
+        attempt_generation,
+        cache_root,
+        ffmpeg_available,
+    )
 }
 
 fn run_thumbnail_task_with_cache_for_attempt(
@@ -276,12 +301,14 @@ fn run_thumbnail_task_with_cache_for_attempt(
     task_id: i64,
     attempt_generation: i64,
     cache_root: &Path,
+    ffmpeg_available: bool,
 ) -> anyhow::Result<()> {
     run_thumbnail_task_with_cache_and_before_publish_for_attempt(
         database,
         task_id,
         attempt_generation,
         cache_root,
+        ffmpeg_available,
         |_| {},
     )
 }
@@ -290,6 +317,7 @@ fn run_thumbnail_task_with_cache_and_before_publish(
     database: &mut Database,
     task_id: i64,
     cache_root: &Path,
+    ffmpeg_available: bool,
     before_publish: impl FnOnce(&mut Database),
 ) -> anyhow::Result<()> {
     let attempt_generation = database.current_task_attempt_generation(task_id)?;
@@ -298,6 +326,7 @@ fn run_thumbnail_task_with_cache_and_before_publish(
         task_id,
         attempt_generation,
         cache_root,
+        ffmpeg_available,
         before_publish,
     )
 }
@@ -307,6 +336,7 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
     task_id: i64,
     attempt_generation: i64,
     cache_root: &Path,
+    ffmpeg_available: bool,
     before_publish: impl FnOnce(&mut Database),
 ) -> anyhow::Result<()> {
     let task = database
@@ -386,7 +416,29 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
     }
 
     let cache_key = cache_key_for(&source.cache_identity(), GRID_320_PROFILE);
-    let generated = write_placeholder_thumbnail(cache_root, &cache_key)?;
+    let source_path = database
+        .resolve_file_source_path(file_id)?
+        .ok_or_else(|| anyhow::anyhow!("source path not found for file {file_id}"))?;
+    let media_kind = source.media_kind.as_deref();
+    let generated = match media_kind {
+        Some("image") => generate_image_thumbnail(cache_root, &cache_key, &source_path)?,
+        Some("video") => {
+            if !ffmpeg_available {
+                return Err(anyhow::anyhow!(FFMPEG_NOT_AVAILABLE_ERROR));
+            }
+            generate_video_thumbnail(cache_root, &cache_key, &source_path)?
+        }
+        Some(other) => {
+            return Err(anyhow::anyhow!(
+                "thumbnail decode failed: unsupported media kind \"{other}\""
+            ));
+        }
+        None => {
+            return Err(anyhow::anyhow!(
+                "thumbnail decode failed: media kind not classified"
+            ));
+        }
+    };
     before_publish(database);
     if let Err(error) = database.ensure_task_not_cancelled(task_id) {
         cleanup_thumbnail_cache_file(cache_root, &cache_key);
@@ -449,10 +501,10 @@ mod tests {
     use crate::db::{FileUpsert, FolderUpsert, NewRoot};
 
     #[test]
-    fn thumbnail_task_writes_cache_placeholder_and_marks_task_succeeded() {
+    fn thumbnail_task_writes_real_webp_and_marks_task_succeeded() {
         let temp_root = unique_temp_dir("media");
         fs::create_dir_all(&temp_root).expect("create media root");
-        fs::write(temp_root.join("image.jpg"), b"not a real image").expect("write media file");
+        write_test_image(&temp_root.join("image.jpg"), 800, 400);
         let cache_root = unique_temp_dir("cache");
         fs::create_dir_all(&cache_root).expect("create cache root");
 
@@ -464,7 +516,7 @@ mod tests {
             .expect("request thumbnail task");
 
         let task_id = request.task_id.expect("thumbnail task id");
-        run_thumbnail_task_with_cache(&mut database, task_id, &cache_root)
+        run_thumbnail_task_with_cache(&mut database, task_id, &cache_root, true)
             .expect("run thumbnail task");
 
         let task = database
@@ -482,7 +534,10 @@ mod tests {
         assert_eq!(thumbnail.output_format, crate::thumbnails::GENERATED_FORMAT);
         let cache_key = thumbnail.cache_key.expect("cache key");
         assert!(crate::thumbnails::is_safe_cache_key(&cache_key));
-        assert_eq!(thumbnail.width, Some(320));
+        // Source is 800x400 (landscape, short side 400). After resizing the
+        // short side to 320 the long side becomes 640. Real WebP, not
+        // placeholder.
+        assert_eq!(thumbnail.width, Some(640));
         assert_eq!(thumbnail.height, Some(320));
         assert!(thumbnail.byte_size.expect("byte size") > 0);
 
@@ -492,6 +547,49 @@ mod tests {
         assert_eq!(&cache_bytes[0..4], b"RIFF");
         assert_eq!(&cache_bytes[8..12], b"WEBP");
         assert!(fs::metadata(temp_root.join(&cache_key)).is_err());
+
+        fs::remove_dir_all(temp_root).expect("cleanup media root");
+        fs::remove_dir_all(cache_root).expect("cleanup cache root");
+    }
+
+    #[test]
+    fn thumbnail_task_for_video_without_ffmpeg_marks_failed_with_clear_error() {
+        let temp_root = unique_temp_dir("media");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        // 1-byte placeholder masquerading as a video. We never invoke ffmpeg
+        // because the worker is configured with ffmpeg_available = false.
+        fs::write(temp_root.join("clip.mp4"), [0u8]).expect("write fake video");
+        let cache_root = unique_temp_dir("cache");
+        fs::create_dir_all(&cache_root).expect("create cache root");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let file_id = seed_media_file_with_kind(&database, &temp_root, "clip.mp4", "video");
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail task");
+        let task_id = request.task_id.expect("thumbnail task id");
+
+        run_task(&mut database, task_id, false);
+
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "failed");
+        assert_eq!(task.error.as_deref(), Some(FFMPEG_NOT_AVAILABLE_ERROR));
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "failed");
+        assert_eq!(thumbnail.error.as_deref(), Some(FFMPEG_NOT_AVAILABLE_ERROR));
+        // No cache files should have been written.
+        assert!(fs::read_dir(&cache_root)
+            .expect("read cache root")
+            .next()
+            .is_none());
 
         fs::remove_dir_all(temp_root).expect("cleanup media root");
         fs::remove_dir_all(cache_root).expect("cleanup cache root");
@@ -561,7 +659,7 @@ mod tests {
             .expect("list pending thumbnails")
             .is_empty());
 
-        run_task(&mut database, task_id);
+        run_task(&mut database, task_id, true);
 
         let task = database
             .get_task(task_id)
@@ -586,7 +684,7 @@ mod tests {
     fn thumbnail_task_does_not_publish_ready_when_source_changes_before_completion() {
         let temp_root = unique_temp_dir("media");
         fs::create_dir_all(&temp_root).expect("create media root");
-        fs::write(temp_root.join("image.jpg"), b"not a real image").expect("write media file");
+        write_test_image(&temp_root.join("image.jpg"), 400, 400);
         let cache_root = unique_temp_dir("cache");
         fs::create_dir_all(&cache_root).expect("create cache root");
 
@@ -602,7 +700,8 @@ mod tests {
             &mut database,
             task_id,
             &cache_root,
-            |database| {
+            true,
+            |database: &mut Database| {
                 let source = database
                     .get_thumbnail_source(file_id)
                     .expect("get source")
@@ -952,7 +1051,7 @@ mod tests {
 
         // Run the drain helper: it must pick up the persisted pending task
         // and execute it, producing a terminal task status.
-        drain_pending_persisted_tasks(&mut database);
+        drain_pending_persisted_tasks(&mut database, true);
 
         let task = database
             .get_task(task_id)
@@ -972,6 +1071,15 @@ mod tests {
     }
 
     fn seed_media_file(database: &Database, root_path: &Path, name: &str) -> i64 {
+        seed_media_file_with_kind(database, root_path, name, "image")
+    }
+
+    fn seed_media_file_with_kind(
+        database: &Database,
+        root_path: &Path,
+        name: &str,
+        kind: &str,
+    ) -> i64 {
         let root_id = database
             .add_root(NewRoot {
                 path: root_path.to_string_lossy().to_string(),
@@ -992,7 +1100,13 @@ mod tests {
                 root_id,
                 folder_id,
                 name: name.to_string(),
-                ext: ".jpg".to_string(),
+                ext: format!(
+                    ".{}",
+                    Path::new(name)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("")
+                ),
                 size: 16,
                 mtime: 2,
                 ctime: None,
@@ -1000,9 +1114,18 @@ mod tests {
             })
             .expect("insert file");
         database
-            .upsert_media_kind(file_id, "image")
+            .upsert_media_kind(file_id, kind)
             .expect("insert media kind");
         file_id
+    }
+
+    fn write_test_image(path: &Path, width: u32, height: u32) {
+        let buffer = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 255) as u8, (y % 255) as u8, 0])
+        });
+        image::DynamicImage::ImageRgb8(buffer)
+            .save(path)
+            .expect("write test image");
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {

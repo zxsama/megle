@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+use std::sync::OnceLock;
 
+use image::imageops::FilterType;
+use image::ImageReader;
 use sha2::{Digest, Sha256};
 
 #[allow(dead_code)]
@@ -133,35 +137,144 @@ pub fn is_safe_cache_key(cache_key: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-pub fn write_placeholder_thumbnail(
+pub fn generate_image_thumbnail(
     cache_root: &Path,
     cache_key: &str,
+    source_path: &Path,
 ) -> anyhow::Result<GeneratedThumbnail> {
     if !is_safe_cache_key(cache_key) {
         return Err(anyhow::anyhow!("unsafe thumbnail cache key: {cache_key}"));
     }
+
+    let reader = ImageReader::open(source_path)
+        .map_err(|error| anyhow::anyhow!("thumbnail decode failed: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| anyhow::anyhow!("thumbnail decode failed: {error}"))?;
+    let decoded = reader
+        .decode()
+        .map_err(|error| anyhow::anyhow!("thumbnail decode failed: {error}"))?;
+
+    let source_width = decoded.width();
+    let source_height = decoded.height();
+    if source_width == 0 || source_height == 0 {
+        return Err(anyhow::anyhow!(
+            "thumbnail decode failed: zero-sized source image"
+        ));
+    }
+    let (target_width, target_height) =
+        target_dimensions(source_width, source_height, GRID_320_SHORT_SIDE_PX as u32);
+
+    let resized = decoded.resize_exact(target_width, target_height, FilterType::Triangle);
+    // `webp::Encoder::from_image` only accepts RGB8/RGBA8. Convert through
+    // `to_rgba8` so paletted, grayscale, and 16-bit decodes still encode.
+    let rgba = resized.to_rgba8();
+    let encoded = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height()).encode(75.0);
+    let bytes: &[u8] = &encoded;
+
     let path = cache_root.join(cache_key);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = placeholder_bytes(cache_key);
-    fs::write(&path, &bytes)?;
+    fs::write(&path, bytes)?;
+
     Ok(GeneratedThumbnail {
-        width: GRID_320_SHORT_SIDE_PX,
-        height: GRID_320_SHORT_SIDE_PX,
+        width: target_width as i64,
+        height: target_height as i64,
         byte_size: bytes.len() as i64,
     })
 }
 
-fn placeholder_bytes(cache_key: &str) -> Vec<u8> {
-    let _ = cache_key;
-    // 1x1 lossy WebP. This is a valid RIFF/WEBP container used until the real decoder lands.
-    [
-        0x52, 0x49, 0x46, 0x46, 0x22, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
-        0x20, 0x16, 0x00, 0x00, 0x00, 0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x01, 0x00, 0x01, 0x00,
-        0x0e, 0xc0, 0xfe, 0x25, 0xa4, 0x00, 0x03, 0x70, 0x00, 0x00, 0x00, 0x00,
-    ]
-    .to_vec()
+pub fn generate_video_thumbnail(
+    cache_root: &Path,
+    cache_key: &str,
+    source_path: &Path,
+) -> anyhow::Result<GeneratedThumbnail> {
+    if !is_safe_cache_key(cache_key) {
+        return Err(anyhow::anyhow!("unsafe thumbnail cache key: {cache_key}"));
+    }
+    let cache_path = cache_root.join(cache_key);
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "00:00:01.0",
+            "-i",
+        ])
+        .arg(source_path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='if(gt(a,1),320,-2)':'if(gt(a,1),-2,320)'",
+            "-f",
+            "image2",
+            "-codec:v",
+            "webp",
+            "-y",
+        ])
+        .arg(&cache_path)
+        .output()
+        .map_err(|error| anyhow::anyhow!("thumbnail decode failed: ffmpeg spawn: {error}"))?;
+
+    if !output.status.success() {
+        let _ = fs::remove_file(&cache_path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code_display = match output.status.code() {
+            Some(code) => code.to_string(),
+            None => "signal".to_string(),
+        };
+        return Err(anyhow::anyhow!(
+            "thumbnail decode failed: ffmpeg exit {code_display} stderr: {}",
+            stderr.trim()
+        ));
+    }
+
+    let dimensions = ImageReader::open(&cache_path)
+        .map_err(|error| anyhow::anyhow!("thumbnail decode failed: ffmpeg output open: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| anyhow::anyhow!("thumbnail decode failed: ffmpeg output guess: {error}"))?
+        .into_dimensions()
+        .map_err(|error| {
+            anyhow::anyhow!("thumbnail decode failed: ffmpeg output dimensions: {error}")
+        })?;
+
+    let metadata = fs::metadata(&cache_path)?;
+    Ok(GeneratedThumbnail {
+        width: dimensions.0 as i64,
+        height: dimensions.1 as i64,
+        byte_size: metadata.len() as i64,
+    })
+}
+
+fn target_dimensions(width: u32, height: u32, short_side_px: u32) -> (u32, u32) {
+    if width <= short_side_px && height <= short_side_px {
+        return (width.max(1), height.max(1));
+    }
+    if width <= height {
+        let target_width = short_side_px.max(1);
+        let target_height = ((height as u64 * target_width as u64) / width.max(1) as u64) as u32;
+        (target_width, target_height.max(1))
+    } else {
+        let target_height = short_side_px.max(1);
+        let target_width = ((width as u64 * target_height as u64) / height.max(1) as u64) as u32;
+        (target_width.max(1), target_height)
+    }
+}
+
+/// Detects whether `ffmpeg` is on PATH. Result is cached for the lifetime of
+/// the process so the worker only pays the spawn cost once.
+pub fn ffmpeg_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| match Command::new("ffmpeg").arg("-version").output() {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    })
 }
 
 #[cfg(test)]
@@ -254,20 +367,67 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_writer_writes_minimal_webp_container_bytes() {
+    fn generate_image_thumbnail_writes_real_webp_with_resized_aspect_ratio() {
         let cache_root = unique_temp_dir();
         fs::create_dir_all(&cache_root).expect("create cache root");
         let cache_key = "aa/bb/test.webp";
 
-        let generated =
-            write_placeholder_thumbnail(&cache_root, cache_key).expect("write placeholder");
-        let bytes = fs::read(cache_root.join(cache_key)).expect("read placeholder");
+        let source_dir = unique_temp_dir();
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        let source_path = source_dir.join("source.png");
+        // 800x400 source: short side = 400, long side = 800. After
+        // resizing the short side to 320 the long side scales to 640.
+        let buffer =
+            image::ImageBuffer::from_fn(800u32, 400u32, |x, _| image::Rgb([(x % 255) as u8, 0, 0]));
+        image::DynamicImage::ImageRgb8(buffer)
+            .save(&source_path)
+            .expect("write source png");
+
+        let generated = generate_image_thumbnail(&cache_root, cache_key, &source_path)
+            .expect("generate thumbnail");
+        let bytes = fs::read(cache_root.join(cache_key)).expect("read generated thumbnail");
 
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WEBP");
         assert_eq!(generated.byte_size, bytes.len() as i64);
+        assert_eq!(generated.width, 640);
+        assert_eq!(generated.height, 320);
 
-        fs::remove_dir_all(cache_root).expect("cleanup cache root");
+        fs::remove_dir_all(&cache_root).expect("cleanup cache root");
+        fs::remove_dir_all(&source_dir).expect("cleanup source dir");
+    }
+
+    #[test]
+    fn generate_image_thumbnail_returns_decode_failed_on_corrupt_source() {
+        let cache_root = unique_temp_dir();
+        fs::create_dir_all(&cache_root).expect("create cache root");
+        let cache_key = "aa/bb/corrupt.webp";
+
+        let source_dir = unique_temp_dir();
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        let source_path = source_dir.join("corrupt.jpg");
+        fs::write(&source_path, b"not actually an image").expect("write corrupt source");
+
+        let error = generate_image_thumbnail(&cache_root, cache_key, &source_path)
+            .expect_err("corrupt source should fail to decode");
+        assert!(
+            error.to_string().starts_with("thumbnail decode failed:"),
+            "expected prefix on error: {error}"
+        );
+
+        fs::remove_dir_all(&cache_root).expect("cleanup cache root");
+        fs::remove_dir_all(&source_dir).expect("cleanup source dir");
+    }
+
+    #[test]
+    fn target_dimensions_resizes_short_side_to_320() {
+        assert_eq!(target_dimensions(800, 400, 320), (640, 320));
+        assert_eq!(target_dimensions(400, 800, 320), (320, 640));
+        // Square sources land on the exact short side.
+        assert_eq!(target_dimensions(1024, 1024, 320), (320, 320));
+        // Sources already at or under the short side stay unchanged so
+        // skipped_small can short-circuit the pipeline before we touch them.
+        assert_eq!(target_dimensions(200, 100, 320), (200, 100));
     }
 
     #[test]

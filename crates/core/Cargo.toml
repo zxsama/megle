@@ -9,6 +9,7 @@ repository.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 axum-extra = { version = "0.9", features = ["query"] }
+image = "0.25"
 notify = "8.2.0"
 rusqlite.workspace = true
 serde.workspace = true
@@ -21,3 +22,4 @@ tracing.workspace = true
 trash = "5"
 uuid.workspace = true
 walkdir.workspace = true
+webp = "0.3"

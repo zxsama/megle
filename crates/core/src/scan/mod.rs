@@ -116,6 +116,7 @@ pub fn scan_root_with_options(
     let mut folder_ids = HashMap::new();
     folder_ids.insert(root_path.clone(), root_folder_id);
     let mut pending_files = Vec::new();
+    let mut pending_file_paths: Vec<Option<PathBuf>> = Vec::new();
     let write_batch_size = options.write_batch_size.max(1);
 
     let mut summary = ScanSummary {
@@ -187,6 +188,14 @@ pub fn scan_root_with_options(
             },
             media_kind: kind.to_string(),
         });
+        // Track the source path alongside the queued upsert so the post-flush
+        // dimension probe can map file_ids back to absolute paths. Only image
+        // entries carry a path; videos go through ffmpeg later.
+        pending_file_paths.push(if kind == "image" {
+            Some(path.to_path_buf())
+        } else {
+            None
+        });
         summary.media_files_seen += 1;
         emit_progress(&mut options, items_seen, &summary);
         check_scan_cancelled(&mut options)?;
@@ -198,6 +207,7 @@ pub fn scan_root_with_options(
                 scan_generation,
                 &mut options,
                 &mut pending_files,
+                &mut pending_file_paths,
             )?;
         }
     }
@@ -208,6 +218,7 @@ pub fn scan_root_with_options(
         scan_generation,
         &mut options,
         &mut pending_files,
+        &mut pending_file_paths,
     )?;
     check_scan_cancelled(&mut options)?;
     ensure_root_enabled(database, root.id)?;
@@ -267,15 +278,18 @@ fn flush_scan_files(
     scan_generation: i64,
     options: &mut ScanOptions<'_>,
     pending_files: &mut Vec<ScanFileUpsert>,
+    pending_file_paths: &mut Vec<Option<PathBuf>>,
 ) -> anyhow::Result<()> {
     if pending_files.is_empty() {
+        pending_file_paths.clear();
         return Ok(());
     }
 
     observe_scan_batch(options, 0, pending_files.len());
     check_scan_cancelled(options)?;
     ensure_root_enabled(database, root_id)?;
-    commit_scan_batch_with_optional_task_guard(
+    let paths = std::mem::take(pending_file_paths);
+    let result = commit_scan_batch_with_optional_task_guard(
         database,
         ScanWriteBatch {
             folders: Vec::new(),
@@ -284,7 +298,51 @@ fn flush_scan_files(
         },
         options,
     )?;
+    probe_image_dimensions(database, &result.file_ids, &paths);
     Ok(())
+}
+
+/// Best-effort header-only width/height probe for image files written in the
+/// most recent scan batch. Failures are demoted to a debug log so a single
+/// unreadable file never aborts the scan; metadata stays `pending` and a
+/// later metadata task can retry.
+fn probe_image_dimensions(database: &Database, file_ids: &[i64], paths: &[Option<PathBuf>]) {
+    if file_ids.len() != paths.len() {
+        // Defensive: if the parallel vectors ever drift we'd rather skip the
+        // probe than misattribute dimensions. The scan still succeeds.
+        tracing::warn!(
+            file_ids = file_ids.len(),
+            paths = paths.len(),
+            "scan dimension probe arrays out of sync; skipping"
+        );
+        return;
+    }
+    for (file_id, path) in file_ids.iter().zip(paths.iter()) {
+        let Some(path) = path.as_deref() else {
+            continue;
+        };
+        match image::ImageReader::open(path)
+            .and_then(|reader| reader.with_guessed_format())
+            .map_err(anyhow::Error::from)
+            .and_then(|reader| reader.into_dimensions().map_err(anyhow::Error::from))
+        {
+            Ok((width, height)) => {
+                if let Err(error) =
+                    database.update_media_dimensions(*file_id, width as i64, height as i64)
+                {
+                    tracing::debug!(file_id = *file_id, %error, "failed to record probed dimensions");
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    file_id = *file_id,
+                    path = %path.display(),
+                    %error,
+                    "image dimension probe failed; metadata stays pending"
+                );
+            }
+        }
+    }
 }
 
 fn ensure_root_enabled(database: &Database, root_id: i64) -> anyhow::Result<()> {
@@ -878,6 +936,90 @@ mod tests {
 
         let root = database.get_root(root_id).expect("get root").expect("root");
         assert_eq!(root.last_scan_at, None);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn scan_root_probes_image_dimensions_and_marks_metadata_ready() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        let image_path = temp_root.join("photo.png");
+        let buffer = image::ImageBuffer::from_fn(800u32, 600u32, |x, y| {
+            image::Rgb([(x % 255) as u8, (y % 255) as u8, 0])
+        });
+        image::DynamicImage::ImageRgb8(buffer)
+            .save(&image_path)
+            .expect("write 800x600 png");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "scan-dimension-probe-test");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("scan root");
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert_eq!(media.items.len(), 1);
+        let entry = &media.items[0];
+        assert_eq!(entry.name, "photo.png");
+        assert_eq!(entry.width, Some(800));
+        assert_eq!(entry.height, Some(600));
+
+        // Inspect the source record so we cover the metadata_status side
+        // of the probe. The thumbnail pipeline relies on this to pick
+        // skipped_small vs generatable.
+        let source = database
+            .get_thumbnail_source(entry.id)
+            .expect("get source")
+            .expect("source exists");
+        assert_eq!(source.metadata_status.as_deref(), Some("ready"));
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn scan_root_leaves_metadata_pending_when_image_dimensions_probe_fails() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        // Empty `.png` is not decodable; the probe must not fail the scan.
+        fs::write(temp_root.join("broken.png"), b"").expect("write broken png");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "scan-dimension-probe-error-test");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("scan root succeeds despite probe failure");
+
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert_eq!(media.items.len(), 1);
+        let entry = &media.items[0];
+        assert_eq!(entry.width, None);
+        assert_eq!(entry.height, None);
+        let source = database
+            .get_thumbnail_source(entry.id)
+            .expect("get source")
+            .expect("source exists");
+        assert_eq!(source.metadata_status.as_deref(), Some("pending"));
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
