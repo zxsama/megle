@@ -4,8 +4,12 @@ import type {
   MediaRecord,
   RootRecord,
   ScanSummary,
+  SearchParams,
+  TagRecord,
   TaskRecord,
-  ThumbnailResponse
+  ThumbnailResponse,
+  UserMetadataRecord,
+  UserMetadataUpdate
 } from "@megle/core-client";
 import { createCoreClient } from "./client";
 import {
@@ -16,6 +20,27 @@ import {
 } from "./mediaResources";
 
 const PAGE_LIMIT = 200;
+const SEARCH_DEBOUNCE_MS = 250;
+
+export type LibrarySort =
+  | "mtime_desc"
+  | "mtime_asc"
+  | "name_asc"
+  | "name_desc"
+  | "rating_desc"
+  | "rating_asc";
+
+export type MediaKindFilter = "image" | "video" | "other";
+export type MinRatingFilter = 1 | 2 | 3 | 4 | 5;
+
+export interface SearchState {
+  q: string;
+  kind?: MediaKindFilter;
+  minRating?: MinRatingFilter;
+  favorite?: boolean;
+  tagIds: number[];
+  sort: LibrarySort;
+}
 
 export interface LibraryState {
   roots: RootRecord[];
@@ -25,6 +50,7 @@ export interface LibraryState {
   selectedFolderId: number | null;
   selectedMediaId: number | null;
   selectedMedia: MediaRecord | null;
+  selectedMetadata: UserMetadataRecord | null;
   folderChildrenByParent: Record<number, FolderRecord[]>;
   folderChildNextCursorByParent: Record<number, string | null>;
   expandedFolderIds: Set<number>;
@@ -39,6 +65,11 @@ export interface LibraryState {
   scanActive: boolean;
   tasks: TaskRecord[];
   busyTaskIds: Set<number>;
+  tags: TagRecord[];
+  tagsById: Map<number, TagRecord>;
+  searchState: SearchState;
+  searchActive: boolean;
+  metadataSaving: boolean;
   error: string | null;
   lastScan: ScanSummary | null;
   setSelectedRootId: (rootId: number) => void;
@@ -54,6 +85,19 @@ export interface LibraryState {
   refreshTasks: () => Promise<void>;
   refresh: () => Promise<void>;
   addRoot: (path: string) => Promise<void>;
+  setQ: (q: string) => void;
+  setKind: (kind: MediaKindFilter | undefined) => void;
+  setMinRating: (rating: MinRatingFilter | undefined) => void;
+  toggleFavoriteFilter: () => void;
+  toggleTagFilter: (tagId: number) => void;
+  setSort: (sort: LibrarySort) => void;
+  clearFilters: () => void;
+  updateMetadata: (fileId: number, patch: UserMetadataUpdate) => Promise<void>;
+  setFileTags: (fileId: number, tagIds: number[]) => Promise<void>;
+  addFileTag: (fileId: number, tagId: number) => Promise<void>;
+  removeFileTag: (fileId: number, tagId: number) => Promise<void>;
+  createTag: (name: string, color?: string | null) => Promise<TagRecord | null>;
+  deleteTag: (tagId: number) => Promise<void>;
 }
 
 export function useLibraryData(): LibraryState {
@@ -91,6 +135,18 @@ export function useLibraryData(): LibraryState {
   const [taskPollFailures, setTaskPollFailures] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<ScanSummary | null>(null);
+  const [tags, setTags] = useState<TagRecord[]>([]);
+  const [searchState, setSearchState] = useState<SearchState>({
+    q: "",
+    kind: undefined,
+    minRating: undefined,
+    favorite: undefined,
+    tagIds: [],
+    sort: "mtime_desc"
+  });
+  const [debouncedQ, setDebouncedQ] = useState("");
+  const [selectedMetadata, setSelectedMetadata] = useState<UserMetadataRecord | null>(null);
+  const [metadataSaving, setMetadataSaving] = useState(false);
   const mediaById = useMemo(() => new Map(media.map((item) => [item.id, item])), [media]);
   const mediaByIdRef = useRef(mediaById);
   mediaByIdRef.current = mediaById;
@@ -105,6 +161,23 @@ export function useLibraryData(): LibraryState {
     [folderChildrenByParent]
   );
   const scanActive = tasks.some((task) => task.status === "pending" || task.status === "running");
+  const tagsById = useMemo(() => new Map(tags.map((tag) => [tag.id, tag])), [tags]);
+
+  const searchActive = useMemo(
+    () =>
+      debouncedQ.trim() !== "" ||
+      searchState.kind !== undefined ||
+      searchState.minRating !== undefined ||
+      searchState.favorite !== undefined ||
+      searchState.tagIds.length > 0,
+    [debouncedQ, searchState.kind, searchState.minRating, searchState.favorite, searchState.tagIds]
+  );
+  const searchActiveRef = useRef(searchActive);
+  searchActiveRef.current = searchActive;
+  const searchStateRef = useRef(searchState);
+  searchStateRef.current = searchState;
+  const debouncedQRef = useRef(debouncedQ);
+  debouncedQRef.current = debouncedQ;
 
   const requestThumbnailStates = useCallback((mediaIds: number[]) => {
     const mediaRecords = [...new Set(mediaIds)]
@@ -268,13 +341,21 @@ export function useLibraryData(): LibraryState {
         const folderFilter =
           selectedFolderId && selectedFolderId !== root.rootFolderId ? selectedFolderId : undefined;
         const cursor = null;
-        const mediaPage = await client.listMedia({
-          cursor: cursor ?? undefined,
-          folderId: folderFilter,
-          limit: PAGE_LIMIT,
-          rootId: root.id,
-          sort: "mtime_desc"
-        });
+        const sort = searchStateRef.current.sort;
+        const mediaPage = searchActiveRef.current
+          ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
+              rootId: root.id,
+              folderId: folderFilter,
+              cursor: cursor ?? undefined,
+              limit: PAGE_LIMIT
+            }))
+          : await client.listMedia({
+              cursor: cursor ?? undefined,
+              folderId: folderFilter,
+              limit: PAGE_LIMIT,
+              rootId: root.id,
+              sort: listMediaSort(sort)
+            });
         if (requestGeneration !== mediaPageGeneration.current) {
           return;
         }
@@ -300,6 +381,74 @@ export function useLibraryData(): LibraryState {
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary]);
+
+  // Debounce the search query input
+  useEffect(() => {
+    if (searchState.q === debouncedQ) {
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      setDebouncedQ(searchState.q);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [searchState.q, debouncedQ]);
+
+  // Reload media when filters/sort/debounced-q change
+  useEffect(() => {
+    void loadLibrary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    debouncedQ,
+    searchState.kind,
+    searchState.minRating,
+    searchState.favorite,
+    searchState.sort,
+    searchState.tagIds.join(",")
+  ]);
+
+  // Load tag list once and refresh on demand via createTag/deleteTag.
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .listTags()
+      .then((response) => {
+        if (!cancelled) {
+          setTags(response.items);
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setError(errorMessage(cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  // Load user metadata for the currently selected media item.
+  useEffect(() => {
+    if (selectedMediaId === null) {
+      setSelectedMetadata(null);
+      return;
+    }
+    let cancelled = false;
+    void client
+      .getUserMetadata(selectedMediaId)
+      .then((record) => {
+        if (!cancelled) {
+          setSelectedMetadata(record);
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setError(errorMessage(cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, selectedMediaId]);
 
   useEffect(() => {
     if (selectedMediaId === null) {
@@ -402,13 +551,21 @@ export function useLibraryData(): LibraryState {
     setLoadingMoreMedia(true);
     setError(null);
     try {
-      const mediaPage = await client.listMedia({
-        cursor: cursor ?? undefined,
-        folderId: folderFilter,
-        limit: PAGE_LIMIT,
-        rootId: root.id,
-        sort: "mtime_desc"
-      });
+      const sort = searchStateRef.current.sort;
+      const mediaPage = searchActiveRef.current
+        ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
+            rootId: root.id,
+            folderId: folderFilter,
+            cursor: cursor ?? undefined,
+            limit: PAGE_LIMIT
+          }))
+        : await client.listMedia({
+            cursor: cursor ?? undefined,
+            folderId: folderFilter,
+            limit: PAGE_LIMIT,
+            rootId: root.id,
+            sort: listMediaSort(sort)
+          });
       if (requestGeneration !== mediaPageGeneration.current) {
         return;
       }
@@ -495,6 +652,189 @@ export function useLibraryData(): LibraryState {
     }
   }, [loadTasks]);
 
+  const setQ = useCallback((q: string) => {
+    setSearchState((current) => (current.q === q ? current : { ...current, q }));
+  }, []);
+
+  const setKind = useCallback((kind: MediaKindFilter | undefined) => {
+    setSearchState((current) => ({ ...current, kind }));
+  }, []);
+
+  const setMinRating = useCallback((rating: MinRatingFilter | undefined) => {
+    setSearchState((current) => ({ ...current, minRating: rating }));
+  }, []);
+
+  const toggleFavoriteFilter = useCallback(() => {
+    setSearchState((current) => ({
+      ...current,
+      favorite: current.favorite === true ? undefined : true
+    }));
+  }, []);
+
+  const toggleTagFilter = useCallback((tagId: number) => {
+    setSearchState((current) => {
+      const has = current.tagIds.includes(tagId);
+      return {
+        ...current,
+        tagIds: has ? current.tagIds.filter((id) => id !== tagId) : [...current.tagIds, tagId]
+      };
+    });
+  }, []);
+
+  const setSort = useCallback((sort: LibrarySort) => {
+    setSearchState((current) => (current.sort === sort ? current : { ...current, sort }));
+  }, []);
+
+  const clearFilters = useCallback(() => {
+    setSearchState((current) => ({
+      q: "",
+      kind: undefined,
+      minRating: undefined,
+      favorite: undefined,
+      tagIds: [],
+      sort: current.sort
+    }));
+    setDebouncedQ("");
+  }, []);
+
+  const reflectMetadataLocally = useCallback(
+    (fileId: number, patch: UserMetadataUpdate) => {
+      setSelectedMetadata((current) => {
+        if (!current || current.fileId !== fileId) return current;
+        const next: UserMetadataRecord = { ...current };
+        if ("rating" in patch) next.rating = patch.rating ?? null;
+        if ("favorite" in patch && patch.favorite !== undefined) next.favorite = patch.favorite;
+        if ("note" in patch) next.note = patch.note ?? null;
+        return next;
+      });
+      if ("favorite" in patch && patch.favorite !== undefined) {
+        const favorite = patch.favorite;
+        setMedia((current) =>
+          current.map((item) => (item.id === fileId ? { ...item, favorite } : item))
+        );
+      }
+      if ("rating" in patch) {
+        const rating = patch.rating ?? null;
+        setMedia((current) =>
+          current.map((item) => (item.id === fileId ? { ...item, rating } : item))
+        );
+      }
+    },
+    []
+  );
+
+  const updateMetadata = useCallback(
+    async (fileId: number, patch: UserMetadataUpdate) => {
+      const previous = selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata : null;
+      reflectMetadataLocally(fileId, patch);
+      setMetadataSaving(true);
+      try {
+        const record = await client.updateUserMetadata(fileId, patch);
+        setSelectedMetadata((current) =>
+          current && current.fileId === fileId ? record : current
+        );
+      } catch (cause) {
+        if (previous) setSelectedMetadata(previous);
+        setError(errorMessage(cause));
+      } finally {
+        setMetadataSaving(false);
+      }
+    },
+    [client, reflectMetadataLocally, selectedMetadata]
+  );
+
+  const reflectFileTagsLocally = useCallback((fileId: number, tagIds: number[]) => {
+    setSelectedMetadata((current) =>
+      current && current.fileId === fileId ? { ...current, tagIds } : current
+    );
+    setMedia((current) =>
+      current.map((item) => (item.id === fileId ? { ...item, tagIds } : item))
+    );
+  }, []);
+
+  const setFileTags = useCallback(
+    async (fileId: number, tagIds: number[]) => {
+      const previous =
+        selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata.tagIds : null;
+      reflectFileTagsLocally(fileId, tagIds);
+      try {
+        const response = await client.setFileTags(fileId, { tagIds });
+        reflectFileTagsLocally(fileId, response.tagIds);
+      } catch (cause) {
+        if (previous) reflectFileTagsLocally(fileId, previous);
+        setError(errorMessage(cause));
+      }
+    },
+    [client, reflectFileTagsLocally, selectedMetadata]
+  );
+
+  const addFileTag = useCallback(
+    async (fileId: number, tagId: number) => {
+      const previous =
+        selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata.tagIds : null;
+      const optimistic = previous && previous.includes(tagId) ? previous : [...(previous ?? []), tagId];
+      reflectFileTagsLocally(fileId, optimistic);
+      try {
+        const response = await client.addFileTag(fileId, { tagId });
+        reflectFileTagsLocally(fileId, response.tagIds);
+      } catch (cause) {
+        if (previous) reflectFileTagsLocally(fileId, previous);
+        setError(errorMessage(cause));
+      }
+    },
+    [client, reflectFileTagsLocally, selectedMetadata]
+  );
+
+  const removeFileTag = useCallback(
+    async (fileId: number, tagId: number) => {
+      const previous =
+        selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata.tagIds : null;
+      const optimistic = (previous ?? []).filter((id) => id !== tagId);
+      reflectFileTagsLocally(fileId, optimistic);
+      try {
+        const response = await client.removeFileTag(fileId, tagId);
+        reflectFileTagsLocally(fileId, response.tagIds);
+      } catch (cause) {
+        if (previous) reflectFileTagsLocally(fileId, previous);
+        setError(errorMessage(cause));
+      }
+    },
+    [client, reflectFileTagsLocally, selectedMetadata]
+  );
+
+  const createTag = useCallback(
+    async (name: string, color?: string | null) => {
+      try {
+        const tag = await client.createTag({ name, color: color ?? null });
+        setTags((current) => {
+          if (current.some((existing) => existing.id === tag.id)) return current;
+          return [...current, tag].sort((a, b) => a.name.localeCompare(b.name));
+        });
+        return tag;
+      } catch (cause) {
+        setError(errorMessage(cause));
+        return null;
+      }
+    },
+    [client]
+  );
+
+  const deleteTag = useCallback(
+    async (tagId: number) => {
+      try {
+        await client.deleteTag(tagId);
+        setTags((current) => current.filter((tag) => tag.id !== tagId));
+        setSearchState((current) => ({
+          ...current,
+          tagIds: current.tagIds.filter((id) => id !== tagId)
+        }));
+      } catch (cause) {
+        setError(errorMessage(cause));
+      }
+    },
+    [client]
+  );
+
   return {
     roots,
     folders,
@@ -503,6 +843,7 @@ export function useLibraryData(): LibraryState {
     selectedFolderId,
     selectedMediaId,
     selectedMedia,
+    selectedMetadata,
     folderChildrenByParent,
     folderChildNextCursorByParent,
     expandedFolderIds,
@@ -517,6 +858,11 @@ export function useLibraryData(): LibraryState {
     scanActive,
     tasks,
     busyTaskIds,
+    tags,
+    tagsById,
+    searchState,
+    searchActive,
+    metadataSaving,
     error,
     lastScan,
     setSelectedRootId: (rootId: number) => {
@@ -556,7 +902,20 @@ export function useLibraryData(): LibraryState {
     retryTask,
     refreshTasks,
     refresh,
-    addRoot
+    addRoot,
+    setQ,
+    setKind,
+    setMinRating,
+    toggleFavoriteFilter,
+    toggleTagFilter,
+    setSort,
+    clearFilters,
+    updateMetadata,
+    setFileTags,
+    addFileTag,
+    removeFileTag,
+    createTag,
+    deleteTag
   };
 }
 
@@ -638,6 +997,38 @@ function removeThumbnailState(
   const next = { ...current };
   delete next[mediaId];
   return next;
+}
+
+function listMediaSort(sort: LibrarySort): "mtime_desc" | "mtime_asc" | "name_asc" | "name_desc" {
+  switch (sort) {
+    case "mtime_asc":
+    case "name_asc":
+    case "name_desc":
+      return sort;
+    default:
+      return "mtime_desc";
+  }
+}
+
+function buildSearchParams(
+  state: SearchState,
+  debouncedQ: string,
+  scope: { rootId: number; folderId: number | undefined; cursor?: string; limit: number }
+): SearchParams {
+  const params: SearchParams = {
+    rootId: scope.rootId,
+    limit: scope.limit,
+    sort: state.sort
+  };
+  if (scope.cursor) params.cursor = scope.cursor;
+  if (scope.folderId !== undefined) params.folderId = scope.folderId;
+  const q = debouncedQ.trim();
+  if (q) params.q = q;
+  if (state.kind) params.kind = state.kind;
+  if (state.minRating !== undefined) params.minRating = state.minRating;
+  if (state.favorite !== undefined) params.favorite = state.favorite;
+  if (state.tagIds.length > 0) params.tagIds = [...state.tagIds];
+  return params;
 }
 
 function errorMessage(cause: unknown): string {

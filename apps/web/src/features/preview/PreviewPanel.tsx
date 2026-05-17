@@ -1,11 +1,13 @@
+import type { ReactNode } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 
 interface PreviewPanelProps {
   selectedMedia: MediaRecord | null;
   thumbnail?: ThumbnailResponse;
+  children?: ReactNode;
 }
 
-export function PreviewPanel({ selectedMedia, thumbnail }: PreviewPanelProps) {
+export function PreviewPanel({ selectedMedia, thumbnail, children }: PreviewPanelProps) {
   return (
     <section className="inspector-panel preview-panel" aria-label="Preview">
       <div className="panel-title">Preview</div>
@@ -26,6 +28,7 @@ export function PreviewPanel({ selectedMedia, thumbnail }: PreviewPanelProps) {
             <dt>Thumbnail</dt>
             <dd>{thumbnail?.state ?? selectedMedia.thumbnailState ?? "pending"}</dd>
           </dl>
+          {children}
         </>
       ) : (
         <div className="empty-panel">No selection</div>
