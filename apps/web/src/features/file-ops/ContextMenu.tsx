@@ -4,11 +4,12 @@ import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 export interface ContextMenuItem {
   id: string;
-  label: ReactNode;
+  label?: ReactNode;
   icon?: ReactNode;
+  separator?: boolean;
   disabled?: boolean;
   danger?: boolean;
-  onSelect: () => void;
+  onSelect?: () => void;
 }
 
 interface ContextMenuProps {
@@ -153,7 +154,7 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = "Item actions" }
       case "Spacebar": {
         if (currentIndex >= 0) {
           const item = items[currentIndex];
-          if (item && !item.disabled) {
+          if (item && !item.disabled && item.onSelect) {
             event.preventDefault();
             item.onSelect();
           }
@@ -184,26 +185,38 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = "Item actions" }
       tabIndex={-1}
       tone="elevated"
     >
-      {items.map((item, index) => (
-        <button
-          aria-disabled={item.disabled}
-          className={`context-menu-item${item.danger ? " context-menu-item-danger" : ""}`}
-          disabled={item.disabled}
-          key={item.id}
-          onClick={() => {
-            if (item.disabled) return;
-            item.onSelect();
-          }}
-          ref={(node) => {
-            itemRefs.current[index] = node;
-          }}
-          role="menuitem"
-          type="button"
-        >
-          {item.icon ? <span className="context-menu-icon">{item.icon}</span> : null}
-          <span className="context-menu-label">{item.label}</span>
-        </button>
-      ))}
+      {items.map((item, index) => {
+        if (item.separator) {
+          itemRefs.current[index] = null;
+          return (
+            <div
+              className="context-menu-separator"
+              key={item.id}
+              role="separator"
+            />
+          );
+        }
+        return (
+          <button
+            aria-disabled={item.disabled}
+            className={`context-menu-item${item.danger ? " context-menu-item-danger" : ""}`}
+            disabled={item.disabled}
+            key={item.id}
+            onClick={() => {
+              if (item.disabled || !item.onSelect) return;
+              item.onSelect();
+            }}
+            ref={(node) => {
+              itemRefs.current[index] = node;
+            }}
+            role="menuitem"
+            type="button"
+          >
+            {item.icon ? <span className="context-menu-icon">{item.icon}</span> : null}
+            <span className="context-menu-label">{item.label}</span>
+          </button>
+        );
+      })}
     </LiquidGlassSurface>
   );
 }

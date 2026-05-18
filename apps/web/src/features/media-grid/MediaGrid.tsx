@@ -13,6 +13,7 @@ interface MediaGridProps {
   loadingMore: boolean;
   hasMore: boolean;
   onSelect: (mediaId: number) => void;
+  onOpenPreview: (mediaId: number) => void;
   onRequestMore: () => void;
   onRequestThumbnailStates: (mediaIds: number[]) => void;
   thumbnailStatesByMediaId: Record<number, ThumbnailResponse>;
@@ -27,6 +28,7 @@ export function MediaGrid({
   hasMore,
   onRequestMore,
   onRequestThumbnailStates,
+  onOpenPreview,
   onSelect,
   thumbnailStatesByMediaId,
   onContextMenu
@@ -151,6 +153,9 @@ export function MediaGrid({
     } else if (event.key === "End" && items[items.length - 1]) {
       event.preventDefault();
       selectIndex(items.length - 1);
+    } else if ((event.key === "Enter" || event.key === " ") && selectedMediaId !== null) {
+      event.preventDefault();
+      onOpenPreview(selectedMediaId);
     }
   }
 
@@ -216,6 +221,7 @@ export function MediaGrid({
                       item={item}
                       key={item.id}
                       onContextMenu={onContextMenu}
+                      onOpenPreview={onOpenPreview}
                       onSelect={onSelect}
                       selected={item.id === selectedMediaId}
                       thumbnail={thumbnailStatesByMediaId[item.id]}
@@ -233,6 +239,7 @@ export function MediaGrid({
 function MediaTile({
   item,
   onSelect,
+  onOpenPreview,
   onContextMenu,
   selected,
   thumbnail,
@@ -240,6 +247,7 @@ function MediaTile({
 }: {
   item: MediaRecord;
   onSelect: (mediaId: number) => void;
+  onOpenPreview: (mediaId: number) => void;
   onContextMenu?: (event: { item: MediaRecord; x: number; y: number; shiftKey: boolean }) => void;
   selected: boolean;
   thumbnail?: ThumbnailResponse;
@@ -259,9 +267,23 @@ function MediaTile({
       style={{ width }}
     >
       <button
-        aria-label={`Select ${item.name}`}
+        aria-label={`Open preview for ${item.name}`}
         className={selected ? "media-tile selected" : "media-tile"}
-        onClick={() => onSelect(item.id)}
+        onClick={() => {
+          onSelect(item.id);
+          onOpenPreview(item.id);
+        }}
+        onDoubleClick={() => {
+          onSelect(item.id);
+          onOpenPreview(item.id);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(item.id);
+            onOpenPreview(item.id);
+          }
+        }}
         type="button"
       >
         <ThumbnailStateView item={item} thumbnail={thumbnail} />

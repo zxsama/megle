@@ -31,6 +31,11 @@ const moveDialog = read("apps/web/src/features/file-ops/MoveDialog.tsx");
 const deleteConfirm = read("apps/web/src/features/file-ops/DeleteConfirm.tsx");
 const onboardingHero = read("apps/web/src/features/onboarding/OnboardingHero.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
+const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const previewPanel = read("apps/web/src/features/preview/PreviewPanel.tsx");
+const taskPanel = read("apps/web/src/features/tasks/TaskPanel.tsx");
+const contextMenu = read("apps/web/src/features/file-ops/ContextMenu.tsx");
+const desktopBridge = read("apps/web/src/core/desktop.ts");
 
 for (const value of [
   "frame: false",
@@ -104,6 +109,104 @@ if (!windowChrome.includes("window-chrome-button-close")) {
 
 if (!app.includes("WindowChrome")) {
   fail("app shell must render custom window chrome controls");
+}
+
+for (const value of [
+  "taskDrawerOpen",
+  "task-drawer-toggle",
+  "task-drawer-backdrop",
+  "task-drawer-panel",
+  'aria-label="Open tasks palette"',
+  'aria-label="Close tasks palette"'
+]) {
+  if (!app.includes(value) && !taskPanel.includes(value)) {
+    fail(`tasks must be a floating accessible drawer/palette, missing ${value}`);
+  }
+}
+
+if (styles.includes('"sidebar workspace tasks"') || styles.includes("grid-area: tasks")) {
+  fail("tasks must not occupy a fixed app-shell grid column");
+}
+
+if (!/grid-template-columns:\s*minmax\(260px,\s*292px\)\s+minmax\(0,\s*1fr\)/.test(styles)) {
+  fail("app shell must reserve width for sidebar + workspace only after floating task drawer migration");
+}
+
+for (const value of [
+  "top-tab-icon",
+  "top-tab-caption",
+  "aria-label={tab.label}",
+  "title={tab.label}",
+  'role="tablist"',
+  'role="tab"'
+]) {
+  if (!app.includes(value)) {
+    fail(`top navigation must be product-grade icon tabs with accessible labels: missing ${value}`);
+  }
+}
+
+if (app.includes("<span>{tab.label}</span>")) {
+  fail("top navigation must not render plain text tab buttons as the primary affordance");
+}
+
+for (const value of [
+  "PreviewDialog",
+  "previewOpen",
+  "onOpenPreview",
+  "handleOpenPreview",
+  'aria-label={`Open preview for ${item.name}`',
+  "onDoubleClick",
+  'event.key === "Enter"',
+  'event.key === " "'
+]) {
+  if (!libraryView.includes(value) && !mediaGrid.includes(value) && !previewPanel.includes(value)) {
+    fail(`media grid click/keyboard preview flow missing ${value}`);
+  }
+}
+
+for (const value of [
+  "LiquidGlassSurface",
+  "preview-dialog-backdrop",
+  "preview-dialog-panel",
+  "preview-dialog-stage",
+  'role="dialog"',
+  "useFocusTrap",
+  "Escape",
+  "onClose"
+]) {
+  if (!previewPanel.includes(value)) {
+    fail(`image preview dialog must use accessible Liquid Glass dialog primitives: missing ${value}`);
+  }
+}
+
+for (const value of [
+  "ExternalLink",
+  "Eye",
+  "Pencil",
+  "FolderInput",
+  "Trash2",
+  "RefreshCw",
+  "Copy",
+  "FolderOpen",
+  "context-menu-separator",
+  "Preview",
+  "Rename",
+  "Move to",
+  "Move to recycle bin",
+  "Delete permanently",
+  "Refresh folder",
+  "Copy path",
+  "Reveal in Explorer"
+]) {
+  if (!app.includes(value) && !contextMenu.includes(value)) {
+    fail(`context menu must expose Explorer-style management coverage: missing ${value}`);
+  }
+}
+
+for (const value of ["copyText", "revealPath", "openPath", "DesktopShellActions"]) {
+  if (!desktopBridge.includes(value)) {
+    fail(`desktop bridge must expose safe shell action boundaries where available: missing ${value}`);
+  }
 }
 
 for (const value of [

@@ -20,5 +20,10 @@ contextBridge.exposeInMainWorld("megleDesktop", {
     maximize: () => ipcRenderer.invoke("megle:window-maximize"),
     close: () => ipcRenderer.invoke("megle:window-close"),
     isMaximized: () => ipcRenderer.invoke("megle:window-is-maximized")
+  },
+  shell: {
+    revealPath: (path) => ipcRenderer.invoke("megle:shell-reveal-path", path),
+    openPath: (path) => ipcRenderer.invoke("megle:shell-open-path", path),
+    copyText: (text) => ipcRenderer.invoke("megle:clipboard-write-text", text)
   }
 });

@@ -11,7 +11,7 @@
 - 使用自绘的 frameless Electron desktop chrome。
 - 整个应用采用 layered liquid glass design system。
 - 液态玻璃用于 chrome 和控制层，不覆盖大面积媒体网格和预览内容层。
-- Library、Settings、Plugins、Tasks 必须共享同一套 app shell、tokens 和交互语法。
+- Library、Settings、Plugins、Tasks 必须共享同一套 app shell、tokens 和交互语法；Tasks 作为浮动工具抽屉 / Task Center，而不是永久右栏。
 
 ## 整体产品目标
 
@@ -215,7 +215,7 @@ Phase 1 的 UI 重点：
 
 ## Phase 10: 产品硬化和发布准备
 
-状态：Phase 10 功能已进入硬化阶段；2026-05-18 已补入液态玻璃交互与设计系统落地检查，详见 `docs/superpowers/plans/2026-05-18-megle-liquid-glass-interaction-completion.md`。
+状态：Phase 10 功能已进入硬化阶段；2026-05-18 已补入液态玻璃交互、产品级窗口布局、浮动 Tasks 抽屉、点击预览和设计系统落地检查，详见 `docs/superpowers/plans/2026-05-18-megle-liquid-glass-interaction-completion.md`。
 
 目标：
 
@@ -223,6 +223,7 @@ Phase 1 的 UI 重点：
 - 完成桌面壳 polish、空状态、错误态、快捷键和无障碍收尾。
 - 完成 Electron Windows acrylic 窗口材质、全局可操作控件鼠标反馈、菜单/Dialog/抽屉/Inspector 的统一液态玻璃交互语言。
 - 完成产品级 Liquid Glass primitive：独立折射/透镜层、SVG displacement filter、指针跟随高光、按压弹性、清晰内容层和无障碍降级。
+- 完成圆角 acrylic app shell、图标式顶部导航、浮动 Tasks 工具抽屉、Liquid Glass 预览弹层和资源管理器式右键动作覆盖。
 - 完成端到端回归、性能回归和手动验收清单。
 - 形成 Windows 桌面版 release candidate。
 

@@ -16,6 +16,12 @@ import { LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface LibrarySidebarProps {
   library: LibraryState;
+  onRootContextMenu?: (event: {
+    root: RootRecord;
+    x: number;
+    y: number;
+    shiftKey: boolean;
+  }) => void;
   onFolderContextMenu?: (event: {
     folder: FolderRecord;
     x: number;
@@ -24,7 +30,11 @@ interface LibrarySidebarProps {
   }) => void;
 }
 
-export function LibrarySidebar({ library, onFolderContextMenu }: LibrarySidebarProps) {
+export function LibrarySidebar({
+  library,
+  onFolderContextMenu,
+  onRootContextMenu
+}: LibrarySidebarProps) {
   const [rootPath, setRootPath] = useState("");
   const canPickFolder = canPickNativeFolder();
   const selectedRootId = library.selectedRootId;
@@ -118,6 +128,7 @@ export function LibrarySidebar({ library, onFolderContextMenu }: LibrarySidebarP
             key={root.id}
             library={library}
             onFolderContextMenu={onFolderContextMenu}
+            onRootContextMenu={onRootContextMenu}
             root={root}
           />
         ))}
@@ -130,10 +141,17 @@ export function LibrarySidebar({ library, onFolderContextMenu }: LibrarySidebarP
 function RootNode({
   library,
   root,
-  onFolderContextMenu
+  onFolderContextMenu,
+  onRootContextMenu
 }: {
   library: LibraryState;
   root: RootRecord;
+  onRootContextMenu?: (event: {
+    root: RootRecord;
+    x: number;
+    y: number;
+    shiftKey: boolean;
+  }) => void;
   onFolderContextMenu?: (event: {
     folder: FolderRecord;
     x: number;
@@ -153,6 +171,17 @@ function RootNode({
         role="treeitem"
         aria-expanded={rootFolderId ? expanded : undefined}
         aria-selected={selected}
+        onContextMenu={(event) => {
+          if (!onRootContextMenu) return;
+          event.preventDefault();
+          library.setSelectedRootId(root.id);
+          onRootContextMenu({
+            root,
+            x: event.clientX,
+            y: event.clientY,
+            shiftKey: event.shiftKey
+          });
+        }}
       >
         <button
           className="tree-disclosure"

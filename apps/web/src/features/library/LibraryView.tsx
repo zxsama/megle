@@ -1,16 +1,20 @@
+import { useEffect } from "react";
 import { RefreshCw } from "lucide-react";
 import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
-import { PreviewPanel } from "../preview/PreviewPanel";
+import { PreviewDialog, PreviewPanel } from "../preview/PreviewPanel";
 import { FilterChips } from "./FilterChips";
 import { SearchBar } from "./SearchBar";
 import { SortMenu } from "./SortMenu";
 
 interface LibraryViewProps {
   library: LibraryState;
+  previewOpen: boolean;
+  onOpenPreview: (mediaId: number) => void;
+  onClosePreview: () => void;
   onMediaContextMenu?: (event: {
     item: MediaRecord;
     x: number;
@@ -19,9 +23,25 @@ interface LibraryViewProps {
   }) => void;
 }
 
-export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
+export function LibraryView({
+  library,
+  onClosePreview,
+  onMediaContextMenu,
+  onOpenPreview,
+  previewOpen
+}: LibraryViewProps) {
   const selectedRoot = library.roots.find((root) => root.id === library.selectedRootId) ?? null;
   const selectedFolder = library.folders.find((folder) => folder.id === library.selectedFolderId);
+
+  useEffect(() => {
+    if (previewOpen && !library.selectedMedia) {
+      onClosePreview();
+    }
+  }, [library.selectedMedia, onClosePreview, previewOpen]);
+
+  function handleOpenPreview(mediaId: number) {
+    onOpenPreview(mediaId);
+  }
 
   return (
     <section className="workspace" aria-label="Library workbench">
@@ -77,6 +97,7 @@ export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
             loading={library.loading}
             loadingMore={library.loadingMoreMedia}
             onContextMenu={onMediaContextMenu}
+            onOpenPreview={handleOpenPreview}
             onRequestMore={library.loadMoreMedia}
             onRequestThumbnailStates={library.requestThumbnailStates}
             onSelect={library.setSelectedMediaId}
@@ -90,6 +111,9 @@ export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
         selectedMedia={library.selectedMedia}
         thumbnail={
           library.selectedMedia ? library.thumbnailStatesByMediaId[library.selectedMedia.id] : undefined
+        }
+        onOpenPreview={
+          library.selectedMedia ? () => handleOpenPreview(library.selectedMedia!.id) : undefined
         }
       >
         {library.selectedMedia ? (
@@ -106,6 +130,17 @@ export function LibraryView({ library, onMediaContextMenu }: LibraryViewProps) {
           />
         ) : null}
       </PreviewPanel>
+
+      <PreviewDialog
+        media={library.selectedMedia}
+        onClose={onClosePreview}
+        open={previewOpen}
+        thumbnail={
+          library.selectedMedia
+            ? library.thumbnailStatesByMediaId[library.selectedMedia.id]
+            : undefined
+        }
+      />
     </section>
   );
 }

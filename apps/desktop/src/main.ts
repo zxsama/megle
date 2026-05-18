@@ -1,4 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, type OpenDialogOptions } from "electron";
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  screen,
+  shell,
+  type OpenDialogOptions
+} from "electron";
 import { spawn } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
@@ -68,6 +77,30 @@ ipcMain.handle("megle:window-close", () => {
 
 ipcMain.handle("megle:window-is-maximized", () => {
   return mainWindow?.isMaximized() ?? false;
+});
+
+ipcMain.handle("megle:shell-reveal-path", (_event, targetPath: string) => {
+  if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
+    return false;
+  }
+  shell.showItemInFolder(targetPath);
+  return true;
+});
+
+ipcMain.handle("megle:shell-open-path", async (_event, targetPath: string) => {
+  if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
+    return false;
+  }
+  const error = await shell.openPath(targetPath);
+  return error.length === 0;
+});
+
+ipcMain.handle("megle:clipboard-write-text", (_event, text: string) => {
+  if (typeof text !== "string") {
+    return false;
+  }
+  clipboard.writeText(text);
+  return true;
 });
 
 async function createWindow(): Promise<void> {

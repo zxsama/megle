@@ -23,6 +23,9 @@
 - Main control layers use glass styling: topbar, sidebar, toolbar, inspector, and task panel.
 - Floating layers use elevated glass styling: context menu, sort menu, dialogs, recent operations drawer, plugin details, settings sections, and empty-state cards.
 - The media grid and preview content remain stable dark content surfaces without persistent large-area blur over thumbnails.
+- Tasks no longer consume permanent workspace width; the task summary is an accessible floating utility drawer/palette with a full Task Center escape hatch.
+- Library media tiles open an accessible preview dialog/sheet on click, double click, Enter, or Space while preserving selection and virtualized grid behavior.
+- Right-click file and folder management exposes supported Explorer-like actions and keeps unsupported destructive/root actions disabled instead of faking backend support.
 - The root test suite includes a UI design boundary check so future work cannot silently regress the liquid-glass baseline or move glass into the content layer.
 
 ## 2026-05-18 Product-Grade Liquid Glass Pass
@@ -35,6 +38,17 @@ The first committed Phase 10 pass intentionally established the acrylic shell an
 - Apple requirement: glass responds to interaction by flexing and illuminating. The primitive tracks pointer position through CSS variables, sets pressed state attributes, and drives hover/click lens illumination without blurring child content.
 - rdev/liquid-glass-react influence: Megle uses a local primitive inspired by SVG displacement, configurable blur/saturation/lens intensity, pointer tracking, and separated backdrop/content layers. It does not copy the package source.
 - Validator requirement: `tools/checks/validate-ui-design.mjs` now fails if the app lacks the primitive source, SVG refraction/displacement filters, pointer interaction handling, accessibility fallbacks, primitive consumption, or if grid/preview content selectors gain persistent backdrop filtering.
+
+## 2026-05-18 Release-Readiness Layout Pass
+
+This follow-up pass moves the Liquid Glass direction from a material baseline into a product shell model:
+
+- The app shell is now a rounded acrylic workbench with sidebar + workspace as the only permanent width consumers; task status moved to a floating drawer/palette.
+- The top navigation uses icon tabs with `tablist` / `tab` semantics, `aria-label`, `title`, and compact captions that expand only when useful.
+- The grid click path now opens a preview dialog using `LiquidGlassSurface`, focus trapping, Escape handling, and backdrop dismissal; the image/content stage remains a sharp non-glass content surface.
+- Context menus now include Preview/Open, rename, move, recycle/permanent delete, copy path, reveal in Explorer, refresh/rescan where supported, and disabled root management entries where Core does not yet expose real actions.
+- The desktop bridge now owns safe shell actions (`openPath`, `revealPath`, `copyText`) so the Web UI still does not import filesystem or Electron APIs.
+- The UI design validator now guards the floating task layer, icon tabs, click preview, preview Liquid Glass usage, context-menu coverage, shell action boundaries, and absence of a fixed right task column.
 
 ## Task 1: Guard The Design Contract
 
