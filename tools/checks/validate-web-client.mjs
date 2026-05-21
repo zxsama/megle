@@ -44,6 +44,14 @@ const previewPanelPath = "apps/web/src/features/preview/PreviewPanel.tsx";
 const previewPanel = existsSync(path.join(root, previewPanelPath))
   ? read(previewPanelPath)
   : "";
+const mediaPreviewPath = "apps/web/src/features/preview/MediaPreview.tsx";
+const mediaPreview = existsSync(path.join(root, mediaPreviewPath))
+  ? read(mediaPreviewPath)
+  : "";
+const centralPreviewStagePath = "apps/web/src/features/preview/CentralPreviewStage.tsx";
+const centralPreviewStage = existsSync(path.join(root, centralPreviewStagePath))
+  ? read(centralPreviewStagePath)
+  : "";
 const desktopAdapterPath = "apps/web/src/core/desktop.ts";
 const packageJson = readJson("package.json");
 const webPackageJson = readJson("apps/web/package.json");
@@ -194,6 +202,47 @@ if (!previewPanel) {
 }
 if (!/PreviewPanel/.test(libraryView) || !/selectedMedia/.test(previewPanel) || !/thumbnail/.test(previewPanel)) {
   fail("LibraryView must render a PreviewPanel with selected media and thumbnail state");
+}
+if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("getThumbnailBlob")) {
+  fail("MediaPreview must load central previews from original media while keeping inspector previews on thumbnails");
+}
+if (!mediaPreview.includes('source = "thumbnail"') || !mediaPreview.includes('source === "original"')) {
+  fail("MediaPreview must require explicit original-source mode for central preview rendering");
+}
+if (!centralPreviewStage.includes('source="original"')) {
+  fail("CentralPreviewStage must request original media bytes through MediaPreview");
+}
+if (!centralPreviewStage.includes("shouldSkipPreviewPan")) {
+  fail("CentralPreviewStage must guard interactive media/control targets before starting preview pan");
+}
+for (const value of [
+  "video",
+  "audio",
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "[controls]",
+  "[contenteditable]",
+  "a",
+  "[data-skip-preview-pan]"
+]) {
+  if (!centralPreviewStage.includes(value)) {
+    fail(`CentralPreviewStage preview pan skip selector missing ${value}`);
+  }
+}
+if (
+  !/function handlePointerDown[\s\S]*?shouldSkipPreviewPan[\s\S]*?preventDefault[\s\S]*?setPointerCapture/.test(
+    centralPreviewStage
+  )
+) {
+  fail("CentralPreviewStage must skip interactive preview pan targets before preventDefault and pointer capture");
+}
+if (/MediaPreview[\s\S]{0,120}thumbnail=/.test(centralPreviewStage)) {
+  fail("CentralPreviewStage must not pass thumbnail state into the displayed MediaPreview");
+}
+if (!/MediaPreview[\s\S]{0,140}thumbnail=\{thumbnail\}/.test(previewPanel)) {
+  fail("PreviewPanel must keep using thumbnail state for the right inspector preview");
 }
 if (!librarySidebar.includes("loadMoreFolderChildren") || !librarySidebar.includes("Load more")) {
   fail("LibrarySidebar must expose a load-more affordance for paginated folder children");

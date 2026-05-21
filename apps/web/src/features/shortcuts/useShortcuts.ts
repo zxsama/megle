@@ -1,10 +1,16 @@
 import { useEffect } from "react";
 import type { LibraryState } from "../../core/useLibraryData";
 import type { FileOpsController } from "../file-ops/useFileOps";
+import {
+  matchShortcut,
+  useShortcutBindings
+} from "./shortcutBindings";
 
 export interface UseShortcutsOptions {
   library: LibraryState;
   fileOps: FileOpsController;
+  previewOpen: boolean;
+  onClosePreview: () => void;
 }
 
 /**
@@ -12,18 +18,26 @@ export interface UseShortcutsOptions {
  * focus so the user can type freely in inputs, textareas, and rich-text
  * surfaces without triggering destructive actions.
  *
- *   F2            rename selected file
- *   Delete        recycle-bin delete on selection
- *   Shift+Delete  permanent delete (with confirmation)
- *   Ctrl+F        focus the library search input
- *   Esc           close any open file-ops dialog, else clear selection
+ * Defaults preserve the original bindings while allowing users to edit them
+ * locally from Settings.
  */
-export function useShortcuts({ library, fileOps }: UseShortcutsOptions): void {
+export function useShortcuts({
+  fileOps,
+  library,
+  onClosePreview,
+  previewOpen
+}: UseShortcutsOptions): void {
+  const { bindings } = useShortcutBindings();
+
   useEffect(() => {
     function handler(event: KeyboardEvent) {
+      if (isShortcutCaptureTarget(event.target)) {
+        return;
+      }
+
       if (isEditableTarget(event.target)) {
         // Esc still useful inside inputs to clear selection / close dialogs.
-        if (event.key !== "Escape") {
+        if (!matchShortcut(event, bindings, "closeOrReturn")) {
           return;
         }
       }
@@ -33,9 +47,14 @@ export function useShortcuts({ library, fileOps }: UseShortcutsOptions): void {
         fileOps.move.target !== null ||
         fileOps.remove.target !== null;
 
-      if (event.key === "Escape") {
+      if (matchShortcut(event, bindings, "closeOrReturn")) {
         if (dialogOpen) {
           // Existing dialogs handle their own Esc; bail so we don't double-close.
+          return;
+        }
+        if (previewOpen) {
+          event.preventDefault();
+          onClosePreview();
           return;
         }
         if (library.selectedMediaId !== null) {
@@ -50,7 +69,7 @@ export function useShortcuts({ library, fileOps }: UseShortcutsOptions): void {
         return;
       }
 
-      if ((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F")) {
+      if (matchShortcut(event, bindings, "focusSearch")) {
         const search = document.querySelector<HTMLInputElement>(
           '[aria-label="Search library"]'
         );
@@ -64,7 +83,39 @@ export function useShortcuts({ library, fileOps }: UseShortcutsOptions): void {
 
       const selected = library.selectedMedia;
 
-      if (event.key === "F2") {
+      if (matchShortcut(event, bindings, "previewPrevious")) {
+        if (previewOpen) {
+          event.preventDefault();
+          selectPreviewNeighbor(library, -1);
+        }
+        return;
+      }
+
+      if (matchShortcut(event, bindings, "previewNext")) {
+        if (previewOpen) {
+          event.preventDefault();
+          selectPreviewNeighbor(library, 1);
+        }
+        return;
+      }
+
+      if (matchShortcut(event, bindings, "zoomIn")) {
+        if (previewOpen) {
+          event.preventDefault();
+          window.dispatchEvent(new CustomEvent("megle:preview-zoom", { detail: { direction: "in" } }));
+        }
+        return;
+      }
+
+      if (matchShortcut(event, bindings, "zoomOut")) {
+        if (previewOpen) {
+          event.preventDefault();
+          window.dispatchEvent(new CustomEvent("megle:preview-zoom", { detail: { direction: "out" } }));
+        }
+        return;
+      }
+
+      if (matchShortcut(event, bindings, "renameSelected")) {
         if (selected) {
           event.preventDefault();
           fileOps.openRename({ kind: "file", file: selected });
@@ -72,10 +123,18 @@ export function useShortcuts({ library, fileOps }: UseShortcutsOptions): void {
         return;
       }
 
-      if (event.key === "Delete") {
+      if (matchShortcut(event, bindings, "permanentDelete")) {
         if (selected) {
           event.preventDefault();
-          fileOps.openDelete({ kind: "file", file: selected }, event.shiftKey);
+          fileOps.openDelete({ kind: "file", file: selected }, true);
+        }
+        return;
+      }
+
+      if (matchShortcut(event, bindings, "recycleDelete")) {
+        if (selected) {
+          event.preventDefault();
+          fileOps.openDelete({ kind: "file", file: selected }, false);
         }
         return;
       }
@@ -83,7 +142,24 @@ export function useShortcuts({ library, fileOps }: UseShortcutsOptions): void {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [fileOps, library]);
+  }, [bindings, fileOps, library, onClosePreview, previewOpen]);
+}
+
+function selectPreviewNeighbor(library: LibraryState, offset: -1 | 1): void {
+  const currentIndex = library.media.findIndex((item) => item.id === library.selectedMediaId);
+  if (currentIndex === -1) return;
+  const nextIndex = Math.min(library.media.length - 1, Math.max(0, currentIndex + offset));
+  const next = library.media[nextIndex];
+  if (next) {
+    library.setSelectedMediaId(next.id);
+  }
+}
+
+function isShortcutCaptureTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return Boolean(target.closest("[data-shortcut-capture='true']"));
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {

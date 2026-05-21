@@ -12,8 +12,11 @@ export type SortOption =
   | "rating_asc";
 
 interface SortMenuProps {
+  iconOnly?: boolean;
+  open?: boolean;
   value: SortOption;
   onChange: (sort: SortOption) => void;
+  onOpenChange?: (open: boolean) => void;
 }
 
 const SORT_OPTIONS: Array<{ value: SortOption; label: string }> = [
@@ -29,15 +32,35 @@ const SORT_LABEL: Record<SortOption, string> = Object.fromEntries(
   SORT_OPTIONS.map((o) => [o.value, o.label])
 ) as Record<SortOption, string>;
 
-export function SortMenu({ value, onChange }: SortMenuProps) {
-  const [open, setOpen] = useState(false);
+export function SortMenu({
+  iconOnly = false,
+  open: controlledOpen,
+  value,
+  onChange,
+  onOpenChange
+}: SortMenuProps) {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const isControlled = controlledOpen !== undefined;
+  const open = controlledOpen ?? uncontrolledOpen;
+  const selectedLabel = SORT_LABEL[value];
+
+  const setOpen = useCallback(
+    (nextOpen: boolean) => {
+      if (isControlled) {
+        onOpenChange?.(nextOpen);
+        return;
+      }
+      setUncontrolledOpen(nextOpen);
+    },
+    [isControlled, onOpenChange]
+  );
 
   const closeAndReturnFocus = useCallback(() => {
     setOpen(false);
     buttonRef.current?.focus();
-  }, []);
+  }, [setOpen]);
 
   function handleSelect(sort: SortOption) {
     onChange(sort);
@@ -58,14 +81,15 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
   // Close on Escape (returns focus to trigger).
   useEffect(() => {
     if (!open) return;
-    function handleWindowKeyDown(event: globalThis.KeyboardEvent) {
+    function handleDocumentKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
+        event.stopImmediatePropagation();
         closeAndReturnFocus();
       }
     }
-    window.addEventListener("keydown", handleWindowKeyDown);
-    return () => window.removeEventListener("keydown", handleWindowKeyDown);
+    document.addEventListener("keydown", handleDocumentKeyDown, true);
+    return () => document.removeEventListener("keydown", handleDocumentKeyDown, true);
   }, [closeAndReturnFocus, open]);
 
   function focusOptionAt(index: number) {
@@ -103,27 +127,35 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
         active={open}
         aria-expanded={open}
         aria-haspopup="listbox"
-        aria-label={`Sort: ${SORT_LABEL[value]}`}
-        className={`sort-menu-trigger${open ? " sort-menu-trigger-open" : ""}`}
-        onClick={() => setOpen((prev) => !prev)}
+        aria-label={`Sort: ${selectedLabel}`}
+        className={`sort-menu-trigger${iconOnly ? " sort-menu-trigger-icon-only" : ""}${
+          open ? " sort-menu-trigger-open" : ""
+        }`}
+        data-compact-popover="sort"
+        data-compact-popover-trigger="sort"
+        onClick={() => setOpen(!open)}
+        title={`Sort: ${selectedLabel}`}
         tone="control"
         type="button"
       >
         <ArrowDownUp aria-hidden="true" size={14} />
-        <span>{SORT_LABEL[value]}</span>
+        {iconOnly ? null : <span>{selectedLabel}</span>}
       </LiquidGlassButton>
 
       {open ? (
         <>
-          {/* Backdrop to close on outside click */}
-          <div
-            aria-hidden="true"
-            className="sort-menu-backdrop"
-            onClick={() => closeAndReturnFocus()}
-          />
+          {!isControlled ? (
+            <div
+              aria-hidden="true"
+              className="sort-menu-backdrop"
+              onClick={() => closeAndReturnFocus()}
+            />
+          ) : null}
           <LiquidGlassSurface
             as="div"
-            className="sort-menu-list"
+            className="floating-popover sort-menu-list sort-menu-popover"
+            data-compact-popover="sort"
+            data-compact-popover-root="sort"
             interactive
             role="listbox"
             aria-label="Sort options"

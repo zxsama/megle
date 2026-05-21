@@ -10,6 +10,8 @@ function readArg(prefix) {
   return arg ? arg.slice(prefix.length) : undefined;
 }
 
+const visualHarnessEnabled = readArg("--megle-visual-harness=") === "1";
+
 contextBridge.exposeInMainWorld("megleDesktop", {
   coreUrl: readArg("--megle-core-url="),
   sessionToken: readArg("--megle-session-token="),
@@ -25,5 +27,12 @@ contextBridge.exposeInMainWorld("megleDesktop", {
     revealPath: (path) => ipcRenderer.invoke("megle:shell-reveal-path", path),
     openPath: (path) => ipcRenderer.invoke("megle:shell-open-path", path),
     copyText: (text) => ipcRenderer.invoke("megle:clipboard-write-text", text)
-  }
+  },
+  ...(visualHarnessEnabled
+    ? {
+        visual: {
+          capturePage: () => ipcRenderer.invoke("megle:visual-capture-page")
+        }
+      }
+    : {})
 });

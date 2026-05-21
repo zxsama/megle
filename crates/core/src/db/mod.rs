@@ -358,6 +358,7 @@ impl Database {
         Self::from_connection(connection, Some(path))
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> anyhow::Result<Self> {
         let connection = Connection::open_in_memory()?;
         Self::from_connection(connection, None)
@@ -1393,12 +1394,12 @@ impl Database {
             return Err(anyhow::anyhow!("unsupported thumbnail profile: {profile}"));
         }
 
-        let source = self
-            .get_thumbnail_source(file_id)?
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let source = thumbnail_source_in_transaction(&transaction, file_id)?
             .ok_or_else(|| anyhow::anyhow!("media item not found: {file_id}"))?;
         let source_fingerprint = source.source_fingerprint(profile);
 
-        let transaction = self.connection.unchecked_transaction()?;
         let current = thumbnail_for_update_in_transaction(&transaction, file_id, profile)?;
         if let Some(current) = current {
             if thumbnail_state_is_terminal_for_current_source(
@@ -1521,6 +1522,7 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
     pub fn list_folder_children(&self, folder_id: i64) -> anyhow::Result<Vec<FolderRecord>> {
         Ok(self.list_folder_children_page(folder_id, 500, None)?.items)
     }
@@ -4188,6 +4190,17 @@ mod tests {
         (root_id, folder_id)
     }
 
+    fn unique_db_temp_dir(label: &str) -> PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "megle-db-test-{label}-{}-{suffix}",
+            std::process::id()
+        ))
+    }
+
     fn media_names(items: &[MediaRecord]) -> Vec<&str> {
         items.iter().map(|item| item.name.as_str()).collect()
     }
@@ -6081,6 +6094,74 @@ mod tests {
         assert_eq!(ready.task_id, Some(task_id));
         assert!(!ready.queued);
         assert_eq!(database.list_tasks().expect("list tasks").len(), 1);
+    }
+
+    #[test]
+    fn thumbnail_request_waits_for_concurrent_writer_instead_of_returning_locked() {
+        let db_dir = unique_db_temp_dir("thumbnail-request-lock");
+        std::fs::create_dir_all(&db_dir).expect("create temp db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "locked-request.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 4096,
+                mtime: 123,
+                ctime: None,
+                file_key: Some("locked-request".to_string()),
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media");
+
+        let blocker = Database::open(&db_path).expect("open blocker database");
+        let (blocker_ready_sender, blocker_ready_receiver) = std::sync::mpsc::channel();
+        let blocker_thread = std::thread::spawn(move || {
+            let transaction =
+                Transaction::new_unchecked(&blocker.connection, TransactionBehavior::Immediate)
+                    .expect("begin immediate blocker transaction");
+            blocker_ready_sender.send(()).expect("signal blocker ready");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            transaction.commit().expect("commit blocker transaction");
+        });
+        blocker_ready_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("blocker should acquire write lock");
+
+        let (request_sender, request_receiver) = std::sync::mpsc::channel();
+        let request_thread = std::thread::spawn(move || {
+            let result =
+                database.request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE);
+            request_sender
+                .send(result)
+                .expect("send thumbnail request result");
+        });
+
+        match request_receiver.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(result) => {
+                panic!("thumbnail request returned before writer released lock: {result:?}")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("thumbnail request channel closed unexpectedly: {error}"),
+        }
+
+        blocker_thread.join().expect("join blocker thread");
+        let request = request_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("thumbnail request should finish after writer releases lock")
+            .expect("thumbnail request should not fail with database is locked");
+        request_thread.join().expect("join request thread");
+
+        assert_eq!(request.thumbnail.state, "queued");
+        assert!(request.queued);
+
+        let _ = std::fs::remove_dir_all(db_dir);
     }
 
     #[test]

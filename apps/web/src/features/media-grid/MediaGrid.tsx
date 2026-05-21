@@ -267,11 +267,10 @@ function MediaTile({
       style={{ width }}
     >
       <button
-        aria-label={`Open preview for ${item.name}`}
+        aria-label={`Select ${item.name}; press Enter or Space, or double-click, to open preview`}
         className={selected ? "media-tile selected" : "media-tile"}
         onClick={() => {
           onSelect(item.id);
-          onOpenPreview(item.id);
         }}
         onDoubleClick={() => {
           onSelect(item.id);
@@ -280,6 +279,7 @@ function MediaTile({
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
+            event.stopPropagation();
             onSelect(item.id);
             onOpenPreview(item.id);
           }

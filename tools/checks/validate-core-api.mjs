@@ -350,7 +350,6 @@ function operationBlock(pathName, methodName) {
 for (const name of [
   "remove_root",
   "get_thumbnail",
-  "get_preview",
   "enqueue_scan"
 ]) {
   if (!functionBody(name).includes("StatusCode::ACCEPTED")) {
@@ -470,6 +469,36 @@ for (const value of ["Json<ThumbnailResponse>", "get_thumbnail", "StatusCode::OK
   if (!thumbnailBody.includes(value)) {
     fail(`GET /api/media/{fileId}/thumbnail implementation missing ${value}`);
   }
+}
+const previewOperation = operationBlock("/media/{fileId}/preview", "get");
+for (const value of [
+  "operationId: getPreview",
+  '"200"',
+  "application/octet-stream",
+  '"404"',
+  "ErrorResponse"
+]) {
+  if (!previewOperation.includes(value)) {
+    fail(`OpenAPI GET /media/{fileId}/preview original media contract missing ${value}`);
+  }
+}
+if (previewOperation.includes('"202"')) {
+  fail("OpenAPI GET /media/{fileId}/preview must describe original bytes, not queued placeholder work");
+}
+const previewBody = functionBody("get_preview");
+for (const value of [
+  "resolve_file_source_path",
+  "tokio::fs::File::open",
+  "Body::from_stream",
+  "CONTENT_TYPE",
+  "preview_content_type"
+]) {
+  if (!previewBody.includes(value)) {
+    fail(`GET /api/media/{fileId}/preview implementation must stream original media bytes: missing ${value}`);
+  }
+}
+if (previewBody.includes("StatusCode::ACCEPTED")) {
+  fail("GET /api/media/{fileId}/preview must not be a 202 Accepted placeholder");
 }
 if (dbModRs.includes("OFFSET")) {
   fail("Core browsing pagination must use keyset cursors, not OFFSET");

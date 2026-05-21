@@ -1,5 +1,7 @@
 bench-results/
 node_modules/
+tmp/
+.tmp/
 dist/
 build/
 target/
@@ -21,3 +23,4 @@ tools/bench/preview-switch/results/
 *.sqlite-wal
 *.db
 .codex/
+.claude/

@@ -280,6 +280,7 @@ fn run_task_with_database(
     }
 }
 
+#[cfg(test)]
 fn run_thumbnail_task_with_cache(
     database: &mut Database,
     task_id: i64,
@@ -313,6 +314,7 @@ fn run_thumbnail_task_with_cache_for_attempt(
     )
 }
 
+#[cfg(test)]
 fn run_thumbnail_task_with_cache_and_before_publish(
     database: &mut Database,
     task_id: i64,

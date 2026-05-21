@@ -75,6 +75,19 @@ export function createCoreClient(config: CoreClientConfig) {
     return body as T;
   }
 
+  async function fetchBlob(path: string): Promise<Blob> {
+    const headers = new Headers();
+    if (config.sessionToken) {
+      headers.set("x-megle-session", config.sessionToken);
+    }
+    const response = await fetch(resolveUrl(config.baseUrl, path), { headers });
+    if (!response.ok) {
+      const body = await readResponseBody(response);
+      throw new CoreApiError(response.status, body);
+    }
+    return response.blob();
+  }
+
   return {
     listRoots: () => request<Page<RootRecord>>("/roots"),
     listTasks: () => request<Page<TaskRecord>>("/tasks"),
@@ -107,20 +120,9 @@ export function createCoreClient(config: CoreClientConfig) {
     getThumbnail: (fileId: number, profile: "grid_320" = "grid_320") =>
       request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ profile })}`),
     getThumbnailBlob: async (fileId: number, profile: "grid_320" = "grid_320") => {
-      const headers = new Headers();
-      if (config.sessionToken) {
-        headers.set("x-megle-session", config.sessionToken);
-      }
-      const response = await fetch(
-        resolveUrl(config.baseUrl, `/media/${fileId}/thumbnail/blob${query({ profile })}`),
-        { headers }
-      );
-      if (!response.ok) {
-        const body = await readResponseBody(response);
-        throw new CoreApiError(response.status, body);
-      }
-      return response.blob();
+      return fetchBlob(`/media/${fileId}/thumbnail/blob${query({ profile })}`);
     },
+    getPreviewBlob: (fileId: number) => fetchBlob(`/media/${fileId}/preview`),
     listTags: () => request<TagListResponse>("/tags"),
     createTag: (body: CreateTagRequest) =>
       request<TagRecord>("/tags", {

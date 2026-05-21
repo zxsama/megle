@@ -10,12 +10,13 @@ import {
   X
 } from "lucide-react";
 import type { TaskRecord, TaskStatus } from "@megle/core-client";
-import { LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 
 interface TaskCenterProps {
   tasks: TaskRecord[];
   busyTaskIds: Set<number>;
   scanActive: boolean;
+  onClose: () => void;
   onCancel: (taskId: number) => void;
   onRetry: (taskId: number) => void;
   onRefresh: () => void;
@@ -48,6 +49,7 @@ export function TaskCenter({
   tasks,
   busyTaskIds,
   scanActive,
+  onClose,
   onCancel,
   onRetry,
   onRefresh
@@ -68,7 +70,7 @@ export function TaskCenter({
   }, [sortedTasks, statusFilter]);
 
   return (
-    <section className="workspace simple-workspace" aria-label="Task workbench">
+    <section className="task-center-shell" aria-labelledby="task-center-title">
       <LiquidGlassSurface
         as="header"
         className="toolbar task-center-toolbar"
@@ -76,24 +78,36 @@ export function TaskCenter({
         tone="chrome"
       >
         <div>
-          <div className="toolbar-title">Task center</div>
+          <div className="toolbar-title" id="task-center-title">Task center</div>
           <div className="toolbar-meta">
             {tasks.length} tracked {tasks.length === 1 ? "task" : "tasks"}
             {scanActive ? " - activity running" : ""}
           </div>
         </div>
-        <button
-          className="task-center-refresh"
-          onClick={onRefresh}
-          type="button"
-          aria-label="Refresh task list"
-        >
-          <RefreshCw size={14} />
-          <span>Refresh</span>
-        </button>
+        <div className="task-center-toolbar-actions">
+          <LiquidGlassButton
+            aria-label="Refresh task list"
+            className="task-center-refresh"
+            onClick={onRefresh}
+            tone="control"
+            type="button"
+          >
+            <RefreshCw size={14} />
+            <span>Refresh</span>
+          </LiquidGlassButton>
+          <LiquidGlassButton
+            aria-label="Close task center"
+            className="task-center-close"
+            onClick={onClose}
+            tone="control"
+            type="button"
+          >
+            <X size={14} />
+          </LiquidGlassButton>
+        </div>
       </LiquidGlassSurface>
 
-      <div className="task-center">
+      <div className="task-center task-center-body">
         <div
           className="task-center-filters"
           role="tablist"

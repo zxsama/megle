@@ -6,6 +6,7 @@ use axum::{Json, Router};
 use axum_extra::extract::Query as ExtraQuery;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path as FilePath;
 
 use crate::api::AppState;
 use crate::db::{
@@ -600,8 +601,50 @@ async fn get_thumbnail_blob(
         .map_err(|err| CoreError::bad_request(format!("failed to build thumbnail response: {err}")))
 }
 
-async fn get_preview(Path(_file_id): Path<i64>) -> (StatusCode, Json<AcceptedResponse>) {
-    (StatusCode::ACCEPTED, Json(accepted()))
+async fn get_preview(
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+) -> ApiResult<Response> {
+    use axum::body::Body;
+    use axum::http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
+    use tokio_util::io::ReaderStream;
+
+    let (source_path, media_kind) = {
+        let database = state.database.lock().expect("database mutex poisoned");
+        let media = database
+            .get_media(file_id)?
+            .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
+        let source_path = database
+            .resolve_file_source_path(file_id)?
+            .ok_or_else(|| CoreError::not_found(format!("media source not found: {file_id}")))?;
+        (source_path, media.kind)
+    };
+
+    let file = tokio::fs::File::open(&source_path)
+        .await
+        .map_err(|err| CoreError::not_found(format!("media source file missing: {err}")))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|err| CoreError::not_found(format!("media source metadata missing: {err}")))?;
+    if !metadata.is_file() {
+        return Err(CoreError::not_found(format!(
+            "media source is not a file: {}",
+            source_path.display()
+        )));
+    }
+
+    let body = Body::from_stream(ReaderStream::new(file));
+    let mut response = Response::builder()
+        .header(
+            CONTENT_TYPE,
+            preview_content_type(&source_path, media_kind.as_deref()),
+        )
+        .header(CACHE_CONTROL, "private, max-age=0, must-revalidate");
+    response = response.header(CONTENT_LENGTH, metadata.len().to_string());
+    response
+        .body(body)
+        .map_err(|err| CoreError::bad_request(format!("failed to build preview response: {err}")))
 }
 
 async fn list_tasks(State(state): State<AppState>) -> ApiResult<Json<ListResponse<TaskRecord>>> {
@@ -1105,6 +1148,30 @@ fn map_thumbnail_request_error(error: anyhow::Error) -> CoreError {
     error.into()
 }
 
+fn preview_content_type(path: &FilePath, media_kind: Option<&str>) -> &'static str {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("avif") => "image/avif",
+        Some("heic" | "heif") => "image/heic",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("mkv") => "video/x-matroska",
+        Some("avi") => "video/x-msvideo",
+        _ if media_kind == Some("image") => "application/octet-stream",
+        _ if media_kind == Some("video") => "application/octet-stream",
+        _ => "application/octet-stream",
+    }
+}
+
 fn map_task_action_error(error: anyhow::Error) -> CoreError {
     let message = error.to_string();
     if message.contains("task not found") {
@@ -1482,6 +1549,86 @@ mod tests {
         assert_eq!(tasks[0].file_id, Some(file_id));
 
         let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn preview_route_streams_original_media_bytes() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create preview root");
+        let original_bytes = b"not a generated thumbnail";
+        let file_name = "original.jpg";
+        fs::write(temp_root.join(file_name), original_bytes).expect("write original file");
+
+        let database = test_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Preview Root".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "preview-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let file_id = database
+            .upsert_file(crate::db::FileUpsert {
+                root_id,
+                folder_id,
+                name: file_name.to_string(),
+                ext: ".jpg".to_string(),
+                size: original_bytes.len() as i64,
+                mtime: 2,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media kind");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media/{file_id}/preview"))
+                    .body(Body::empty())
+                    .expect("build preview request"),
+            )
+            .await
+            .expect("get original preview");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/jpeg")
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read original preview body");
+        assert_eq!(&bytes[..], original_bytes);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/media/999999/preview")
+                    .body(Body::empty())
+                    .expect("build missing preview request"),
+            )
+            .await
+            .expect("get missing original preview");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[tokio::test]

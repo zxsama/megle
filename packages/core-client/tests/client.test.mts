@@ -126,6 +126,15 @@ describe("createCoreClient", () => {
     assert.match(recorded[0].url, /\/plugins\/org\.example%2Frisky$/);
   });
 
+  test("getPreviewBlob requests original media bytes", async () => {
+    mockFetch("original bytes");
+    const blob = await client().getPreviewBlob(42);
+    assert.equal(recorded[0].method, "GET");
+    assert.equal(recorded[0].url, `${BASE_URL}/media/42/preview`);
+    assert.equal(recorded[0].headers["x-megle-session"], "secret");
+    assert.equal(await blob.text(), JSON.stringify("original bytes"));
+  });
+
   test("CoreApiError is thrown on non-2xx with parsed body", async () => {
     mockFetch({ error: "nope", code: "plugin_not_found" }, 404);
     await assert.rejects(() => client().getPlugin("missing"), (error: Error) => {

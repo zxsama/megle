@@ -4,17 +4,25 @@ import {
   Eye,
   FolderInput,
   FolderOpen,
-  History,
-  Images,
-  ListChecks,
-  Package,
   Pencil,
   RefreshCw,
-  Settings,
   Trash2
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FolderRecord, MediaRecord, RootRecord } from "@megle/core-client";
+import { AppShell } from "../app-shell/AppShell";
+import {
+  ShellOverlayHost,
+  type ShellContextMenuState
+} from "../app-shell/ShellOverlayHost";
+import {
+  LibraryTitlebarToolbar,
+  PreviewTitlebarToolbar,
+  ShellPrimaryNav,
+  ShellRightActions,
+  ShellTitlebarPlaceholder,
+  type ShellWorkspaceView
+} from "../app-shell/ShellTopBar";
 import {
   copyText,
   getDesktopShellActions,
@@ -22,17 +30,9 @@ import {
   revealPath
 } from "../core/desktop";
 import { useLibraryData, type LibraryState } from "../core/useLibraryData";
-import { LiquidGlassButton, LiquidGlassLayer, LiquidGlassSurface } from "../design/liquid-glass";
-import { ContextMenu, type ContextMenuItem } from "../features/file-ops/ContextMenu";
-import { DeleteConfirm } from "../features/file-ops/DeleteConfirm";
-import { MoveDialog } from "../features/file-ops/MoveDialog";
-import { RecentOpsPanel } from "../features/file-ops/RecentOpsPanel";
-import { RenameDialog } from "../features/file-ops/RenameDialog";
+import { LiquidGlassLayer, useInterfaceStyle } from "../design/liquid-glass";
+import { type ContextMenuItem } from "../features/file-ops/ContextMenu";
 import {
-  collectFileIds,
-  collectFolderIds,
-  targetCounts,
-  targetSampleName,
   useFileOpsController,
   type FileOpsController
 } from "../features/file-ops/useFileOps";
@@ -42,46 +42,173 @@ import { OnboardingHero } from "../features/onboarding/OnboardingHero";
 import { PluginsView } from "../features/plugins/PluginsView";
 import { SettingsView } from "../features/settings/SettingsView";
 import { useShortcuts } from "../features/shortcuts/useShortcuts";
-import { TaskCenter } from "../features/tasks/TaskCenter";
-import { TaskPanel } from "../features/tasks/TaskPanel";
-import { WindowChrome } from "../features/window-chrome/WindowChrome";
 
-type AppView = "library" | "tasks" | "plugins" | "settings";
+type AppView = ShellWorkspaceView;
+type CompactPopover = "tasks" | "recent" | "filter" | "sort" | null;
+type PreviewViewState = { mode: "fit-long-edge" | "actual"; scale: number };
+type PreviewViewCommands = { reset: () => void; toggleActualSize: () => void };
 
-interface ContextMenuState {
-  x: number;
-  y: number;
-  items: ContextMenuItem[];
-}
-
-const tabs = [
-  { id: "library", label: "Library", caption: "Library", icon: Images },
-  { id: "tasks", label: "Tasks", caption: "Tasks", icon: ListChecks },
-  { id: "plugins", label: "Plugins", caption: "Plugins", icon: Package },
-  { id: "settings", label: "Settings", caption: "Settings", icon: Settings }
-] satisfies Array<{ id: AppView; label: string; caption: string; icon: typeof Images }>;
+const DEFAULT_PREVIEW_VIEW_STATE: PreviewViewState = {
+  mode: "fit-long-edge",
+  scale: 1
+};
 
 export function App() {
   const [activeView, setActiveView] = useState<AppView>("library");
+  const interfaceStyle = useInterfaceStyle();
   const library = useLibraryData();
   const fileOps = useFileOpsController(library);
-  const [menu, setMenu] = useState<ContextMenuState | null>(null);
-  const [recentOpsOpen, setRecentOpsOpen] = useState(false);
-  const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
+  const [menu, setMenu] = useState<ShellContextMenuState | null>(null);
+  const [activeCompactPopover, setActiveCompactPopover] =
+    useState<CompactPopover>(null);
+  const [taskCenterOpen, setTaskCenterOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewViewState, setPreviewViewState] =
+    useState<PreviewViewState>(DEFAULT_PREVIEW_VIEW_STATE);
+  const [previewViewCommands, setPreviewViewCommands] =
+    useState<PreviewViewCommands | null>(null);
+  const selectedMediaIndex = library.media.findIndex(
+    (item) => item.id === library.selectedMediaId
+  );
+  const canPreviewPrevious = selectedMediaIndex > 0;
+  const canPreviewNext =
+    selectedMediaIndex >= 0 && selectedMediaIndex < library.media.length - 1;
 
-  useShortcuts({ library, fileOps });
+  const handleClosePreview = useCallback(() => {
+    setPreviewOpen(false);
+    setPreviewViewCommands(null);
+    setPreviewViewState(DEFAULT_PREVIEW_VIEW_STATE);
+  }, []);
+
+  useShortcuts({
+    fileOps,
+    library,
+    onClosePreview: handleClosePreview,
+    previewOpen
+  });
 
   const closeMenu = useCallback(() => setMenu(null), []);
+
+  useEffect(() => {
+    if (!activeCompactPopover) return;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setActiveCompactPopover(null);
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest(
+          "[data-compact-popover-root], [data-compact-popover-trigger]"
+        )
+      ) {
+        return;
+      }
+      setActiveCompactPopover(null);
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [activeCompactPopover]);
+
+  const setCompactPopover = useCallback(
+    (next: CompactPopover) => {
+      if (next === "recent") void library.loadRecentOps();
+      setActiveCompactPopover(next);
+    },
+    [library]
+  );
+
+  const toggleCompactPopover = useCallback(
+    (next: Exclude<CompactPopover, null>) => {
+      setActiveCompactPopover((current) => {
+        const nextPopover = current === next ? null : next;
+        if (nextPopover === "recent") void library.loadRecentOps();
+        return nextPopover;
+      });
+    },
+    [library]
+  );
+
+  const openTaskPalette = useCallback(() => {
+    setTaskCenterOpen(false);
+    setCompactPopover("tasks");
+  }, [setCompactPopover]);
+
+  const closeTaskPalette = useCallback(() => {
+    setCompactPopover(null);
+  }, [setCompactPopover]);
+
+  const closeRecentOps = useCallback(() => {
+    setCompactPopover(null);
+  }, [setCompactPopover]);
+
+  const setFilterOpen = useCallback(
+    (open: boolean) => {
+      setCompactPopover(open ? "filter" : null);
+    },
+    [setCompactPopover]
+  );
+
+  const setSortOpen = useCallback(
+    (open: boolean) => {
+      setCompactPopover(open ? "sort" : null);
+    },
+    [setCompactPopover]
+  );
+
+  const recentOpsOpen = activeCompactPopover === "recent";
+  const taskDrawerOpen = activeCompactPopover === "tasks";
+  const filterMenuOpen = activeCompactPopover === "filter";
+  const sortMenuOpen = activeCompactPopover === "sort";
+
+  const onToggleRecent = useCallback(() => {
+    toggleCompactPopover("recent");
+  }, [toggleCompactPopover]);
+
+  const openTaskCenter = useCallback(() => {
+    setCompactPopover(null);
+    setTaskCenterOpen(true);
+  }, [setCompactPopover]);
+
+  const closeTaskCenter = useCallback(() => {
+    setTaskCenterOpen(false);
+  }, []);
 
   const handleOpenPreview = useCallback(
     (mediaId: number) => {
       library.setSelectedMediaId(mediaId);
       setActiveView("library");
+      setPreviewViewCommands(null);
+      setPreviewViewState(DEFAULT_PREVIEW_VIEW_STATE);
       setPreviewOpen(true);
     },
     [library]
   );
+
+  const handlePreviewPrevious = useCallback(() => {
+    if (selectedMediaIndex <= 0) return;
+    const previous = library.media[selectedMediaIndex - 1];
+    if (previous) {
+      library.setSelectedMediaId(previous.id);
+    }
+  }, [library, selectedMediaIndex]);
+
+  const handlePreviewNext = useCallback(() => {
+    if (selectedMediaIndex < 0 || selectedMediaIndex >= library.media.length - 1) return;
+    const next = library.media[selectedMediaIndex + 1];
+    if (next) {
+      library.setSelectedMediaId(next.id);
+    }
+  }, [library, selectedMediaIndex]);
 
   const handleMediaContextMenu = useCallback(
     ({
@@ -180,210 +307,142 @@ export function App() {
     [library]
   );
 
-  const renameTarget = fileOps.rename.target;
-  const moveTarget = fileOps.move.target;
-  const removeTarget = fileOps.remove.target;
+  function renderCenterTitlebar() {
+    if (activeView === "library" && previewOpen && library.selectedMedia) {
+      return (
+        <PreviewTitlebarToolbar
+          canGoNext={canPreviewNext}
+          canGoPrevious={canPreviewPrevious}
+          mode={previewViewState.mode}
+          scale={previewViewState.scale}
+          selectedName={library.selectedMedia.name}
+          onBack={handleClosePreview}
+          onGoNext={handlePreviewNext}
+          onGoPrevious={handlePreviewPrevious}
+          onResetView={() => previewViewCommands?.reset()}
+          onToggleActualSize={() => previewViewCommands?.toggleActualSize()}
+        />
+      );
+    }
+
+    if (activeView === "library") {
+      const selectedRoot =
+        library.roots.find((root) => root.id === library.selectedRootId) ?? null;
+      const selectedFolder = library.folders.find(
+        (folder) => folder.id === library.selectedFolderId
+      );
+      return (
+        <LibraryTitlebarToolbar
+          favorite={library.searchState.favorite}
+          filterOpen={filterMenuOpen}
+          kind={library.searchState.kind}
+          mediaCount={library.media.length}
+          minRating={library.searchState.minRating}
+          onClearFilters={library.clearFilters}
+          onFilterOpenChange={setFilterOpen}
+          onRefresh={() => void library.refresh()}
+          onSetKind={library.setKind}
+          onSetMinRating={library.setMinRating}
+          onSetQ={library.setQ}
+          onSortOpenChange={setSortOpen}
+          onSetSort={library.setSort}
+          onToggleFavorite={library.toggleFavoriteFilter}
+          onToggleTag={library.toggleTagFilter}
+          q={library.searchState.q}
+          scanActive={library.scanActive}
+          searchActive={library.searchActive}
+          sort={library.searchState.sort}
+          sortOpen={sortMenuOpen}
+          tagIds={library.searchState.tagIds}
+          tags={library.tags}
+          title={selectedFolder?.name ?? selectedRoot?.displayName ?? "Library"}
+        />
+      );
+    }
+    if (activeView === "plugins") {
+      return <ShellTitlebarPlaceholder label="Plugins" />;
+    }
+    return <ShellTitlebarPlaceholder label="Settings" />;
+  }
+
+  function renderSidebar() {
+    return (
+      <LibrarySidebar
+        library={library}
+        onFolderContextMenu={handleFolderContextMenu}
+        onRootContextMenu={handleRootContextMenu}
+      />
+    );
+  }
+
+  function renderWorkspace() {
+    if (activeView === "library") {
+      return library.roots.length === 0 && !library.loading ? (
+        <OnboardingHero
+          rootCount={library.roots.length}
+          loading={library.loading}
+          onAddRoot={(path) => library.addRoot(path)}
+        />
+      ) : (
+        <LibraryView
+          library={library}
+          onClosePreview={handleClosePreview}
+          onMediaContextMenu={handleMediaContextMenu}
+          onOpenPreview={handleOpenPreview}
+          onPreviewCommandChange={setPreviewViewCommands}
+          onPreviewNext={handlePreviewNext}
+          onPreviewPrevious={handlePreviewPrevious}
+          onPreviewViewStateChange={setPreviewViewState}
+          previewOpen={previewOpen}
+        />
+      );
+    }
+
+    if (activeView === "plugins") {
+      return <PluginsView />;
+    }
+
+    return <SettingsView interfaceStyle={interfaceStyle} library={library} />;
+  }
+
+  function renderOverlays() {
+    return (
+      <ShellOverlayHost
+        contextMenu={menu}
+        fileOps={fileOps}
+        library={library}
+        onCloseContextMenu={closeMenu}
+        onCloseRecentOps={closeRecentOps}
+        onCloseTaskPalette={closeTaskPalette}
+        onCloseTaskCenter={closeTaskCenter}
+        onOpenTaskCenter={openTaskCenter}
+        onRefreshRecentOps={() => void library.loadRecentOps()}
+        recentOpsOpen={recentOpsOpen}
+        taskCenterOpen={taskCenterOpen}
+        taskPaletteOpen={taskDrawerOpen}
+      />
+    );
+  }
 
   return (
     <LiquidGlassLayer>
-      <main className="app-shell">
-        <LiquidGlassSurface
-          as="header"
-          className="topbar topbar-drag"
-          interactive
-          tone="chrome"
-        >
-          <div className="chrome-title-block">
-            <div className="chrome-title">Megle</div>
-            <div className="chrome-subtitle">Local media workbench</div>
-          </div>
-          <nav
-            className="top-tabs"
-            aria-label="Workbench sections"
-            role="tablist"
-          >
-            {tabs.map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <LiquidGlassButton
-                  active={activeView === tab.id}
-                  aria-current={activeView === tab.id ? "page" : undefined}
-                  aria-label={tab.label}
-                  aria-selected={activeView === tab.id}
-                  className={activeView === tab.id ? "top-tab active" : "top-tab"}
-                  key={tab.id}
-                  onClick={() => setActiveView(tab.id)}
-                  role="tab"
-                  title={tab.label}
-                  tone="control"
-                  type="button"
-                >
-                  <span className="top-tab-icon" aria-hidden="true">
-                    <Icon size={17} />
-                  </span>
-                  <span className="top-tab-caption" aria-hidden="true">
-                    {tab.caption}
-                  </span>
-                </LiquidGlassButton>
-              );
-            })}
-          </nav>
-          <div className="topbar-spacer" />
-          {taskDrawerOpen ? (
-            <LiquidGlassButton
-              active
-              aria-label="Close tasks palette"
-              aria-pressed="true"
-              className="top-action task-drawer-toggle active"
-              onClick={() => setTaskDrawerOpen(false)}
-              title="Close tasks palette"
-              tone="control"
-              type="button"
-            >
-              <ListChecks size={16} />
-              <span className="top-action-label">Tasks</span>
-            </LiquidGlassButton>
-          ) : (
-            <LiquidGlassButton
-              aria-label="Open tasks palette"
-              aria-pressed="false"
-              className={library.scanActive ? "top-action task-drawer-toggle active" : "top-action task-drawer-toggle"}
-              onClick={() => setTaskDrawerOpen(true)}
-              title="Open tasks palette"
-              tone="control"
-              type="button"
-            >
-              <ListChecks size={16} />
-              <span className="top-action-label">Tasks</span>
-              {library.scanActive ? <span className="task-drawer-status" aria-hidden="true" /> : null}
-            </LiquidGlassButton>
-          )}
-          <LiquidGlassButton
-            active={recentOpsOpen}
-            aria-label="Toggle recent file operations"
-            aria-pressed={recentOpsOpen}
-            className={`top-action recent-ops-toggle${recentOpsOpen ? " active" : ""}`}
-            onClick={() => {
-              setRecentOpsOpen((current) => {
-                const next = !current;
-                if (next) void library.loadRecentOps();
-                return next;
-              });
-            }}
-            type="button"
-            title="Recent file operations"
-          >
-            <History size={16} />
-            <span className="top-action-label">Recent</span>
-          </LiquidGlassButton>
-          <WindowChrome />
-        </LiquidGlassSurface>
-
-        <LibrarySidebar
-          library={library}
-          onFolderContextMenu={handleFolderContextMenu}
-          onRootContextMenu={handleRootContextMenu}
-        />
-
-        {activeView === "library" ? (
-          library.roots.length === 0 && !library.loading ? (
-            <OnboardingHero
-              rootCount={library.roots.length}
-              loading={library.loading}
-              onAddRoot={(path) => library.addRoot(path)}
-            />
-          ) : (
-            <LibraryView
-              library={library}
-              onClosePreview={() => setPreviewOpen(false)}
-              onMediaContextMenu={handleMediaContextMenu}
-              onOpenPreview={handleOpenPreview}
-              previewOpen={previewOpen}
-            />
-          )
-        ) : null}
-        {activeView === "tasks" ? (
-          <TaskCenter
-            busyTaskIds={library.busyTaskIds}
-            onCancel={(taskId) => {
-              void library.cancelTask(taskId);
-            }}
-            onRefresh={() => {
-              void library.refreshTasks();
-            }}
-            onRetry={(taskId) => {
-              void library.retryTask(taskId);
-            }}
+      <AppShell
+        titlebarLeft={<ShellPrimaryNav activeView={activeView} onSelectView={setActiveView} />}
+        titlebarCenter={renderCenterTitlebar()}
+        titlebarRight={
+          <ShellRightActions
+            recentOpsOpen={recentOpsOpen}
             scanActive={library.scanActive}
-            tasks={library.tasks}
+            taskPaletteOpen={taskDrawerOpen}
+            onCloseTasks={closeTaskPalette}
+            onOpenTasks={openTaskPalette}
+            onToggleRecent={onToggleRecent}
           />
-        ) : null}
-        {activeView === "plugins" ? <PluginsView /> : null}
-        {activeView === "settings" ? <SettingsView library={library} /> : null}
-
-        <TaskPanel
-          onClose={() => setTaskDrawerOpen(false)}
-          onOpenTaskCenter={() => {
-            setTaskDrawerOpen(false);
-            setActiveView("tasks");
-          }}
-          open={taskDrawerOpen}
-          scanActive={library.scanActive}
-          tasks={library.tasks}
-        />
-
-        {recentOpsOpen ? (
-          <LiquidGlassSurface
-            as="div"
-            className="recent-ops-drawer"
-            interactive
-            scrollable
-            tone="elevated"
-          >
-            <RecentOpsPanel
-              loading={library.recentOpsLoading}
-              onDismiss={() => setRecentOpsOpen(false)}
-              onRefresh={() => void library.loadRecentOps()}
-              ops={library.recentOps}
-            />
-          </LiquidGlassSurface>
-        ) : null}
-
-        {menu ? <ContextMenu items={menu.items} onClose={closeMenu} x={menu.x} y={menu.y} /> : null}
-
-        <RenameDialog
-          busy={fileOps.rename.busy}
-          currentName={renameTarget ? targetSampleName(renameTarget) : ""}
-          kind={renameTarget?.kind === "folder" ? "folder" : "file"}
-          onCancel={fileOps.closeAll}
-          onSubmit={(newName) => void fileOps.submitRename(newName)}
-          open={renameTarget !== null}
-          serverError={fileOps.rename.serverError}
-        />
-
-        <MoveDialog
-          busy={fileOps.move.busy}
-          fileIds={moveTarget ? collectFileIds(moveTarget) : []}
-          folderIds={moveTarget ? collectFolderIds(moveTarget) : []}
-          library={library}
-          onCancel={fileOps.closeAll}
-          onSubmit={(folderId) => void fileOps.submitMove(folderId)}
-          open={moveTarget !== null}
-          serverError={fileOps.move.serverError}
-          serverErrorCode={fileOps.move.serverErrorCode}
-        />
-
-        <DeleteConfirm
-          busy={fileOps.remove.busy}
-          fileCount={removeTarget ? targetCounts(removeTarget).files : 0}
-          folderCount={removeTarget ? targetCounts(removeTarget).folders : 0}
-          onCancel={fileOps.closeAll}
-          onConfirm={() => void fileOps.submitDelete()}
-          open={removeTarget !== null}
-          permanent={fileOps.remove.permanent}
-          serverError={fileOps.remove.serverError}
-        />
-      </main>
+        }
+        sidebar={renderSidebar()}
+        workspace={renderWorkspace()}
+        overlays={renderOverlays()}
+      />
     </LiquidGlassLayer>
   );
 }

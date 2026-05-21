@@ -6,3 +6,14 @@ export const workbenchLayout = {
   tileGap: 14,
   tileLabelHeight: 34
 } as const;
+
+export const radiusTokens = {
+  window: 28,
+  overlay: 22,
+  panel: 18,
+  surface: 14,
+  control: 10,
+  content: 8,
+  tight: 6,
+  pill: 999
+} as const;

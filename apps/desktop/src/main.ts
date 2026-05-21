@@ -103,6 +103,30 @@ ipcMain.handle("megle:clipboard-write-text", (_event, text: string) => {
   return true;
 });
 
+ipcMain.handle("megle:visual-capture-page", async () => {
+  if (!isVisualHarnessEnabled() || !mainWindow || mainWindow.isDestroyed()) {
+    return null;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  const bounds = mainWindow.getContentBounds();
+  const image = await mainWindow.webContents.capturePage({
+    x: 0,
+    y: 0,
+    width: Math.max(1, bounds.width),
+    height: Math.max(1, bounds.height)
+  });
+  if (image.isEmpty()) {
+    return null;
+  }
+  return image.toPNG().toString("base64");
+});
+
 async function createWindow(): Promise<void> {
   const session = await ensureCoreReady();
   const state = await loadWindowState();
@@ -126,7 +150,8 @@ async function createWindow(): Promise<void> {
       nodeIntegration: false,
       additionalArguments: [
         `--megle-core-url=${session.baseUrl}`,
-        `--megle-session-token=${session.sessionToken}`
+        `--megle-session-token=${session.sessionToken}`,
+        ...(isVisualHarnessEnabled() ? ["--megle-visual-harness=1"] : [])
       ]
     }
   });
@@ -181,6 +206,13 @@ async function startCoreSession(): Promise<CoreSession> {
     coreSession = null;
     throw error;
   }
+}
+
+function isVisualHarnessEnabled(): boolean {
+  return (
+    process.env.MEGLE_VISUAL_HARNESS === "1" ||
+    process.argv.some((arg) => arg === "--megle-visual-harness=1")
+  );
 }
 
 function windowStatePath(): string {

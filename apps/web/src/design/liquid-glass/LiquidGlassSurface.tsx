@@ -1,10 +1,11 @@
 import {
   createElement,
   forwardRef,
+  useEffect,
   type ButtonHTMLAttributes,
   type CSSProperties,
   type HTMLAttributes,
-  type PointerEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode
 } from "react";
 
@@ -35,8 +36,55 @@ interface LiquidGlassButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>
 }
 
 const POINTER_RESET = "50%";
+const POINTER_OPACITY_HIDDEN = "0";
+const GLASS_POINTER_EDGE_PROXIMITY_PX = 72;
 
 export function LiquidGlassLayer({ children }: { children: ReactNode }) {
+  useEffect(() => {
+    let animationFrame = 0;
+    let latestPointer: { x: number; y: number } | null = null;
+
+    function clearPointerFrame() {
+      latestPointer = null;
+      if (animationFrame) {
+        window.cancelAnimationFrame(animationFrame);
+        animationFrame = 0;
+      }
+    }
+
+    function requestPointerUpdate(x: number, y: number) {
+      latestPointer = { x, y };
+      if (animationFrame) return;
+      animationFrame = window.requestAnimationFrame(() => {
+        animationFrame = 0;
+        if (latestPointer) {
+          updateLiquidGlassPointer(latestPointer.x, latestPointer.y);
+        }
+      });
+    }
+
+    function handlePointerMove(event: globalThis.PointerEvent) {
+      requestPointerUpdate(event.clientX, event.clientY);
+    }
+
+    function handlePointerExit() {
+      clearPointerFrame();
+      hideLiquidGlassPointers();
+    }
+
+    window.addEventListener("pointermove", handlePointerMove, { passive: true });
+    window.addEventListener("pointerleave", handlePointerExit);
+    window.addEventListener("blur", handlePointerExit);
+
+    return () => {
+      clearPointerFrame();
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerleave", handlePointerExit);
+      window.removeEventListener("blur", handlePointerExit);
+      hideLiquidGlassPointers();
+    };
+  }, []);
+
   return (
     <>
       <LiquidGlassRefractionDefs />
@@ -130,11 +178,12 @@ export const LiquidGlassButton = forwardRef<HTMLButtonElement, LiquidGlassButton
         {...eventProps}
         className={liquidGlassClassName(
           { active, className, scrollable: false, tone, variant },
-          "liquid-glass-button"
+          "liquid-glass-button no-drag"
         )}
         data-glass-active={active ? "true" : undefined}
         data-glass-interactive={props.disabled ? undefined : "true"}
         data-glass-pressable={props.disabled ? undefined : "true"}
+        data-no-drag="true"
         data-glass-tone={tone}
         data-glass-variant={variant}
         data-liquid-glass="button"
@@ -162,6 +211,7 @@ function LiquidGlassMaterialLayers({ variant }: { variant: "regular" | "clear" }
       ) : null}
       <span aria-hidden="true" className="liquid-glass-backdrop" />
       <span aria-hidden="true" className="liquid-glass-lens" />
+      <span aria-hidden="true" className="liquid-glass-edge" />
     </>
   );
 }
@@ -246,15 +296,15 @@ function buildPointerEventProps<TElement extends HTMLElement = HTMLElement>({
 }: {
   interactive: boolean;
   pressable: boolean;
-  onPointerDown?: (event: PointerEvent<TElement>) => void;
-  onPointerLeave?: (event: PointerEvent<TElement>) => void;
-  onPointerMove?: (event: PointerEvent<TElement>) => void;
-  onPointerUp?: (event: PointerEvent<TElement>) => void;
+  onPointerDown?: (event: ReactPointerEvent<TElement>) => void;
+  onPointerLeave?: (event: ReactPointerEvent<TElement>) => void;
+  onPointerMove?: (event: ReactPointerEvent<TElement>) => void;
+  onPointerUp?: (event: ReactPointerEvent<TElement>) => void;
 }) {
   return {
-    onPointerDown(event: PointerEvent<TElement>) {
+    onPointerDown(event: ReactPointerEvent<TElement>) {
       if (interactive) {
-        syncPointer(event);
+        updateLiquidGlassPointer(event.clientX, event.clientY);
         if (shouldPressSurface(event, pressable)) {
           event.currentTarget.setAttribute("data-glass-pressed", "true");
           event.currentTarget.style.setProperty("--glass-pressure", "1");
@@ -262,30 +312,17 @@ function buildPointerEventProps<TElement extends HTMLElement = HTMLElement>({
       }
       onPointerDown?.(event);
     },
-    onPointerLeave(event: PointerEvent<TElement>) {
-      if (interactive) {
-        event.currentTarget.dataset.glassPointer = "idle";
-        event.currentTarget.removeAttribute("data-glass-pressed");
-        event.currentTarget.style.setProperty("--glass-pointer-x", POINTER_RESET);
-        event.currentTarget.style.setProperty("--glass-pointer-y", POINTER_RESET);
-        event.currentTarget.style.setProperty("--glass-pressure", "0");
-      }
+    onPointerLeave(event: ReactPointerEvent<TElement>) {
       onPointerLeave?.(event);
     },
-    onPointerMove(event: PointerEvent<TElement>) {
-      if (interactive) {
-        syncPointer(event);
-        event.currentTarget.dataset.glassPointer = "active";
-      }
+    onPointerMove(event: ReactPointerEvent<TElement>) {
       onPointerMove?.(event);
     },
-    onPointerUp(event: PointerEvent<TElement>) {
+    onPointerUp(event: ReactPointerEvent<TElement>) {
       if (interactive) {
-        syncPointer(event);
-        if (shouldPressSurface(event, pressable)) {
-          event.currentTarget.removeAttribute("data-glass-pressed");
-          event.currentTarget.style.setProperty("--glass-pressure", "0");
-        }
+        updateLiquidGlassPointer(event.clientX, event.clientY);
+        event.currentTarget.removeAttribute("data-glass-pressed");
+        event.currentTarget.style.setProperty("--glass-pressure", "0");
       }
       onPointerUp?.(event);
     }
@@ -293,21 +330,84 @@ function buildPointerEventProps<TElement extends HTMLElement = HTMLElement>({
 }
 
 function shouldPressSurface<TElement extends HTMLElement>(
-  event: PointerEvent<TElement>,
+  event: ReactPointerEvent<TElement>,
   pressable: boolean
 ) {
   const { target, currentTarget } = event;
   return pressable && (target === currentTarget || currentTarget.contains(target as Node));
 }
 
-function syncPointer(event: PointerEvent<HTMLElement>) {
-  const target = event.currentTarget;
-  const rect = target.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return;
-  const x = ((event.clientX - rect.left) / rect.width) * 100;
-  const y = ((event.clientY - rect.top) / rect.height) * 100;
-  target.style.setProperty("--glass-pointer-x", `${clampPercent(x)}%`);
-  target.style.setProperty("--glass-pointer-y", `${clampPercent(y)}%`);
+function updateLiquidGlassPointer(clientX: number, clientY: number) {
+  const surfaces = document.querySelectorAll<HTMLElement>("[data-liquid-glass]");
+  for (const surface of surfaces) {
+    if (surface.matches(":disabled")) {
+      hideGlassPointer(surface);
+      continue;
+    }
+    const rect = surface.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      hideGlassPointer(surface);
+      continue;
+    }
+    const edgePoint = nearestPointOnGlassEdge(clientX, clientY, rect);
+    const distance = distanceToGlassEdge(clientX, clientY, rect);
+    if (distance > GLASS_POINTER_EDGE_PROXIMITY_PX) {
+      surface.dataset.glassPointer = "idle";
+      surface.style.setProperty("--glass-pointer-opacity", POINTER_OPACITY_HIDDEN);
+      continue;
+    }
+    const x = ((edgePoint.x - rect.left) / rect.width) * 100;
+    const y = ((edgePoint.y - rect.top) / rect.height) * 100;
+    const opacity = Math.pow(1 - distance / GLASS_POINTER_EDGE_PROXIMITY_PX, 1.55);
+    surface.dataset.glassPointer = "active";
+    surface.style.setProperty("--glass-pointer-x", `${clampPercent(x)}%`);
+    surface.style.setProperty("--glass-pointer-y", `${clampPercent(y)}%`);
+    surface.style.setProperty("--glass-pointer-opacity", opacity.toFixed(3));
+  }
+}
+
+function nearestPointOnGlassEdge(clientX: number, clientY: number, rect: DOMRect) {
+  const x = clamp(clientX, rect.left, rect.right);
+  const y = clamp(clientY, rect.top, rect.bottom);
+  const inside =
+    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+
+  if (!inside) {
+    return { x, y };
+  }
+
+  const candidates = [
+    { x, y: rect.top, distance: clientY - rect.top },
+    { x: rect.right, y, distance: rect.right - clientX },
+    { x, y: rect.bottom, distance: rect.bottom - clientY },
+    { x: rect.left, y, distance: clientX - rect.left }
+  ];
+  return candidates.reduce((nearest, candidate) =>
+    candidate.distance < nearest.distance ? candidate : nearest
+  );
+}
+
+function distanceToGlassEdge(clientX: number, clientY: number, rect: DOMRect) {
+  const edgePoint = nearestPointOnGlassEdge(clientX, clientY, rect);
+  return Math.hypot(clientX - edgePoint.x, clientY - edgePoint.y);
+}
+
+function hideLiquidGlassPointers() {
+  const surfaces = document.querySelectorAll<HTMLElement>("[data-liquid-glass]");
+  for (const surface of surfaces) {
+    hideGlassPointer(surface);
+  }
+}
+
+function hideGlassPointer(target: HTMLElement) {
+  target.dataset.glassPointer = "idle";
+  target.removeAttribute("data-glass-pressed");
+  target.style.setProperty("--glass-pointer-opacity", POINTER_OPACITY_HIDDEN);
+  target.style.setProperty("--glass-pressure", "0");
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function clampPercent(value: number) {
@@ -347,6 +447,7 @@ function withInitialPointer(style: CSSProperties | undefined): CSSProperties {
   return {
     "--glass-pointer-x": POINTER_RESET,
     "--glass-pointer-y": POINTER_RESET,
+    "--glass-pointer-opacity": 0,
     "--glass-pressure": 0,
     ...style
   } as CSSProperties;

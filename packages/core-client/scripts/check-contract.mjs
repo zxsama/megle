@@ -270,6 +270,7 @@ for (const method of [
   "listMedia",
   "getMedia",
   "getThumbnail",
+  "getPreviewBlob",
   "listTasks",
   "cancelTask",
   "retryTask",
@@ -377,6 +378,10 @@ if (!/listMedia:\s*\(params:\s*ListMediaParams\s*=\s*{}\)\s*=>\s*request<Page<Me
 
 if (!/getThumbnail:\s*\(fileId:\s*number,\s*profile:\s*"grid_320"\s*=\s*"grid_320"\)\s*=>\s*request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*profile\s*}\)\}`\)/.test(client)) {
   fail("client.ts getThumbnail must request typed thumbnail state with default grid_320 profile");
+}
+
+if (!/getPreviewBlob:\s*\(fileId:\s*number\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview`\)/.test(client)) {
+  fail("client.ts getPreviewBlob must request original media bytes from /media/{fileId}/preview");
 }
 
 if (!/removeRoot:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/roots\/\$\{rootId\}`,\s*{\s*method:\s*"DELETE"\s*}\)/.test(client)) {

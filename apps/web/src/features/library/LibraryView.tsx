@@ -1,20 +1,24 @@
 import { useEffect } from "react";
-import { RefreshCw } from "lucide-react";
 import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
+import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
-import { PreviewDialog, PreviewPanel } from "../preview/PreviewPanel";
-import { FilterChips } from "./FilterChips";
-import { SearchBar } from "./SearchBar";
-import { SortMenu } from "./SortMenu";
+import { PreviewPanel } from "../preview/PreviewPanel";
 
 interface LibraryViewProps {
   library: LibraryState;
   previewOpen: boolean;
   onOpenPreview: (mediaId: number) => void;
   onClosePreview: () => void;
+  onPreviewPrevious: () => void;
+  onPreviewNext: () => void;
+  onPreviewViewStateChange: (state: { mode: "fit-long-edge" | "actual"; scale: number }) => void;
+  onPreviewCommandChange: (commands: {
+    reset: () => void;
+    toggleActualSize: () => void;
+  } | null) => void;
   onMediaContextMenu?: (event: {
     item: MediaRecord;
     x: number;
@@ -28,16 +32,21 @@ export function LibraryView({
   onClosePreview,
   onMediaContextMenu,
   onOpenPreview,
+  onPreviewCommandChange,
+  onPreviewNext,
+  onPreviewPrevious,
+  onPreviewViewStateChange,
   previewOpen
 }: LibraryViewProps) {
   const selectedRoot = library.roots.find((root) => root.id === library.selectedRootId) ?? null;
-  const selectedFolder = library.folders.find((folder) => folder.id === library.selectedFolderId);
+  const selectedMedia = library.selectedMedia;
+  const previewMedia = previewOpen && selectedMedia ? selectedMedia : null;
 
   useEffect(() => {
-    if (previewOpen && !library.selectedMedia) {
+    if (previewOpen && !selectedMedia) {
       onClosePreview();
     }
-  }, [library.selectedMedia, onClosePreview, previewOpen]);
+  }, [onClosePreview, previewOpen, selectedMedia]);
 
   function handleOpenPreview(mediaId: number) {
     onOpenPreview(mediaId);
@@ -46,79 +55,53 @@ export function LibraryView({
   return (
     <section className="workspace" aria-label="Library workbench">
       <LiquidGlassSurface
-        as="header"
-        className="toolbar toolbar-library"
-        interactive
+        as="section"
+        className={previewMedia ? "grid-surface grid-surface-preview" : "grid-surface"}
+        aria-label="Media workspace"
         tone="chrome"
       >
-        <div className="toolbar-titles">
-          <div className="toolbar-title">
-            {selectedFolder?.name ?? selectedRoot?.displayName ?? "Library"}
-          </div>
-          <div className="toolbar-meta">
-            {library.media.length} media items
-            {library.searchActive ? " / filtered" : ""}
-            {library.scanActive ? " / scanning" : ""}
-          </div>
-        </div>
-        <div className="toolbar-controls">
-          <SearchBar value={library.searchState.q} onChange={library.setQ} />
-          <SortMenu value={library.searchState.sort} onChange={library.setSort} />
-          <button
-            className="icon-button"
-            onClick={() => void library.refresh()}
-            title="Refresh"
-            type="button"
-            aria-label="Refresh library"
-          >
-            <RefreshCw size={16} />
-          </button>
+        {library.error ? <div className="error-strip">{library.error}</div> : null}
+        <div className="library-grid-content">
+          {previewMedia ? (
+            <CentralPreviewStage
+              selectedMedia={previewMedia}
+              onClosePreview={onClosePreview}
+              onCommandChange={onPreviewCommandChange}
+              onPreviewNext={onPreviewNext}
+              onPreviewPrevious={onPreviewPrevious}
+              onViewStateChange={onPreviewViewStateChange}
+            />
+          ) : (
+            renderEmptyState({ library, selectedRoot }) ?? (
+              <MediaGrid
+                hasMore={library.mediaHasMore}
+                items={library.media}
+                loading={library.loading}
+                loadingMore={library.loadingMoreMedia}
+                onContextMenu={onMediaContextMenu}
+                onOpenPreview={handleOpenPreview}
+                onRequestMore={library.loadMoreMedia}
+                onRequestThumbnailStates={library.requestThumbnailStates}
+                onSelect={library.setSelectedMediaId}
+                selectedMediaId={library.selectedMediaId}
+                thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
+              />
+            )
+          )}
         </div>
       </LiquidGlassSurface>
-      <FilterChips
-        kind={library.searchState.kind}
-        minRating={library.searchState.minRating}
-        favorite={library.searchState.favorite}
-        tagIds={library.searchState.tagIds}
-        tagsById={library.tagsById}
-        onSetKind={library.setKind}
-        onSetMinRating={library.setMinRating}
-        onToggleFavorite={library.toggleFavoriteFilter}
-        onToggleTag={library.toggleTagFilter}
-        onClear={library.clearFilters}
-      />
-
-      {library.error ? <div className="error-strip">{library.error}</div> : null}
-      <div className="grid-surface">
-        {renderEmptyState({ library, selectedRoot }) ?? (
-          <MediaGrid
-            hasMore={library.mediaHasMore}
-            items={library.media}
-            loading={library.loading}
-            loadingMore={library.loadingMoreMedia}
-            onContextMenu={onMediaContextMenu}
-            onOpenPreview={handleOpenPreview}
-            onRequestMore={library.loadMoreMedia}
-            onRequestThumbnailStates={library.requestThumbnailStates}
-            onSelect={library.setSelectedMediaId}
-            selectedMediaId={library.selectedMediaId}
-            thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
-          />
-        )}
-      </div>
 
       <PreviewPanel
-        selectedMedia={library.selectedMedia}
-        thumbnail={
-          library.selectedMedia ? library.thumbnailStatesByMediaId[library.selectedMedia.id] : undefined
-        }
+        selectedMedia={selectedMedia}
+        showPreviewImage={!previewOpen}
+        thumbnail={selectedMedia ? library.thumbnailStatesByMediaId[selectedMedia.id] : undefined}
         onOpenPreview={
-          library.selectedMedia ? () => handleOpenPreview(library.selectedMedia!.id) : undefined
+          selectedMedia && !previewOpen ? () => handleOpenPreview(selectedMedia.id) : undefined
         }
       >
-        {library.selectedMedia ? (
+        {selectedMedia ? (
           <InspectorMetadata
-            fileId={library.selectedMedia.id}
+            fileId={selectedMedia.id}
             metadata={library.selectedMetadata}
             tags={library.tags}
             tagsById={library.tagsById}
@@ -130,17 +113,6 @@ export function LibraryView({
           />
         ) : null}
       </PreviewPanel>
-
-      <PreviewDialog
-        media={library.selectedMedia}
-        onClose={onClosePreview}
-        open={previewOpen}
-        thumbnail={
-          library.selectedMedia
-            ? library.thumbnailStatesByMediaId[library.selectedMedia.id]
-            : undefined
-        }
-      />
     </section>
   );
 }

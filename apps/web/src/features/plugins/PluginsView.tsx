@@ -25,39 +25,31 @@ export function PluginsView() {
 
   return (
     <section className="workspace simple-workspace" aria-label="Plugins workbench">
-      <LiquidGlassSurface
-        as="header"
-        className="toolbar plugins-toolbar"
-        interactive
-        tone="chrome"
-      >
-        <div>
-          <div className="toolbar-title">Plugins</div>
-          <div className="toolbar-meta">
+      <div className="plugins-body">
+        <div className="plugins-body-actions">
+          <div className="plugins-status-summary">
             {totalCount === 0
               ? "No plugins discovered"
               : `${totalCount} registered · ${enabledCount} enabled${
                   invalidCount > 0 ? ` · ${invalidCount} invalid` : ""
                 }`}
           </div>
+          <button
+            className="plugins-rescan"
+            onClick={() => void runDiscover()}
+            type="button"
+            disabled={discovering}
+            aria-label="Re-scan plugin folder"
+          >
+            {discovering ? (
+              <Loader2 className="spin" size={14} />
+            ) : (
+              <RefreshCw size={14} />
+            )}
+            <span>{discovering ? "Scanning…" : "Re-scan"}</span>
+          </button>
         </div>
-        <button
-          className="plugins-rescan"
-          onClick={() => void runDiscover()}
-          type="button"
-          disabled={discovering}
-          aria-label="Re-scan plugin folder"
-        >
-          {discovering ? (
-            <Loader2 className="spin" size={14} />
-          ) : (
-            <RefreshCw size={14} />
-          )}
-          <span>{discovering ? "Scanning…" : "Re-scan"}</span>
-        </button>
-      </LiquidGlassSurface>
 
-      <div className="plugins-body">
         {plugins.error ? (
           <div className="plugins-error" role="alert">
             <AlertTriangle aria-hidden="true" size={14} />

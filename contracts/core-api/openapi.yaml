@@ -205,9 +205,18 @@ paths:
         - $ref: "#/components/parameters/fileId"
       responses:
         "200":
-          description: Preview resource information.
-        "202":
-          description: Preview generation queued.
+          description: Original indexed media bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Media item or source file not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /tasks:
     get:
       operationId: listTasks

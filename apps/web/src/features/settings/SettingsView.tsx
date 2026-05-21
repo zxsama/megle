@@ -1,12 +1,19 @@
 import { CheckCircle2, Database, FolderCog, Trash2, XCircle } from "lucide-react";
+import { useState, type KeyboardEvent } from "react";
 import type { LibraryState } from "../../core/useLibraryData";
-import { LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassSurface, type InterfaceStyleController } from "../../design/liquid-glass";
+import {
+  normalizeShortcutEvent,
+  useShortcutBindings,
+  type ShortcutActionId
+} from "../shortcuts/shortcutBindings";
 
 interface SettingsViewProps {
+  interfaceStyle: InterfaceStyleController;
   library: LibraryState;
 }
 
-export function SettingsView({ library }: SettingsViewProps) {
+export function SettingsView({ interfaceStyle, library }: SettingsViewProps) {
   const diagnostics = library.diagnostics;
   const probed = library.diagnosticsProbed;
   const ffmpegAvailable = diagnostics?.ffmpegAvailable;
@@ -15,12 +22,6 @@ export function SettingsView({ library }: SettingsViewProps) {
 
   return (
     <section className="workspace simple-workspace" aria-label="Settings workbench">
-      <LiquidGlassSurface as="header" className="toolbar" interactive tone="chrome">
-        <div>
-          <div className="toolbar-title">Settings</div>
-          <div className="toolbar-meta">Local library settings and diagnostics</div>
-        </div>
-      </LiquidGlassSurface>
       <div className="settings-body">
         <LiquidGlassSurface
           as="section"
@@ -70,6 +71,8 @@ export function SettingsView({ library }: SettingsViewProps) {
           </dl>
         </LiquidGlassSurface>
 
+        <InterfaceStyleSection interfaceStyle={interfaceStyle} />
+
         <LiquidGlassSurface
           as="section"
           className="settings-section"
@@ -94,8 +97,168 @@ export function SettingsView({ library }: SettingsViewProps) {
             <span>Clear thumbnail cache</span>
           </button>
         </LiquidGlassSurface>
+
+        <ShortcutBindingsEditor />
       </div>
     </section>
+  );
+}
+
+function InterfaceStyleSection({ interfaceStyle }: { interfaceStyle: InterfaceStyleController }) {
+  const { limits, value, resetInterfaceStyle, setInterfaceStyle } = interfaceStyle;
+  return (
+    <LiquidGlassSurface
+      as="section"
+      className="settings-section settings-interface-style"
+      aria-labelledby="settings-interface-style-title"
+      interactive
+      scrollable
+      tone="panel"
+    >
+      <div className="settings-section-heading">
+        <h2 className="settings-section-title" id="settings-interface-style-title">
+          Interface style
+        </h2>
+        <button className="settings-action no-drag" onClick={resetInterfaceStyle} type="button">
+          Reset interface style
+        </button>
+      </div>
+      <StyleSlider
+        id="glass-blur"
+        label="Glass blur"
+        max={limits.glassBlur.max}
+        min={limits.glassBlur.min}
+        onChange={(glassBlur) => setInterfaceStyle({ glassBlur })}
+        step={limits.glassBlur.step}
+        value={value.glassBlur}
+      />
+      <StyleSlider
+        id="pointer-glow-brightness"
+        label="Pointer glow brightness"
+        max={limits.pointerGlowBrightness.max}
+        min={limits.pointerGlowBrightness.min}
+        onChange={(pointerGlowBrightness) => setInterfaceStyle({ pointerGlowBrightness })}
+        step={limits.pointerGlowBrightness.step}
+        value={value.pointerGlowBrightness}
+      />
+      <StyleSlider
+        id="edge-highlight-brightness"
+        label="Edge highlight brightness"
+        max={limits.edgeHighlightBrightness.max}
+        min={limits.edgeHighlightBrightness.min}
+        onChange={(edgeHighlightBrightness) => setInterfaceStyle({ edgeHighlightBrightness })}
+        step={limits.edgeHighlightBrightness.step}
+        value={value.edgeHighlightBrightness}
+      />
+    </LiquidGlassSurface>
+  );
+}
+
+function StyleSlider({
+  id,
+  label,
+  max,
+  min,
+  onChange,
+  step,
+  value
+}: {
+  id: string;
+  label: string;
+  max: number;
+  min: number;
+  onChange: (value: number) => void;
+  step: number;
+  value: number;
+}) {
+  return (
+    <label className="settings-style-slider no-drag" htmlFor={id}>
+      <span>{label}</span>
+      <input
+        id={id}
+        max={max}
+        min={min}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        step={step}
+        type="range"
+        value={value}
+      />
+      <output htmlFor={id}>{formatStyleValue(value)}</output>
+    </label>
+  );
+}
+
+function formatStyleValue(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function ShortcutBindingsEditor() {
+  const { actions, bindings, conflicts, onReset, setBinding } = useShortcutBindings();
+  const [capturing, setCapturing] = useState<ShortcutActionId | null>(null);
+  const labelsById = new Map(actions.map((action) => [action.id, action.label]));
+
+  function handleCaptureKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    actionId: ShortcutActionId
+  ) {
+    if (capturing !== actionId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const nextBinding = normalizeShortcutEvent(event);
+    if (!nextBinding) return;
+    setBinding(actionId, nextBinding);
+    setCapturing(null);
+  }
+
+  return (
+    <LiquidGlassSurface
+      as="section"
+      aria-labelledby="settings-shortcuts-title"
+      className="settings-section settings-shortcuts"
+      interactive
+      scrollable
+      tone="panel"
+    >
+      <div className="settings-section-heading">
+        <h2 className="settings-section-title" id="settings-shortcuts-title">
+          Shortcuts
+        </h2>
+        <button className="settings-action" onClick={onReset} type="button">
+          Reset shortcuts
+        </button>
+      </div>
+      <div className="shortcut-bindings-list">
+        {actions.map((action) => {
+          const actionConflicts = conflicts[action.id] ?? [];
+          return (
+            <div className="shortcut-binding-row" key={action.id}>
+              <div className="shortcut-binding-label">{action.label}</div>
+              <button
+                className={
+                  capturing === action.id
+                    ? "shortcut-binding-capture active"
+                    : "shortcut-binding-capture"
+                }
+                data-shortcut-capture="true"
+                onBlur={() => {
+                  if (capturing === action.id) setCapturing(null);
+                }}
+                onClick={() => setCapturing(action.id)}
+                onKeyDown={(event) => handleCaptureKeyDown(event, action.id)}
+                type="button"
+              >
+                {capturing === action.id ? "Press shortcut" : bindings[action.id]}
+              </button>
+              {actionConflicts.length > 0 ? (
+                <div className="shortcut-binding-conflict">
+                  Conflicts with {actionConflicts.map((id) => labelsById.get(id) ?? id).join(", ")}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </LiquidGlassSurface>
   );
 }
 

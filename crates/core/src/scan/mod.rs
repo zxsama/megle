@@ -63,6 +63,7 @@ pub struct ScanBatchStats {
     pub files: usize,
 }
 
+#[cfg(test)]
 pub fn scan_root(database: &mut Database, root: &RootRecord) -> anyhow::Result<ScanSummary> {
     scan_root_with_options(database, root, ScanOptions::default())
 }

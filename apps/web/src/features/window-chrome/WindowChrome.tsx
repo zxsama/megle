@@ -42,7 +42,12 @@ export function WindowChrome() {
   }
 
   return (
-    <div className="window-chrome" role="group" aria-label="Window controls">
+    <div
+      className="window-chrome no-drag"
+      data-no-drag="true"
+      role="group"
+      aria-label="Window controls"
+    >
       <LiquidGlassButton
         aria-label="Minimize window"
         className="window-chrome-button"

@@ -5,7 +5,7 @@ use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use notify::event::{Flag, ModifyKind, RenameMode};
+use notify::event::{ModifyKind, RenameMode};
 use notify::{recommended_watcher, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::db::{Database, FileUpsert, RootRecord};
@@ -406,6 +406,7 @@ mod tests {
     use super::*;
     use crate::db::{MediaPageQuery, NewRoot};
     use crate::scan::scan_root;
+    use notify::event::Flag;
 
     #[test]
     fn added_media_under_watched_root_becomes_visible_without_restart() {
