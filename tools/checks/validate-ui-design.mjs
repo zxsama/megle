@@ -2706,6 +2706,74 @@ function assertDesktopRevealOrderingRegressionProbe() {
   ) {
     fail("desktop reveal-order validator must catch plain const reveal aliases inside ready-to-show");
   }
+
+  const indirectHandlerRegistrationProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      const registerHandlers = () => {
+        window.once("ready-to-show", () => {
+          armShellReadyFailureFallback(window);
+        });
+        window.webContents.on("did-fail-load", () => {
+          revealMainWindowForLaunchFailure(window);
+        });
+        window.webContents.on("render-process-gone", () => {
+          revealMainWindowForLaunchFailure(window);
+        });
+      };
+      armShellReadyFailureFallback(window);
+      registerHandlers();
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const indirectHandlerRegistrationFailures = collectDesktopRevealOrderingFailures(
+    indirectHandlerRegistrationProbe
+  );
+  if (indirectHandlerRegistrationFailures.length > 0) {
+    fail("desktop reveal-order validator must count handlers registered through called local helpers");
+  }
+
+  const lexicalShadowingProbe = createSourceFileForDesktopRevealProbe(`
+    function revealMainWindow(window) {
+      window.show();
+    }
+    async function createWindow() {
+      const window = createMockWindow();
+      armShellReadyFailureFallback(window);
+      window.once("ready-to-show", () => {
+        armShellReadyFailureFallback(window);
+        {
+          const revealMainWindow = () => {
+            return window;
+          };
+          revealMainWindow(window);
+        }
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const lexicalShadowingFailures = collectDesktopRevealOrderingFailures(lexicalShadowingProbe);
+  if (lexicalShadowingFailures.length > 0) {
+    fail("desktop reveal-order validator must resolve same-name local shadowing lexically");
+  }
 }
 
 function createSourceFileForDesktopRevealProbe(source) {
@@ -2719,102 +2787,491 @@ function createSourceFileForDesktopRevealProbe(source) {
 }
 
 function collectDesktopRevealOrderingFailures(sourceFile) {
-  const failures = [];
-  const namedFunctions = collectNamedFunctionData(sourceFile);
-  const createWindowData = namedFunctions.get("createWindow");
-  if (!createWindowData) {
+  const analysis = buildStartupValidatorAnalysis(sourceFile);
+  if (!analysis.createWindowBinding) {
     return ["desktop startup contract missing createWindow"];
   }
 
-  const revealFunctionNames = collectTransitiveHelperNames(namedFunctions, {
-    seedNames: ["revealMainWindowForLaunchFailure", "revealMainWindowForShellReady", "revealMainWindow"],
-    predicate: (data) => data.callsShow
-  });
-  const fallbackArmFunctionNames = collectTransitiveHelperNames(namedFunctions, {
-    seedNames: ["armShellReadyFailureFallback"]
-  });
-  const launchFailureFunctionNames = collectTransitiveHelperNames(namedFunctions, {
-    seedNames: ["revealMainWindowForLaunchFailure"]
-  });
-  const createWindowNode = createWindowData.node;
-  const parentMap = buildParentMap(createWindowNode);
-  const createWindowExecution = collectExecutionData(createWindowNode.body);
-  const loadUrlCalls = createWindowExecution.callExpressions.filter((call) =>
+  const failures = [];
+  const { createWindowBinding, fallbackArmBinding, launchFailureBinding } = analysis;
+  const parentMap = buildParentMap(createWindowBinding.node);
+  const createWindowExecution = collectReachableExecutionData(
+    createWindowBinding.body,
+    createWindowBinding.closureScope,
+    "createWindow",
+    [],
+    analysis
+  );
+  const loadUrlCalls = createWindowExecution.callRecords.filter(({ call }) =>
     isPropertyAccessCall(call, "loadURL")
   );
-  const readyToShowHandlers = collectReachableEventHandlers(createWindowNode.body, "ready-to-show");
-  const didFailLoadHandlers = collectReachableEventHandlers(createWindowNode.body, "did-fail-load");
-  const renderProcessGoneHandlers = collectReachableEventHandlers(
-    createWindowNode.body,
-    "render-process-gone"
+  const readyToShowHandlers = createWindowExecution.eventHandlers.filter(
+    (handler) => handler.eventName === "ready-to-show"
+  );
+  const didFailLoadHandlers = createWindowExecution.eventHandlers.filter(
+    (handler) => handler.eventName === "did-fail-load"
+  );
+  const renderProcessGoneHandlers = createWindowExecution.eventHandlers.filter(
+    (handler) => handler.eventName === "render-process-gone"
   );
 
   if (loadUrlCalls.length === 0) {
     return ["desktop startup contract missing loadURL inside createWindow"];
   }
 
-  if (createWindowExecution.callsShow) {
+  if (
+    createWindowExecution.callRecords.some(
+      (record) =>
+        record.isShow &&
+        !(
+          launchFailureBinding &&
+          record.context === "catch" &&
+          record.bindingStack.includes(launchFailureBinding.id)
+        )
+    )
+  ) {
     failures.push("desktop window show timing must not run directly inside createWindow or its nested handlers");
   }
 
-  const firstLoadUrlCall = loadUrlCalls[0];
-  const absoluteFallbackCall = createWindowExecution.callExpressions.find(
-    (call) =>
-      callsAnyHelper(call, fallbackArmFunctionNames) &&
-      getCreateWindowCallContext(call, parentMap) === "createWindow" &&
-      call.getStart(sourceFile) < firstLoadUrlCall.getStart(sourceFile)
+  const firstLoadUrlCall = loadUrlCalls[0].call;
+  const absoluteFallbackCall = createWindowExecution.callRecords.find(
+    (record) =>
+      fallbackArmBinding &&
+      record.resolvedBinding?.id === fallbackArmBinding.id &&
+      getCreateWindowCallContext(record.call, parentMap) === "createWindow" &&
+      record.call.getStart(sourceFile) < firstLoadUrlCall.getStart(sourceFile)
   );
   if (!absoluteFallbackCall) {
     failures.push("desktop startup must arm an absolute shell-ready failure fallback before loadURL begins navigation");
   }
 
   if (
-    !readyToShowHandlers.some((handler) =>
-      callbackContainsHelperCall(handler.callback, fallbackArmFunctionNames)
-    )
+    !readyToShowHandlers.some((handler) => {
+      const handlerExecution = collectReachableExecutionData(
+        handler.callback.body,
+        handler.scope,
+        "event:ready-to-show",
+        [],
+        analysis
+      );
+      return (
+        fallbackArmBinding &&
+        handlerExecution.callRecords.some(
+          (record) => record.resolvedBinding?.id === fallbackArmBinding.id
+        )
+      );
+    })
   ) {
     failures.push("desktop startup must re-arm a bounded shell-ready failure fallback from the ready-to-show path");
   }
 
   if (
     readyToShowHandlers.some((handler) =>
-      callbackContainsHelperCall(handler.callback, revealFunctionNames)
+      collectReachableExecutionData(
+        handler.callback.body,
+        handler.scope,
+        "event:ready-to-show",
+        [],
+        analysis
+      ).callRecords.some((record) => record.isShow)
     )
   ) {
     failures.push("ready-to-show handlers must not reveal the desktop window directly or through a helper");
   }
 
   if (
-    !didFailLoadHandlers.some((handler) =>
-      callbackContainsHelperCall(handler.callback, launchFailureFunctionNames)
-    )
+    !didFailLoadHandlers.some((handler) => {
+      const handlerExecution = collectReachableExecutionData(
+        handler.callback.body,
+        handler.scope,
+        "event:did-fail-load",
+        [],
+        analysis
+      );
+      return (
+        launchFailureBinding &&
+        handlerExecution.callRecords.some(
+          (record) => record.resolvedBinding?.id === launchFailureBinding.id
+        )
+      );
+    })
   ) {
     failures.push("desktop startup failure handlers must reveal the window on did-fail-load");
   }
 
   if (
-    !renderProcessGoneHandlers.some((handler) =>
-      callbackContainsHelperCall(handler.callback, launchFailureFunctionNames)
-    )
+    !renderProcessGoneHandlers.some((handler) => {
+      const handlerExecution = collectReachableExecutionData(
+        handler.callback.body,
+        handler.scope,
+        "event:render-process-gone",
+        [],
+        analysis
+      );
+      return (
+        launchFailureBinding &&
+        handlerExecution.callRecords.some(
+          (record) => record.resolvedBinding?.id === launchFailureBinding.id
+        )
+      );
+    })
   ) {
     failures.push("desktop startup failure handlers must reveal the window on render-process-gone");
   }
 
-  const unexpectedRevealCalls = collectReachableHelperCalls(createWindowNode.body, revealFunctionNames)
-    .filter((call) => {
-      const context = getCreateWindowCallContext(call, parentMap);
-      return !(
-        callsAnyHelper(call, launchFailureFunctionNames) &&
-        (context === "event:did-fail-load" ||
-          context === "event:render-process-gone" ||
-          context === "catch")
-      );
-    });
+  const unexpectedRevealCalls = createWindowExecution.callRecords.filter(
+    (record) =>
+      record.isShow &&
+      !(
+        launchFailureBinding &&
+        record.context === "catch" &&
+        record.bindingStack.includes(launchFailureBinding.id)
+      )
+  );
   if (unexpectedRevealCalls.length > 0) {
     failures.push("desktop window reveal helpers must stay confined to shell-ready and explicit launch-failure paths");
   }
 
   return failures;
+}
+
+function buildStartupValidatorAnalysis(sourceFile) {
+  const rootScope = createRuntimeScope(null);
+  hoistFunctionDeclarationsIntoScope(sourceFile, rootScope);
+  registerRuntimeVariableBindings(sourceFile, rootScope);
+
+  return {
+    rootScope,
+    createWindowBinding: lookupScopeBinding(rootScope, "createWindow"),
+    fallbackArmBinding: lookupScopeBinding(rootScope, "armShellReadyFailureFallback"),
+    launchFailureBinding: lookupScopeBinding(rootScope, "revealMainWindowForLaunchFailure")
+  };
+}
+
+function createRuntimeScope(parent) {
+  return {
+    parent,
+    bindings: new Map()
+  };
+}
+
+function createCallableBinding(name, node, body, closureScope) {
+  return {
+    id: `${name}:${node.pos}:${node.end}`,
+    kind: "callable",
+    name,
+    node,
+    body,
+    closureScope
+  };
+}
+
+function createNamespaceBinding(name) {
+  return {
+    id: `namespace:${name}`,
+    kind: "namespace",
+    name,
+    members: new Map()
+  };
+}
+
+function bindScopeBinding(scope, name, binding) {
+  scope.bindings.set(name, binding);
+}
+
+function lookupScopeBinding(scope, name) {
+  let current = scope;
+  while (current) {
+    if (current.bindings.has(name)) {
+      return current.bindings.get(name);
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+function hoistFunctionDeclarationsIntoScope(container, scope) {
+  for (const statement of directContainerStatements(container)) {
+    if (ts.isFunctionDeclaration(statement) && statement.name?.text) {
+      bindScopeBinding(
+        scope,
+        statement.name.text,
+        createCallableBinding(statement.name.text, statement, statement.body, scope)
+      );
+    }
+  }
+}
+
+function registerRuntimeVariableBindings(container, scope) {
+  for (const statement of directContainerStatements(container)) {
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        registerVariableCallableBinding(declaration, scope);
+      }
+    }
+  }
+}
+
+function directContainerStatements(container) {
+  if (ts.isSourceFile(container) || ts.isBlock(container)) {
+    return container.statements;
+  }
+  return [];
+}
+
+function registerVariableCallableBinding(declaration, scope) {
+  if (!ts.isIdentifier(declaration.name) || !declaration.initializer) {
+    return;
+  }
+
+  const bindingName = declaration.name.text;
+  const initializer = declaration.initializer;
+
+  if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) {
+    bindScopeBinding(
+      scope,
+      bindingName,
+      createCallableBinding(bindingName, initializer, initializer.body, scope)
+    );
+    return;
+  }
+
+  if (ts.isObjectLiteralExpression(initializer)) {
+    bindScopeBinding(scope, bindingName, createObjectLiteralNamespaceBinding(bindingName, initializer, scope));
+    return;
+  }
+
+  const aliasTarget = resolveBindingFromExpression(scope, initializer);
+  if (aliasTarget) {
+    bindScopeBinding(scope, bindingName, aliasTarget);
+  }
+}
+
+function createObjectLiteralNamespaceBinding(name, objectLiteral, scope) {
+  const namespaceBinding = createNamespaceBinding(name);
+
+  for (const property of objectLiteral.properties) {
+    const propertyName = objectLiteralPropertyName(property.name);
+    if (!propertyName) {
+      continue;
+    }
+
+    let memberBinding = null;
+    if (
+      ts.isPropertyAssignment(property) &&
+      (ts.isArrowFunction(property.initializer) || ts.isFunctionExpression(property.initializer))
+    ) {
+      memberBinding = createCallableBinding(
+        `${name}.${propertyName}`,
+        property.initializer,
+        property.initializer.body,
+        scope
+      );
+    } else if (ts.isMethodDeclaration(property)) {
+      memberBinding = createCallableBinding(
+        `${name}.${propertyName}`,
+        property,
+        property.body,
+        scope
+      );
+    } else if (ts.isPropertyAssignment(property) && ts.isObjectLiteralExpression(property.initializer)) {
+      memberBinding = createObjectLiteralNamespaceBinding(
+        `${name}.${propertyName}`,
+        property.initializer,
+        scope
+      );
+    } else if (ts.isPropertyAssignment(property)) {
+      memberBinding = resolveBindingFromExpression(scope, property.initializer);
+    }
+
+    if (memberBinding) {
+      namespaceBinding.members.set(propertyName, memberBinding);
+    }
+  }
+
+  return namespaceBinding;
+}
+
+function resolveBindingFromExpression(scope, expression) {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+
+  if (ts.isIdentifier(current)) {
+    return lookupScopeBinding(scope, current.text);
+  }
+
+  if (ts.isPropertyAccessExpression(current)) {
+    const target = resolveBindingFromExpression(scope, current.expression);
+    return target?.kind === "namespace" ? target.members.get(current.name.text) ?? null : null;
+  }
+
+  if (ts.isElementAccessExpression(current)) {
+    const target = resolveBindingFromExpression(scope, current.expression);
+    const staticKey = staticElementAccessKey(current.argumentExpression);
+    return target?.kind === "namespace" && staticKey !== null
+      ? target.members.get(staticKey) ?? null
+      : null;
+  }
+
+  return null;
+}
+
+function collectReachableExecutionData(container, parentScope, context, activeBindings, analysis) {
+  const scope = createRuntimeScope(parentScope);
+  hoistFunctionDeclarationsIntoScope(container, scope);
+
+  const execution = {
+    callRecords: [],
+    eventHandlers: []
+  };
+
+  if (ts.isSourceFile(container) || ts.isBlock(container)) {
+    for (const statement of container.statements) {
+      visitExecutedNode(statement, scope, context, activeBindings, analysis, execution);
+    }
+  } else {
+    visitExecutedNode(container, scope, context, activeBindings, analysis, execution, true);
+  }
+
+  return execution;
+}
+
+function visitExecutedNode(
+  node,
+  scope,
+  context,
+  activeBindings,
+  analysis,
+  execution,
+  allowRootFunctionLike = false
+) {
+  if (!allowRootFunctionLike && ts.isFunctionLike(node)) {
+    return;
+  }
+
+  if (ts.isVariableStatement(node)) {
+    for (const declaration of node.declarationList.declarations) {
+      visitExecutedNode(declaration, scope, context, activeBindings, analysis, execution);
+    }
+    return;
+  }
+
+  if (ts.isVariableDeclaration(node)) {
+    if (node.initializer) {
+      visitExecutedNode(node.initializer, scope, context, activeBindings, analysis, execution);
+    }
+    registerVariableCallableBinding(node, scope);
+    return;
+  }
+
+  if (ts.isTryStatement(node)) {
+    visitExecutedNode(node.tryBlock, scope, context, activeBindings, analysis, execution, true);
+    if (node.catchClause) {
+      const catchScope = createRuntimeScope(scope);
+      if (node.catchClause.variableDeclaration?.name && ts.isIdentifier(node.catchClause.variableDeclaration.name)) {
+        bindScopeBinding(catchScope, node.catchClause.variableDeclaration.name.text, null);
+      }
+      visitExecutedNode(node.catchClause.block, catchScope, "catch", activeBindings, analysis, execution, true);
+    }
+    if (node.finallyBlock) {
+      visitExecutedNode(node.finallyBlock, scope, context, activeBindings, analysis, execution, true);
+    }
+    return;
+  }
+
+  if (ts.isBlock(node)) {
+    const blockScope = createRuntimeScope(scope);
+    hoistFunctionDeclarationsIntoScope(node, blockScope);
+    for (const statement of node.statements) {
+      visitExecutedNode(statement, blockScope, context, activeBindings, analysis, execution);
+    }
+    return;
+  }
+
+  if (ts.isCallExpression(node)) {
+    const resolvedBinding = resolveBindingFromExpression(scope, node.expression);
+    const callRecord = {
+      call: node,
+      resolvedBinding,
+      context,
+      bindingStack: [...activeBindings],
+      isShow: isPropertyAccessCall(node, "show")
+    };
+    execution.callRecords.push(callRecord);
+
+    const registration = matchEventRegistration(node);
+    if (registration) {
+      execution.eventHandlers.push({
+        eventName: registration.eventName,
+        callback: registration.callback,
+        scope
+      });
+    }
+
+    const inlineIife = immediatelyInvokedFunctionExpression(node);
+    if (inlineIife) {
+      mergeExecutionData(
+        execution,
+        collectReachableExecutionData(
+          inlineIife.body,
+          scope,
+          context,
+          activeBindings,
+          analysis
+        )
+      );
+    }
+
+    if (
+      resolvedBinding?.kind === "callable" &&
+      !activeBindings.includes(resolvedBinding.id)
+    ) {
+      mergeExecutionData(
+        execution,
+        collectReachableExecutionData(
+          resolvedBinding.body,
+          resolvedBinding.closureScope,
+          context,
+          [...activeBindings, resolvedBinding.id],
+          analysis
+        )
+      );
+    }
+
+    ts.forEachChild(node, (child) => {
+      if (!ts.isFunctionLike(child)) {
+        visitExecutedNode(child, scope, context, activeBindings, analysis, execution);
+      }
+    });
+    return;
+  }
+
+  if (ts.isNewExpression(node)) {
+    const promiseExecutor = promiseExecutorFunctionExpression(node);
+    if (promiseExecutor) {
+      mergeExecutionData(
+        execution,
+        collectReachableExecutionData(
+          promiseExecutor.body,
+          scope,
+          context,
+          activeBindings,
+          analysis
+        )
+      );
+    }
+  }
+
+  ts.forEachChild(node, (child) =>
+    visitExecutedNode(child, scope, context, activeBindings, analysis, execution)
+  );
+}
+
+function mergeExecutionData(target, source) {
+  target.callRecords.push(...source.callRecords);
+  target.eventHandlers.push(...source.eventHandlers);
 }
 
 function collectNamedFunctionData(sourceFile) {
