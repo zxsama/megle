@@ -106,7 +106,7 @@ for (const value of ["taskkill", "/T", "/F", "stopCoreProcessTree"]) {
   }
 }
 
-for (const value of ["contextBridge", "coreUrl", "sessionToken"]) {
+for (const value of ["contextBridge", "coreUrl", "sessionToken", "notifyShellReady", 'ipcRenderer.invoke("megle:shell-ready")']) {
   if (!preload.includes(value)) {
     fail(`preload bridge missing ${value}`);
   }

@@ -23,6 +23,9 @@ let coreReadyPromise: Promise<CoreSession> | null = null;
 let cachedFfmpegAvailable: boolean | null = null;
 let persisted = false;
 let persistDebounceTimer: NodeJS.Timeout | null = null;
+let mainWindowReadyToShow: Promise<void> | null = null;
+let shellReadyRevealPromise: Promise<boolean> | null = null;
+let shellReadyVisibleWindowId: number | null = null;
 const PERSIST_DEBOUNCE_MS = 500;
 
 interface WindowState {
@@ -103,6 +106,29 @@ ipcMain.handle("megle:clipboard-write-text", (_event, text: string) => {
   return true;
 });
 
+ipcMain.handle("megle:shell-ready", async () => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return false;
+  }
+  if (shellReadyVisibleWindowId === window.id) {
+    return true;
+  }
+  if (shellReadyRevealPromise) {
+    return shellReadyRevealPromise;
+  }
+
+  const revealPromise = revealMainWindowForShellReady(window);
+  shellReadyRevealPromise = revealPromise;
+  try {
+    return await revealPromise;
+  } finally {
+    if (shellReadyRevealPromise === revealPromise) {
+      shellReadyRevealPromise = null;
+    }
+  }
+});
+
 ipcMain.handle("megle:visual-capture-page", async () => {
   if (!isVisualHarnessEnabled() || !mainWindow || mainWindow.isDestroyed()) {
     return null;
@@ -139,9 +165,10 @@ async function createWindow(): Promise<void> {
     y: placement.y,
     minWidth: 1100,
     minHeight: 720,
-    backgroundMaterial: "acrylic",
+    backgroundMaterial: "none",
     transparent: true,
     backgroundColor: "#00000000",
+    show: false,
     frame: false,
     titleBarStyle: "hidden",
     webPreferences: {
@@ -155,6 +182,13 @@ async function createWindow(): Promise<void> {
       ]
     }
   });
+  mainWindow.setBackgroundMaterial("none");
+  mainWindow.setOpacity(0);
+  shellReadyVisibleWindowId = null;
+  shellReadyRevealPromise = null;
+  mainWindowReadyToShow = new Promise<void>((resolve) => {
+    mainWindow?.once("ready-to-show", () => resolve());
+  });
 
   if (state.maximized) {
     mainWindow.maximize();
@@ -167,6 +201,9 @@ async function createWindow(): Promise<void> {
   mainWindow.on("resize", schedulePersistWindowState);
 
   mainWindow.on("closed", () => {
+    mainWindowReadyToShow = null;
+    shellReadyRevealPromise = null;
+    shellReadyVisibleWindowId = null;
     mainWindow = null;
   });
 
@@ -213,6 +250,35 @@ function isVisualHarnessEnabled(): boolean {
     process.env.MEGLE_VISUAL_HARNESS === "1" ||
     process.argv.some((arg) => arg === "--megle-visual-harness=1")
   );
+}
+
+async function waitForRendererFrame(window: BrowserWindow) {
+  if (window.isDestroyed()) return;
+  try {
+    await window.webContents.executeJavaScript(
+      `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+      true
+    );
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, 34));
+  }
+}
+
+async function revealMainWindowForShellReady(window: BrowserWindow): Promise<boolean> {
+  await (mainWindowReadyToShow ?? Promise.resolve());
+  if (window.isDestroyed()) {
+    return false;
+  }
+  window.show();
+  await waitForRendererFrame(window);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  if (window.isDestroyed()) {
+    return false;
+  }
+  window.setOpacity(1);
+  window.focus();
+  shellReadyVisibleWindowId = window.id;
+  return true;
 }
 
 function windowStatePath(): string {

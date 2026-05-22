@@ -20,6 +20,7 @@ export interface DesktopShellActions {
 export interface MegleDesktopBridge {
   coreUrl?: string;
   sessionToken?: string;
+  notifyShellReady?: () => Promise<boolean>;
   pickFolder?: () => Promise<string | null>;
   diagnostics?: () => Promise<DesktopDiagnostics>;
   windowControls?: DesktopWindowControls;
@@ -34,6 +35,25 @@ declare global {
 
 export function getDesktopBridge(): MegleDesktopBridge | null {
   return window.megleDesktop ?? null;
+}
+
+let desktopShellReadyNotified = false;
+
+export async function notifyDesktopShellReady(): Promise<boolean> {
+  const notifyShellReady = getDesktopBridge()?.notifyShellReady;
+  if (!notifyShellReady) {
+    return false;
+  }
+  if (desktopShellReadyNotified) {
+    return true;
+  }
+  desktopShellReadyNotified = true;
+  try {
+    return await notifyShellReady();
+  } catch {
+    desktopShellReadyNotified = false;
+    return false;
+  }
 }
 
 export function canPickNativeFolder(): boolean {

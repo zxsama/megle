@@ -26,6 +26,7 @@ import {
 import {
   copyText,
   getDesktopShellActions,
+  notifyDesktopShellReady,
   openPath,
   revealPath
 } from "../core/desktop";
@@ -86,6 +87,10 @@ export function App() {
     onClosePreview: handleClosePreview,
     previewOpen
   });
+
+  useEffect(() => {
+    void notifyDesktopShellReady();
+  }, []);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 

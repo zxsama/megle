@@ -15,6 +15,7 @@ const visualHarnessEnabled = readArg("--megle-visual-harness=") === "1";
 contextBridge.exposeInMainWorld("megleDesktop", {
   coreUrl: readArg("--megle-core-url="),
   sessionToken: readArg("--megle-session-token="),
+  notifyShellReady: () => ipcRenderer.invoke("megle:shell-ready"),
   pickFolder: () => ipcRenderer.invoke("megle:pick-folder"),
   diagnostics: () => ipcRenderer.invoke("megle:diagnostics"),
   windowControls: {

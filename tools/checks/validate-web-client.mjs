@@ -53,6 +53,7 @@ const centralPreviewStage = existsSync(path.join(root, centralPreviewStagePath))
   ? read(centralPreviewStagePath)
   : "";
 const desktopAdapterPath = "apps/web/src/core/desktop.ts";
+const desktopAdapter = read(desktopAdapterPath);
 const packageJson = readJson("package.json");
 const webPackageJson = readJson("apps/web/package.json");
 const coreClientPackagePath = "packages/core-client/package.json";
@@ -91,6 +92,12 @@ if (webPackageJson.dependencies?.["@megle/core-client"] !== "*") {
 
 if (!existsSync(path.join(root, desktopAdapterPath))) {
   fail("web desktop bridge access must be isolated in apps/web/src/core/desktop.ts");
+}
+
+for (const value of ["notifyShellReady", "notifyDesktopShellReady"]) {
+  if (!desktopAdapter.includes(value)) {
+    fail(`web desktop bridge helper missing ${value}`);
+  }
 }
 
 if (!mediaGrid.includes("@tanstack/react-virtual") || !mediaGrid.includes("useVirtualizer")) {

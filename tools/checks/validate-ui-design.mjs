@@ -28,6 +28,7 @@ function readOptional(relativePath) {
 }
 
 const desktopMain = read("apps/desktop/src/main.ts");
+const preload = read("apps/desktop/src/preload.cjs");
 const styles = read("apps/web/src/styles.css");
 const stylesForChecks = stripCssComments(styles);
 const app = read("apps/web/src/app/App.tsx");
@@ -67,16 +68,46 @@ if (!nativeMaterial.browserWindowOptionsFound) {
   fail("desktop window must construct BrowserWindow with an inline options object");
 }
 
-for (const value of nativeMaterial.missingRequiredProperties) {
-  fail(`desktop window must keep a frameless transparent shell with native Windows acrylic: missing ${value}`);
-}
-
-if (nativeMaterial.disablesNativeMaterial) {
-  fail("desktop window must not disable the native Windows acrylic backdrop with backgroundMaterial: \"none\"");
+for (const [condition, value] of [
+  [/backgroundMaterial:\s*"none"/.test(desktopMain), 'backgroundMaterial: "none"'],
+  [nativeMaterial.transparent, "transparent: true"],
+  [nativeMaterial.transparentBackgroundColor, 'backgroundColor: "#00000000"'],
+  [nativeMaterial.frameFalse, "frame: false"]
+]) {
+  if (!condition) {
+    fail(`desktop window must keep a frameless transparent shell with an explicit transparent root material: missing ${value}`);
+  }
 }
 
 if (nativeMaterial.unsafeTopLevelSpreads.length > 0) {
   fail("desktop BrowserWindow options must not use top-level spreads that can override acrylic transparency settings");
+}
+
+if (!/show:\s*false\b/.test(desktopMain)) {
+  fail("desktop window must stay hidden until the desktop shell is ready so startup never flashes a gray rectangular backing plate");
+}
+
+if (!/ready-to-show/.test(desktopMain)) {
+  fail("desktop window must wait for ready-to-show before becoming visible");
+}
+
+for (const [source, value, message] of [
+  [desktopMain, 'ipcMain.handle("megle:shell-ready"', "desktop main must expose a megle:shell-ready IPC handshake before the window can become visible"],
+  [preload, "notifyShellReady", "desktop preload must own the notifyShellReady bridge surface"],
+  [desktopBridge, "notifyDesktopShellReady", "desktop bridge helper must expose notifyDesktopShellReady so renderer code stays off window.megleDesktop"],
+  [app, "notifyDesktopShellReady", "App must notify desktop shell readiness after the shell mounts"]
+]) {
+  if (!source.includes(value)) {
+    fail(message);
+  }
+}
+
+const createWindowBody = extractFunctionBody(desktopMain, "createWindow");
+if (
+  createWindowBody &&
+  /await\s+readyToShow[\s\S]{0,240}(?:mainWindow|window)\.show\(\)/.test(createWindowBody)
+) {
+  fail("desktop window show timing must not run directly after ready-to-show; visible reveal must be gated by the renderer shell-ready handshake");
 }
 
 if (!/Content-Security-Policy/.test(webIndex) || /unsafe-eval/.test(webIndex)) {
