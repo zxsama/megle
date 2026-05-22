@@ -2642,6 +2642,70 @@ function assertDesktopRevealOrderingRegressionProbe() {
   ) {
     fail("desktop reveal-order validator must catch bracket-notation object-member reveal wrappers inside ready-to-show");
   }
+
+  const plainAliasFallbackProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      const armLater = armShellReadyFailureFallback;
+      armLater(window);
+      window.once("ready-to-show", () => {
+        const rearmLater = armShellReadyFailureFallback;
+        rearmLater(window);
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const plainAliasFallbackFailures = collectDesktopRevealOrderingFailures(plainAliasFallbackProbe);
+  if (plainAliasFallbackFailures.length > 0) {
+    fail("desktop reveal-order validator must treat plain const fallback aliases as valid reachability paths");
+  }
+
+  const plainAliasRevealProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      armShellReadyFailureFallback(window);
+      window.once("ready-to-show", () => {
+        const revealLater = revealMainWindow;
+        revealLater(window);
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindow(window) {
+      window.show();
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const plainAliasRevealFailures = collectDesktopRevealOrderingFailures(plainAliasRevealProbe);
+  if (
+    !plainAliasRevealFailures.includes(
+      "ready-to-show handlers must not reveal the desktop window directly or through a helper"
+    )
+  ) {
+    fail("desktop reveal-order validator must catch plain const reveal aliases inside ready-to-show");
+  }
 }
 
 function createSourceFileForDesktopRevealProbe(source) {
@@ -2773,6 +2837,19 @@ function collectNamedFunctionData(sourceFile) {
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
       node.initializer &&
+      !ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      const aliasTargetName = callableExpressionName(node.initializer);
+      if (aliasTargetName) {
+        functions.set(
+          node.name.text,
+          createAliasFunctionData(node.name.text, node, aliasTargetName)
+        );
+      }
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
       ts.isObjectLiteralExpression(node.initializer)
     ) {
       for (const property of node.initializer.properties) {
@@ -2821,6 +2898,15 @@ function createNamedFunctionData(name, node, body) {
     node,
     directCallees: execution.calledNames,
     callsShow: execution.callsShow
+  };
+}
+
+function createAliasFunctionData(name, node, targetName) {
+  return {
+    name,
+    node,
+    directCallees: new Set([targetName]),
+    callsShow: false
   };
 }
 
@@ -3007,24 +3093,7 @@ function matchEventRegistration(call) {
 }
 
 function calledFunctionName(call) {
-  if (ts.isIdentifier(call.expression)) {
-    return call.expression.text;
-  }
-  if (ts.isPropertyAccessExpression(call.expression)) {
-    const expressionRoot = propertyAccessExpressionRoot(call.expression.expression);
-    if (expressionRoot) {
-      return `${expressionRoot}.${call.expression.name.text}`;
-    }
-    return call.expression.name.text;
-  }
-  if (ts.isElementAccessExpression(call.expression)) {
-    const expressionRoot = propertyAccessExpressionRoot(call.expression.expression);
-    const staticKey = staticElementAccessKey(call.expression.argumentExpression);
-    if (expressionRoot && staticKey !== null) {
-      return `${expressionRoot}.${staticKey}`;
-    }
-  }
-  return null;
+  return callableExpressionName(call.expression);
 }
 
 function isPropertyAccessCall(call, propertyName) {
@@ -3103,6 +3172,32 @@ function staticElementAccessKey(argumentExpression) {
   }
   if (ts.isNoSubstitutionTemplateLiteral(argumentExpression)) {
     return argumentExpression.text;
+  }
+  return null;
+}
+
+function callableExpressionName(expression) {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+
+  if (ts.isIdentifier(current)) {
+    return current.text;
+  }
+  if (ts.isPropertyAccessExpression(current)) {
+    const expressionRoot = propertyAccessExpressionRoot(current.expression);
+    if (expressionRoot) {
+      return `${expressionRoot}.${current.name.text}`;
+    }
+    return current.name.text;
+  }
+  if (ts.isElementAccessExpression(current)) {
+    const expressionRoot = propertyAccessExpressionRoot(current.expression);
+    const staticKey = staticElementAccessKey(current.argumentExpression);
+    if (expressionRoot && staticKey !== null) {
+      return `${expressionRoot}.${staticKey}`;
+    }
   }
   return null;
 }
