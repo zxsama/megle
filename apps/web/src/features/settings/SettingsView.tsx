@@ -123,34 +123,299 @@ function InterfaceStyleSection({ interfaceStyle }: { interfaceStyle: InterfaceSt
           Reset interface style
         </button>
       </div>
-      <StyleSlider
-        id="glass-blur"
-        label="Glass blur"
-        max={limits.glassBlur.max}
-        min={limits.glassBlur.min}
-        onChange={(glassBlur) => setInterfaceStyle({ glassBlur })}
-        step={limits.glassBlur.step}
-        value={value.glassBlur}
-      />
-      <StyleSlider
-        id="pointer-glow-brightness"
-        label="Pointer glow brightness"
-        max={limits.pointerGlowBrightness.max}
-        min={limits.pointerGlowBrightness.min}
-        onChange={(pointerGlowBrightness) => setInterfaceStyle({ pointerGlowBrightness })}
-        step={limits.pointerGlowBrightness.step}
-        value={value.pointerGlowBrightness}
-      />
-      <StyleSlider
-        id="edge-highlight-brightness"
-        label="Edge highlight brightness"
-        max={limits.edgeHighlightBrightness.max}
-        min={limits.edgeHighlightBrightness.min}
-        onChange={(edgeHighlightBrightness) => setInterfaceStyle({ edgeHighlightBrightness })}
-        step={limits.edgeHighlightBrightness.step}
-        value={value.edgeHighlightBrightness}
-      />
+      <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Shared shape</h3>
+        <StyleSlider
+          id="window-corner-radius"
+          label="Window corner radius"
+          max={limits.windowCornerRadius.max}
+          min={limits.windowCornerRadius.min}
+          onChange={(windowCornerRadius) => setInterfaceStyle({ windowCornerRadius })}
+          step={limits.windowCornerRadius.step}
+          unit="px"
+          value={value.windowCornerRadius}
+        />
+        <StyleSlider
+          id="surface-corner-radius"
+          label="Surface corner radius"
+          max={limits.surfaceCornerRadius.max}
+          min={limits.surfaceCornerRadius.min}
+          onChange={(surfaceCornerRadius) => setInterfaceStyle({ surfaceCornerRadius })}
+          step={limits.surfaceCornerRadius.step}
+          unit="px"
+          value={value.surfaceCornerRadius}
+        />
+        <StyleSlider
+          id="control-corner-radius"
+          label="Control corner radius"
+          max={limits.controlCornerRadius.max}
+          min={limits.controlCornerRadius.min}
+          onChange={(controlCornerRadius) => setInterfaceStyle({ controlCornerRadius })}
+          step={limits.controlCornerRadius.step}
+          unit="px"
+          value={value.controlCornerRadius}
+        />
+        <StyleSlider
+          id="content-corner-radius"
+          label="Content corner radius"
+          max={limits.contentCornerRadius.max}
+          min={limits.contentCornerRadius.min}
+          onChange={(contentCornerRadius) => setInterfaceStyle({ contentCornerRadius })}
+          step={limits.contentCornerRadius.step}
+          unit="px"
+          value={value.contentCornerRadius}
+        />
+      </div>
+      <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Side shell material</h3>
+        <StyleSlider
+          id="side-blur"
+          label="Blur"
+          max={limits.sideBlur.max}
+          min={limits.sideBlur.min}
+          onChange={(sideBlur) => setInterfaceStyle({ sideBlur })}
+          step={limits.sideBlur.step}
+          unit="x"
+          value={value.sideBlur}
+        />
+        <StyleSlider
+          id="side-opacity"
+          label="Opacity"
+          max={limits.sideOpacity.max}
+          min={limits.sideOpacity.min}
+          onChange={(sideOpacity) => setInterfaceStyle({ sideOpacity })}
+          step={limits.sideOpacity.step}
+          unit="x"
+          value={value.sideOpacity}
+        />
+        <StyleSlider
+          id="side-overlay-strength"
+          label="Overlay strength"
+          max={limits.sideOverlayStrength.max}
+          min={limits.sideOverlayStrength.min}
+          onChange={(sideOverlayStrength) => setInterfaceStyle({ sideOverlayStrength })}
+          step={limits.sideOverlayStrength.step}
+          unit="x"
+          value={value.sideOverlayStrength}
+        />
+        <ColorField
+          id="side-overlay-color"
+          label="Overlay color"
+          onChange={(sideOverlayColor) => setInterfaceStyle({ sideOverlayColor })}
+          value={value.sideOverlayColor}
+        />
+        <StyleSlider
+          id="side-saturation"
+          label="Saturation"
+          max={limits.sideSaturation.max}
+          min={limits.sideSaturation.min}
+          onChange={(sideSaturation) => setInterfaceStyle({ sideSaturation })}
+          step={limits.sideSaturation.step}
+          unit="x"
+          value={value.sideSaturation}
+        />
+        <StyleSlider
+          id="side-stroke-opacity"
+          label="Stroke opacity"
+          max={limits.sideStrokeOpacity.max}
+          min={limits.sideStrokeOpacity.min}
+          onChange={(sideStrokeOpacity) => setInterfaceStyle({ sideStrokeOpacity })}
+          step={limits.sideStrokeOpacity.step}
+          unit="x"
+          value={value.sideStrokeOpacity}
+        />
+      </div>
+      <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Center workbench material</h3>
+        <StyleSlider
+          id="center-blur"
+          label="Blur"
+          max={limits.centerBlur.max}
+          min={limits.centerBlur.min}
+          onChange={(centerBlur) => setInterfaceStyle({ centerBlur })}
+          step={limits.centerBlur.step}
+          unit="x"
+          value={value.centerBlur}
+        />
+        <StyleSlider
+          id="center-opacity"
+          label="Opacity"
+          max={limits.centerOpacity.max}
+          min={limits.centerOpacity.min}
+          onChange={(centerOpacity) => setInterfaceStyle({ centerOpacity })}
+          step={limits.centerOpacity.step}
+          unit="x"
+          value={value.centerOpacity}
+        />
+        <StyleSlider
+          id="center-overlay-strength"
+          label="Overlay strength"
+          max={limits.centerOverlayStrength.max}
+          min={limits.centerOverlayStrength.min}
+          onChange={(centerOverlayStrength) => setInterfaceStyle({ centerOverlayStrength })}
+          step={limits.centerOverlayStrength.step}
+          unit="x"
+          value={value.centerOverlayStrength}
+        />
+        <ColorField
+          id="center-overlay-color"
+          label="Overlay color"
+          onChange={(centerOverlayColor) => setInterfaceStyle({ centerOverlayColor })}
+          value={value.centerOverlayColor}
+        />
+        <StyleSlider
+          id="center-saturation"
+          label="Saturation"
+          max={limits.centerSaturation.max}
+          min={limits.centerSaturation.min}
+          onChange={(centerSaturation) => setInterfaceStyle({ centerSaturation })}
+          step={limits.centerSaturation.step}
+          unit="x"
+          value={value.centerSaturation}
+        />
+        <StyleSlider
+          id="center-stroke-opacity"
+          label="Stroke opacity"
+          max={limits.centerStrokeOpacity.max}
+          min={limits.centerStrokeOpacity.min}
+          onChange={(centerStrokeOpacity) => setInterfaceStyle({ centerStrokeOpacity })}
+          step={limits.centerStrokeOpacity.step}
+          unit="x"
+          value={value.centerStrokeOpacity}
+        />
+      </div>
+      <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Shared liquid glass interaction</h3>
+        <StyleSlider
+          id="edge-highlight-brightness"
+          label="Edge highlight brightness"
+          max={limits.edgeHighlightBrightness.max}
+          min={limits.edgeHighlightBrightness.min}
+          onChange={(edgeHighlightBrightness) => setInterfaceStyle({ edgeHighlightBrightness })}
+          step={limits.edgeHighlightBrightness.step}
+          unit="x"
+          value={value.edgeHighlightBrightness}
+        />
+        <StyleSlider
+          id="edge-highlight-size"
+          label="Edge highlight size"
+          max={limits.edgeHighlightSize.max}
+          min={limits.edgeHighlightSize.min}
+          onChange={(edgeHighlightSize) => setInterfaceStyle({ edgeHighlightSize })}
+          step={limits.edgeHighlightSize.step}
+          unit="x"
+          value={value.edgeHighlightSize}
+        />
+        <StyleSlider
+          id="halo-brightness"
+          label="Halo brightness"
+          max={limits.haloBrightness.max}
+          min={limits.haloBrightness.min}
+          onChange={(haloBrightness) => setInterfaceStyle({ haloBrightness })}
+          step={limits.haloBrightness.step}
+          unit="x"
+          value={value.haloBrightness}
+        />
+        <StyleSlider
+          id="halo-falloff"
+          label="Halo falloff"
+          max={limits.haloFalloff.max}
+          min={limits.haloFalloff.min}
+          onChange={(haloFalloff) => setInterfaceStyle({ haloFalloff })}
+          step={limits.haloFalloff.step}
+          unit="x"
+          value={value.haloFalloff}
+        />
+        <StyleSlider
+          id="pointer-response-radius"
+          label="Pointer response radius"
+          max={limits.pointerResponseRadius.max}
+          min={limits.pointerResponseRadius.min}
+          onChange={(pointerResponseRadius) => setInterfaceStyle({ pointerResponseRadius })}
+          step={limits.pointerResponseRadius.step}
+          unit="x"
+          value={value.pointerResponseRadius}
+        />
+        <StyleSlider
+          id="refraction-strength"
+          label="Refraction strength"
+          max={limits.refractionStrength.max}
+          min={limits.refractionStrength.min}
+          onChange={(refractionStrength) => setInterfaceStyle({ refractionStrength })}
+          step={limits.refractionStrength.step}
+          unit="x"
+          value={value.refractionStrength}
+        />
+      </div>
+      <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Dialog material</h3>
+        <StyleSlider
+          id="dialog-blur"
+          label="Dialog blur"
+          max={limits.dialogBlur.max}
+          min={limits.dialogBlur.min}
+          onChange={(dialogBlur) => setInterfaceStyle({ dialogBlur })}
+          step={limits.dialogBlur.step}
+          unit="x"
+          value={value.dialogBlur}
+        />
+        <StyleSlider
+          id="dialog-opacity"
+          label="Dialog opacity"
+          max={limits.dialogOpacity.max}
+          min={limits.dialogOpacity.min}
+          onChange={(dialogOpacity) => setInterfaceStyle({ dialogOpacity })}
+          step={limits.dialogOpacity.step}
+          unit="x"
+          value={value.dialogOpacity}
+        />
+        <StyleSlider
+          id="dialog-overlay-strength"
+          label="Dialog overlay strength"
+          max={limits.dialogOverlayStrength.max}
+          min={limits.dialogOverlayStrength.min}
+          onChange={(dialogOverlayStrength) => setInterfaceStyle({ dialogOverlayStrength })}
+          step={limits.dialogOverlayStrength.step}
+          unit="x"
+          value={value.dialogOverlayStrength}
+        />
+        <StyleSlider
+          id="dialog-backdrop-dim"
+          label="Dialog backdrop dim"
+          max={limits.dialogBackdropDim.max}
+          min={limits.dialogBackdropDim.min}
+          onChange={(dialogBackdropDim) => setInterfaceStyle({ dialogBackdropDim })}
+          step={limits.dialogBackdropDim.step}
+          unit="x"
+          value={value.dialogBackdropDim}
+        />
+      </div>
     </LiquidGlassSurface>
+  );
+}
+
+function ColorField({
+  id,
+  label,
+  onChange,
+  value
+}: {
+  id: string;
+  label: string;
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  return (
+    <label className="settings-style-slider settings-style-color no-drag" htmlFor={id}>
+      <span>{label}</span>
+      <input
+        id={id}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        type="color"
+        value={value}
+      />
+      <output htmlFor={id}>{value.toUpperCase()}</output>
+    </label>
   );
 }
 
@@ -161,6 +426,7 @@ function StyleSlider({
   min,
   onChange,
   step,
+  unit = "x",
   value
 }: {
   id: string;
@@ -169,6 +435,7 @@ function StyleSlider({
   min: number;
   onChange: (value: number) => void;
   step: number;
+  unit?: "px" | "x";
   value: number;
 }) {
   return (
@@ -183,13 +450,14 @@ function StyleSlider({
         type="range"
         value={value}
       />
-      <output htmlFor={id}>{formatStyleValue(value)}</output>
+      <output htmlFor={id}>{formatStyleValue(value, unit)}</output>
     </label>
   );
 }
 
-function formatStyleValue(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+function formatStyleValue(value: number, unit: "px" | "x") {
+  const rounded = Number.isInteger(value) ? String(value) : value.toFixed(2);
+  return unit === "px" ? `${rounded}px` : `${rounded}x`;
 }
 
 function ShortcutBindingsEditor() {

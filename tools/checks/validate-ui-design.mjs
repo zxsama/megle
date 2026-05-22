@@ -200,6 +200,15 @@ for (const [selector, maxAlpha] of [
   }
 }
 
+const liquidGlassBackdropBlocks = cssBlocksForExactSelector(stylesForChecks, ".liquid-glass-backdrop");
+if (
+  liquidGlassBackdropBlocks.some((block) =>
+    /linear-gradient\(\s*145deg|linear-gradient\(\s*135deg/.test(block)
+  )
+) {
+  fail("desktop workbench surfaces must not paint a top-left to bottom-right decorative layout gradient");
+}
+
 for (const selector of [".plugins-body", ".settings-body", ".task-center", ".onboarding-hero"]) {
   const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
   if (blocks.some((block) => hasNonTransparentBackground(block))) {
@@ -224,8 +233,7 @@ for (const value of [
   ".task-panel,",
   ".toolbar,",
   ".inspector-panel",
-  "background: transparent",
-  "box-shadow: var(--glass-shadow)"
+  "background: transparent"
 ]) {
   if (!stylesForChecks.includes(value)) {
     fail(`glass control layer styling missing ${value}`);
@@ -242,12 +250,10 @@ for (const selector of [
   const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
   if (
     !blocks.some(
-      (block) =>
-        /background:\s*transparent/.test(block) &&
-        /box-shadow:\s*var\(--glass-shadow\)/.test(block)
+      (block) => /background:\s*transparent/.test(block)
     )
   ) {
-    fail(`glass control layer ${selector} must stay transparent and keep its shadow without a root background plate`);
+    fail(`glass control layer ${selector} must stay transparent without painting a root background plate`);
   }
   if (
     blocks.some(
@@ -271,8 +277,8 @@ for (const value of [
   }
 }
 
-if (!stylesForChecks.includes("-webkit-app-region: drag") || !stylesForChecks.includes("-webkit-app-region: no-drag")) {
-  fail("frameless window chrome must define drag and no-drag regions");
+if (!stylesForChecks.includes("-webkit-app-region: no-drag")) {
+  fail("frameless window chrome must define no-drag regions for interactive titlebar controls");
 }
 
 assertExactSelectorHelperContracts();
@@ -281,10 +287,10 @@ assertCssCommentStrippingContracts();
 const shellDragBlocks = cssBlocksForExactSelector(stylesForChecks, ".shell-drag");
 if (
   !shellDragBlocks.some(
-    (block) => latestDeclarationValue(block, "-webkit-app-region") === "drag"
+    (block) => latestDeclarationValue(block, "-webkit-app-region") === "no-drag"
   )
 ) {
-  fail("integrated titlebar must define draggable blank regions");
+  fail("integrated titlebar must expose pointer events across the full titlebar surface");
 }
 
 const noDragBlocks = cssBlocksForExactSelector(stylesForChecks, ".no-drag");
@@ -548,6 +554,16 @@ if (app.includes('activeView === "tasks"')) {
 
 if (libraryView.includes("<PreviewDialog") || previewPanel.includes("preview-dialog-backdrop")) {
   fail("library preview must be inline, not a modal dialog/backdrop");
+}
+
+if (!cssBlocksForExactSelector(stylesForChecks, ".tile-label").some((block) => latestDeclarationValue(block, "text-align") === "center")) {
+  fail("middle grid thumbnail labels must be centered");
+}
+
+for (const value of ["preview-panel-heading", "preview-panel-open", "Open preview", "panel-title"]) {
+  if (previewPanel.includes(value)) {
+    fail(`right preview chrome must not render the old preview heading row: found ${value}`);
+  }
 }
 
 const mediaGridOnClickBodies = extractJsxAttributeBodies(mediaGrid, "onClick");
@@ -908,23 +924,68 @@ if (
 for (const value of [
   "megle.interfaceStyle",
   "DEFAULT_INTERFACE_STYLE",
-  "glassBlur",
-  "pointerGlowBrightness",
+  "windowCornerRadius",
+  "surfaceCornerRadius",
+  "controlCornerRadius",
+  "contentCornerRadius",
+  "sideBlur",
+  "sideOpacity",
+  "sideOverlayStrength",
+  "sideOverlayColor",
+  "sideSaturation",
+  "sideStrokeOpacity",
+  "centerBlur",
+  "centerOpacity",
+  "centerOverlayStrength",
+  "centerOverlayColor",
+  "centerSaturation",
+  "centerStrokeOpacity",
   "edgeHighlightBrightness",
+  "edgeHighlightSize",
+  "haloBrightness",
+  "haloFalloff",
+  "pointerResponseRadius",
+  "refractionStrength",
+  "dialogBlur",
+  "dialogOpacity",
+  "dialogOverlayStrength",
+  "dialogBackdropDim",
+  "interfaceStyleToCssVariables",
   "applyInterfaceStyleVariables",
   "useInterfaceStyle"
 ]) {
   if (!interfaceStyle.includes(value)) {
-    fail(`interface style preference contract missing ${value}`);
+    fail(`interface style model missing ${value}`);
   }
 }
 
 for (const value of [
-  "--glass-pointer-glow-brightness",
+  "--radius-window",
+  "--radius-surface",
+  "--radius-control",
+  "--radius-content",
+  "--glass-side-blur",
+  "--glass-side-fill",
+  "--glass-side-stroke",
+  "--glass-center-blur",
+  "--glass-center-fill",
+  "--glass-center-stroke",
+  "--glass-halo-brightness",
+  "--glass-halo-falloff",
+  "--glass-pointer-response-radius",
+  "--glass-refraction-strength",
   "--glass-edge-highlight-brightness",
+  "--glass-border-highlight-size",
+  "--glass-dialog-blur",
+  "--glass-dialog-fill",
+  "--dialog-blur",
+  "--dialog-backdrop-dim",
   "--glass-blur",
   "--glass-elevated-blur",
-  "--glass-control-blur"
+  "--glass-control-blur",
+  "--glass-saturation",
+  "--glass-control",
+  "--glass-readable-surface"
 ]) {
   if (!stylesForChecks.includes(value) && !interfaceStyle.includes(value)) {
     fail(`interface style CSS variable contract missing ${value}`);
@@ -932,8 +993,8 @@ for (const value of [
 }
 
 const defaultInterfaceStyleBody = extractObjectBody(interfaceStyle, "DEFAULT_INTERFACE_STYLE");
-if (!/pointerGlowBrightness:\s*(?:1\.[3-9]\d*|[2-9](?:\.\d+)?)\b/.test(defaultInterfaceStyleBody)) {
-  fail("default pointer glow brightness must be visibly stronger than the old 1x baseline");
+if (!/haloBrightness:\s*(?:1\.[2-9]\d*|[2-9](?:\.\d+)?)\b/.test(defaultInterfaceStyleBody)) {
+  fail("default halo brightness must be visibly stronger than the old 1x baseline");
 }
 
 if (!/edgeHighlightBrightness:\s*(?:6|7|8)(?:\.\d+)?\b/.test(defaultInterfaceStyleBody)) {
@@ -942,6 +1003,44 @@ if (!/edgeHighlightBrightness:\s*(?:6|7|8)(?:\.\d+)?\b/.test(defaultInterfaceSty
 
 if (!settingsView.includes("Interface style") || !settingsView.includes("Reset interface style")) {
   fail("settings must expose Interface style controls and reset");
+}
+
+for (const value of [
+  "Shared shape",
+  "Side shell material",
+  "Center workbench material",
+  "Shared liquid glass interaction",
+  "Dialog material",
+  'id="window-corner-radius"',
+  'id="surface-corner-radius"',
+  'id="control-corner-radius"',
+  'id="content-corner-radius"',
+  'id="side-blur"',
+  'id="side-opacity"',
+  'id="side-overlay-strength"',
+  'id="side-overlay-color"',
+  'id="side-saturation"',
+  'id="side-stroke-opacity"',
+  'id="center-blur"',
+  'id="center-opacity"',
+  'id="center-overlay-strength"',
+  'id="center-overlay-color"',
+  'id="center-saturation"',
+  'id="center-stroke-opacity"',
+  'id="edge-highlight-brightness"',
+  'id="edge-highlight-size"',
+  'id="halo-brightness"',
+  'id="halo-falloff"',
+  'id="pointer-response-radius"',
+  'id="refraction-strength"',
+  'id="dialog-blur"',
+  'id="dialog-opacity"',
+  'id="dialog-overlay-strength"',
+  'id="dialog-backdrop-dim"'
+]) {
+  if (!settingsView.includes(value)) {
+    fail(`settings Interface style must expose approved material-family controls: missing ${value}`);
+  }
 }
 
 if (!app.includes("useInterfaceStyle") || !app.includes("interfaceStyle={interfaceStyle}")) {
@@ -1303,7 +1402,9 @@ for (const selector of [
   ".preview-stage",
   ".central-preview-stage"
 ]) {
-  const blocks = cssBlocksForSelector(stylesForChecks, selector);
+  const blocks = selector === ".app-shell"
+    ? cssBlocksForExactSelector(stylesForChecks, selector)
+    : cssBlocksForSelector(stylesForChecks, selector);
   if (blocks.length === 0) {
     fail(`content-layer selector missing ${selector}`);
     continue;
@@ -1332,15 +1433,21 @@ if (gridSurfaceBlocks.length === 0) {
 if (
   !gridSurfaceBlocks.some(
     (block) =>
-      /background:\s*transparent/.test(block) &&
+      (/background:\s*transparent/.test(block) || /background:\s*var\(--content-stage\)/.test(block)) &&
       /border-radius:\s*0/.test(block)
   )
 ) {
-  fail("middle grid/workspace surface must not paint a full-window gray bottom plate");
+  fail("middle grid/workspace surface must keep a flat stage background with no rounded frame");
 }
 
-if (gridSurfaceBlocks.some((block) => hasNonTransparentBackground(block))) {
-  fail("middle grid/workspace surface must keep its global container transparent");
+if (
+  gridSurfaceBlocks.some(
+    (block) =>
+      hasNonTransparentBackground(block) &&
+      !/background:\s*var\(--content-stage\)/.test(block)
+  )
+) {
+  fail("middle grid/workspace surface must only use the shared content-stage background");
 }
 
 if (gridSurfaceBlocks.some((block) => /backdrop-filter\s*:/.test(block))) {
@@ -1348,21 +1455,13 @@ if (gridSurfaceBlocks.some((block) => /backdrop-filter\s*:/.test(block))) {
 }
 
 if (
-  !libraryView.includes("LiquidGlassSurface") ||
   !libraryView.includes('className={previewMedia ? "grid-surface grid-surface-preview" : "grid-surface"}')
 ) {
-  fail("LibraryView center content column must render .grid-surface as a LiquidGlassSurface so it shares the titlebar material plane");
+  fail("LibraryView center content column must render .grid-surface in both browsing and preview states");
 }
 
-const gridSurfaceGlassBlocks = cssBlocksForExactSelector(stylesForChecks, ".liquid-glass.grid-surface");
-if (
-  !gridSurfaceGlassBlocks.some(
-    (block) =>
-      /--glass-fill:\s*(?:transparent|var\(--glass-panel\))/.test(block) &&
-      /--glass-blur-current:\s*var\(--glass-blur\)/.test(block)
-  )
-) {
-  fail("center content LiquidGlass surface must keep the shared transparent workbench material plane");
+if (libraryView.includes("<LiquidGlassSurface") && libraryView.includes("grid-surface")) {
+  fail("center content column must not be wrapped in a structural LiquidGlass surface; keep the content stage separate from glass chrome");
 }
 
 for (const [selector, property, label] of [
@@ -1389,12 +1488,10 @@ const gridSurfaceAfterBlocks = cssBlocksForExactSelector(stylesForChecks, ".grid
 if (
   !gridSurfaceAfterBlocks.some(
     (block) =>
-      /border-top-color:\s*transparent/.test(block) &&
-      /border-left-color:\s*transparent/.test(block) &&
-      /border-right-color:\s*transparent/.test(block)
+      latestDeclarationValue(block, "display") === "none"
   )
 ) {
-  fail("center content LiquidGlass surface must suppress upper and side pseudo-borders so only the outer bottom outline and adjacent column separators remain");
+  fail("center content stage must not draw pseudo-borders around the preview area");
 }
 
 const centerTitlebarBlocks = cssBlocksForSelector(stylesForChecks, ".shell-titlebar-center");
@@ -1803,8 +1900,12 @@ function assertMiddleTitlebarGlassLayersRemainAvailable() {
     }
   }
 
-  if (!/\.shell-titlebar-center\s+\.(?:titlebar-tool-button|titlebar-icon-button|filter-menu-trigger|sort-menu-trigger):(?:hover|focus-visible|\[data-glass-active="true"\]|not\()/.test(stylesForChecks)) {
-    fail("middle titlebar tool buttons must keep state selectors for hover, focus, or active glass highlights");
+  if (!stylesForChecks.includes('[data-glass-pointer="active"]')) {
+    fail("middle titlebar tool buttons must support local pointer-proximity glass highlights, not only direct hover");
+  }
+
+  if (!/\.shell-titlebar-center\s+\.(?:titlebar-tool-button|titlebar-icon-button|filter-menu-trigger|sort-menu-trigger)(?::(?:hover|focus-visible)|\[data-glass-pointer="active"\]|\[data-glass-active="true"\]|:not\()/.test(stylesForChecks)) {
+    fail("middle titlebar tool buttons must keep state selectors for hover, focus, pointer proximity, or active glass highlights");
   }
 }
 
@@ -1814,6 +1915,10 @@ function assertMiddleTitlebarToolStatesActivateGlassLayers() {
     ".shell-titlebar-center .titlebar-icon-button:hover:not(:disabled)",
     ".shell-titlebar-center .filter-menu-trigger:hover:not(:disabled)",
     ".shell-titlebar-center .sort-menu-trigger:hover:not(:disabled)",
+    '.shell-titlebar-center .titlebar-tool-button[data-glass-pointer="active"]',
+    '.shell-titlebar-center .titlebar-icon-button[data-glass-pointer="active"]',
+    '.shell-titlebar-center .filter-menu-trigger[data-glass-pointer="active"]',
+    '.shell-titlebar-center .sort-menu-trigger[data-glass-pointer="active"]',
     ".shell-titlebar-center .titlebar-tool-button:focus-visible",
     ".shell-titlebar-center .titlebar-icon-button:focus-visible",
     ".shell-titlebar-center .filter-menu-trigger:focus-visible",
@@ -1843,6 +1948,10 @@ function assertMiddleTitlebarToolStateBackdropsKeepRefraction() {
     ".shell-titlebar-center .titlebar-icon-button:hover:not(:disabled) > .liquid-glass-backdrop",
     ".shell-titlebar-center .filter-menu-trigger:hover:not(:disabled) > .liquid-glass-backdrop",
     ".shell-titlebar-center .sort-menu-trigger:hover:not(:disabled) > .liquid-glass-backdrop",
+    '.shell-titlebar-center .titlebar-tool-button[data-glass-pointer="active"] > .liquid-glass-backdrop',
+    '.shell-titlebar-center .titlebar-icon-button[data-glass-pointer="active"] > .liquid-glass-backdrop',
+    '.shell-titlebar-center .filter-menu-trigger[data-glass-pointer="active"] > .liquid-glass-backdrop',
+    '.shell-titlebar-center .sort-menu-trigger[data-glass-pointer="active"] > .liquid-glass-backdrop',
     ".shell-titlebar-center .titlebar-tool-button:focus-visible > .liquid-glass-backdrop",
     ".shell-titlebar-center .titlebar-icon-button:focus-visible > .liquid-glass-backdrop",
     ".shell-titlebar-center .filter-menu-trigger:focus-visible > .liquid-glass-backdrop",
@@ -2707,6 +2816,111 @@ function assertDesktopRevealOrderingRegressionProbe() {
     fail("desktop reveal-order validator must catch plain const reveal aliases inside ready-to-show");
   }
 
+  const showInactiveAliasRevealProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      armShellReadyFailureFallback(window);
+      window.once("ready-to-show", () => {
+        const revealLater = () => window.showInactive();
+        revealLater();
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const showInactiveAliasRevealFailures = collectDesktopRevealOrderingFailures(
+    showInactiveAliasRevealProbe
+  );
+  if (
+    !showInactiveAliasRevealFailures.includes(
+      "ready-to-show handlers must not reveal the desktop window directly or through a helper"
+    )
+  ) {
+    fail("desktop reveal-order validator must catch showInactive reveal wrappers inside ready-to-show");
+  }
+
+  const bracketRevealMethodProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      armShellReadyFailureFallback(window);
+      window.once("ready-to-show", () => {
+        const helpers = {
+          revealLater() {
+            window["showInactive"]();
+          }
+        };
+        helpers["revealLater"]();
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const bracketRevealMethodFailures = collectDesktopRevealOrderingFailures(
+    bracketRevealMethodProbe
+  );
+  if (
+    !bracketRevealMethodFailures.includes(
+      "ready-to-show handlers must not reveal the desktop window directly or through a helper"
+    )
+  ) {
+    fail("desktop reveal-order validator must catch static bracket-notation reveal-method calls inside ready-to-show");
+  }
+
+  const maximizeRevealProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      armShellReadyFailureFallback(window);
+      window.once("ready-to-show", () => {
+        (() => {
+          window.maximize();
+        })();
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const maximizeRevealFailures = collectDesktopRevealOrderingFailures(maximizeRevealProbe);
+  if (
+    !maximizeRevealFailures.includes(
+      "ready-to-show handlers must not reveal the desktop window directly or through a helper"
+    )
+  ) {
+    fail("desktop reveal-order validator must treat maximize as part of the reveal-method family");
+  }
+
   const indirectHandlerRegistrationProbe = createSourceFileForDesktopRevealProbe(`
     async function createWindow() {
       const window = createMockWindow();
@@ -2819,21 +3033,22 @@ function collectDesktopRevealOrderingFailures(sourceFile) {
     return ["desktop startup contract missing loadURL inside createWindow"];
   }
 
+  const firstLoadUrlCall = loadUrlCalls[0].call;
   if (
     createWindowExecution.callRecords.some(
       (record) =>
-        record.isShow &&
-        !(
-          launchFailureBinding &&
-          record.context === "catch" &&
-          record.bindingStack.includes(launchFailureBinding.id)
+        record.revealMethodName !== null &&
+        !isAllowedDesktopStartupRevealRecord(
+          record,
+          launchFailureBinding,
+          firstLoadUrlCall,
+          sourceFile
         )
     )
   ) {
     failures.push("desktop window show timing must not run directly inside createWindow or its nested handlers");
   }
 
-  const firstLoadUrlCall = loadUrlCalls[0].call;
   const absoluteFallbackCall = createWindowExecution.callRecords.find(
     (record) =>
       fallbackArmBinding &&
@@ -2873,7 +3088,7 @@ function collectDesktopRevealOrderingFailures(sourceFile) {
         "event:ready-to-show",
         [],
         analysis
-      ).callRecords.some((record) => record.isShow)
+      ).callRecords.some((record) => record.revealMethodName !== null)
     )
   ) {
     failures.push("ready-to-show handlers must not reveal the desktop window directly or through a helper");
@@ -2921,11 +3136,12 @@ function collectDesktopRevealOrderingFailures(sourceFile) {
 
   const unexpectedRevealCalls = createWindowExecution.callRecords.filter(
     (record) =>
-      record.isShow &&
-      !(
-        launchFailureBinding &&
-        record.context === "catch" &&
-        record.bindingStack.includes(launchFailureBinding.id)
+      record.revealMethodName !== null &&
+      !isAllowedDesktopStartupRevealRecord(
+        record,
+        launchFailureBinding,
+        firstLoadUrlCall,
+        sourceFile
       )
   );
   if (unexpectedRevealCalls.length > 0) {
@@ -2933,6 +3149,22 @@ function collectDesktopRevealOrderingFailures(sourceFile) {
   }
 
   return failures;
+}
+
+function isAllowedDesktopStartupRevealRecord(record, launchFailureBinding, firstLoadUrlCall, sourceFile) {
+  if (
+    launchFailureBinding &&
+    record.context === "catch" &&
+    record.bindingStack.includes(launchFailureBinding.id)
+  ) {
+    return true;
+  }
+
+  return (
+    record.revealMethodName === "maximize" &&
+    record.context === "createWindow" &&
+    record.call.getStart(sourceFile) < firstLoadUrlCall.getStart(sourceFile)
+  );
 }
 
 function buildStartupValidatorAnalysis(sourceFile) {
@@ -3197,7 +3429,7 @@ function visitExecutedNode(
       resolvedBinding,
       context,
       bindingStack: [...activeBindings],
-      isShow: isPropertyAccessCall(node, "show")
+      revealMethodName: desktopRevealMethodName(node)
     };
     execution.callRecords.push(callRecord);
 
@@ -3551,6 +3783,32 @@ function matchEventRegistration(call) {
 
 function calledFunctionName(call) {
   return callableExpressionName(call.expression);
+}
+
+function desktopRevealMethodName(call) {
+  const memberName = staticMemberAccessName(call.expression);
+  return memberName && isDesktopRevealMethodName(memberName) ? memberName : null;
+}
+
+function isDesktopRevealMethodName(name) {
+  return name === "show" || name === "showInactive" || name === "maximize";
+}
+
+function staticMemberAccessName(expression) {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+
+  if (ts.isPropertyAccessExpression(current)) {
+    return current.name.text;
+  }
+
+  if (ts.isElementAccessExpression(current)) {
+    return staticElementAccessKey(current.argumentExpression);
+  }
+
+  return null;
 }
 
 function isPropertyAccessCall(call, propertyName) {
