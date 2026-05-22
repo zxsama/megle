@@ -49,7 +49,11 @@ export async function notifyDesktopShellReady(): Promise<boolean> {
   }
   desktopShellReadyNotified = true;
   try {
-    return await notifyShellReady();
+    const didNotify = await notifyShellReady();
+    if (!didNotify) {
+      desktopShellReadyNotified = false;
+    }
+    return didNotify;
   } catch {
     desktopShellReadyNotified = false;
     return false;

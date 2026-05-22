@@ -26,7 +26,9 @@ let persistDebounceTimer: NodeJS.Timeout | null = null;
 let mainWindowReadyToShow: Promise<void> | null = null;
 let shellReadyRevealPromise: Promise<boolean> | null = null;
 let shellReadyVisibleWindowId: number | null = null;
+let shellReadyFailureFallbackTimer: NodeJS.Timeout | null = null;
 const PERSIST_DEBOUNCE_MS = 500;
+const SHELL_READY_FAILURE_TIMEOUT_MS = 4000;
 
 interface WindowState {
   width: number;
@@ -182,25 +184,42 @@ async function createWindow(): Promise<void> {
       ]
     }
   });
-  mainWindow.setBackgroundMaterial("none");
-  mainWindow.setOpacity(0);
+  const window = mainWindow;
+  window.setBackgroundMaterial("none");
+  window.setOpacity(0);
   shellReadyVisibleWindowId = null;
   shellReadyRevealPromise = null;
+  clearShellReadyFailureFallback();
   mainWindowReadyToShow = new Promise<void>((resolve) => {
-    mainWindow?.once("ready-to-show", () => resolve());
+    window.once("ready-to-show", () => {
+      armShellReadyFailureFallback(window);
+      resolve();
+    });
   });
 
   if (state.maximized) {
-    mainWindow.maximize();
+    window.maximize();
   }
+
+  window.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, _errorDescription, _validatedUrl, isMainFrame) => {
+      if (!isMainFrame) return;
+      void revealMainWindowForLaunchFailure(window, `did-fail-load:${errorCode}`);
+    }
+  );
+  window.webContents.on("render-process-gone", (_event, details) => {
+    void revealMainWindowForLaunchFailure(window, `render-process-gone:${details.reason}`);
+  });
 
   // Persist on move/resize so a forced shutdown loses at most
   // PERSIST_DEBOUNCE_MS of window state. The `before-quit` handler still
   // writes synchronously so a clean exit always flushes the latest bounds.
-  mainWindow.on("move", schedulePersistWindowState);
-  mainWindow.on("resize", schedulePersistWindowState);
+  window.on("move", schedulePersistWindowState);
+  window.on("resize", schedulePersistWindowState);
 
-  mainWindow.on("closed", () => {
+  window.on("closed", () => {
+    clearShellReadyFailureFallback();
     mainWindowReadyToShow = null;
     shellReadyRevealPromise = null;
     shellReadyVisibleWindowId = null;
@@ -208,7 +227,7 @@ async function createWindow(): Promise<void> {
   });
 
   const devServer = process.env.MEGLE_WEB_URL ?? "http://127.0.0.1:5173";
-  await mainWindow.loadURL(devServer);
+  await window.loadURL(devServer);
 }
 
 async function ensureCoreReady(): Promise<CoreSession> {
@@ -264,14 +283,38 @@ async function waitForRendererFrame(window: BrowserWindow) {
   }
 }
 
-async function revealMainWindowForShellReady(window: BrowserWindow): Promise<boolean> {
-  await (mainWindowReadyToShow ?? Promise.resolve());
+function clearShellReadyFailureFallback() {
+  if (!shellReadyFailureFallbackTimer) {
+    return;
+  }
+  clearTimeout(shellReadyFailureFallbackTimer);
+  shellReadyFailureFallbackTimer = null;
+}
+
+function armShellReadyFailureFallback(window: BrowserWindow) {
+  clearShellReadyFailureFallback();
+  shellReadyFailureFallbackTimer = setTimeout(() => {
+    shellReadyFailureFallbackTimer = null;
+    void revealMainWindowForLaunchFailure(window, "shell-ready-timeout");
+  }, SHELL_READY_FAILURE_TIMEOUT_MS);
+}
+
+async function revealMainWindow(
+  window: BrowserWindow,
+  { waitForRendererPaint = false }: { waitForRendererPaint?: boolean } = {}
+): Promise<boolean> {
+  clearShellReadyFailureFallback();
   if (window.isDestroyed()) {
     return false;
   }
+  if (shellReadyVisibleWindowId === window.id) {
+    return true;
+  }
   window.show();
-  await waitForRendererFrame(window);
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  if (waitForRendererPaint) {
+    await waitForRendererFrame(window);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
   if (window.isDestroyed()) {
     return false;
   }
@@ -279,6 +322,19 @@ async function revealMainWindowForShellReady(window: BrowserWindow): Promise<boo
   window.focus();
   shellReadyVisibleWindowId = window.id;
   return true;
+}
+
+async function revealMainWindowForShellReady(window: BrowserWindow): Promise<boolean> {
+  await (mainWindowReadyToShow ?? Promise.resolve());
+  return revealMainWindow(window, { waitForRendererPaint: true });
+}
+
+async function revealMainWindowForLaunchFailure(
+  window: BrowserWindow,
+  reason: string
+): Promise<boolean> {
+  console.warn(`[megle] revealing window after renderer startup failure: ${reason}`);
+  return revealMainWindow(window);
 }
 
 function windowStatePath(): string {

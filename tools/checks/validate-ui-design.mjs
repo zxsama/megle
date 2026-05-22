@@ -91,6 +91,18 @@ if (!/ready-to-show/.test(desktopMain)) {
   fail("desktop window must wait for ready-to-show before becoming visible");
 }
 
+for (const value of [
+  "SHELL_READY_FAILURE_TIMEOUT_MS",
+  "armShellReadyFailureFallback",
+  "revealMainWindowForLaunchFailure",
+  '"did-fail-load"',
+  '"render-process-gone"'
+]) {
+  if (!desktopMain.includes(value)) {
+    fail(`desktop startup must surface renderer bootstrap failures instead of staying permanently invisible: missing ${value}`);
+  }
+}
+
 for (const [source, value, message] of [
   [desktopMain, 'ipcMain.handle("megle:shell-ready"', "desktop main must expose a megle:shell-ready IPC handshake before the window can become visible"],
   [preload, "notifyShellReady", "desktop preload must own the notifyShellReady bridge surface"],
@@ -103,11 +115,45 @@ for (const [source, value, message] of [
 }
 
 const createWindowBody = extractFunctionBody(desktopMain, "createWindow");
+const readyToShowSnippets = extractPatternSnippets(createWindowBody, '"ready-to-show"', 400);
+const showFunctionNames = extractNamedFunctionBodies(desktopMain)
+  .filter(({ name, body }) => name !== "createWindow" && /\.show\(/.test(body))
+  .map(({ name }) => name);
+const postLoadUrlSegment = extractPostLoadUrlSegment(createWindowBody);
+
+if (/\.show\(/.test(createWindowBody)) {
+  fail("desktop window show timing must not run directly inside createWindow; visible reveal must be gated by shell-ready or launch-failure handlers");
+}
+
 if (
-  createWindowBody &&
-  /await\s+readyToShow[\s\S]{0,240}(?:mainWindow|window)\.show\(\)/.test(createWindowBody)
+  postLoadUrlSegment &&
+  (bodyCallsNamedFunctions(postLoadUrlSegment, showFunctionNames) || /\.show\(/.test(postLoadUrlSegment))
 ) {
-  fail("desktop window show timing must not run directly after ready-to-show; visible reveal must be gated by the renderer shell-ready handshake");
+  fail("desktop window show timing must not return to createWindow after loadURL through a renamed helper or direct show()");
+}
+
+if (
+  !readyToShowSnippets.some((snippet) => snippet.includes("armShellReadyFailureFallback"))
+) {
+  fail("desktop startup must arm a bounded shell-ready failure fallback from the ready-to-show path");
+}
+
+if (
+  readyToShowSnippets.some(
+    (snippet) => /\.show\(/.test(snippet) || bodyCallsNamedFunctions(snippet, showFunctionNames)
+  )
+) {
+  fail("ready-to-show handlers must not reveal the desktop window directly or through a helper");
+}
+
+const failureSignalSnippets = [
+  ...extractPatternSnippets(createWindowBody, '"did-fail-load"', 320),
+  ...extractPatternSnippets(createWindowBody, '"render-process-gone"', 320)
+];
+if (
+  !failureSignalSnippets.some((snippet) => snippet.includes("revealMainWindowForLaunchFailure"))
+) {
+  fail("desktop startup failure handlers must reveal the window so renderer bootstrap failures become visible");
 }
 
 if (!/Content-Security-Policy/.test(webIndex) || /unsafe-eval/.test(webIndex)) {
@@ -2318,6 +2364,51 @@ function extractFunctionBody(source, functionName) {
   }
 
   return source.slice(bodyStart + 1, bodyEnd);
+}
+
+function extractNamedFunctionBodies(source) {
+  const functions = [];
+  const pattern = /function\s+([A-Za-z_$][\w$]*)\s*\(/g;
+  let match;
+
+  while ((match = pattern.exec(source)) !== null) {
+    functions.push({
+      name: match[1],
+      body: extractFunctionBody(source, match[1])
+    });
+  }
+
+  return functions;
+}
+
+function extractPatternSnippets(source, pattern, length) {
+  const snippets = [];
+  let searchIndex = 0;
+
+  while (searchIndex < source.length) {
+    const matchIndex = source.indexOf(pattern, searchIndex);
+    if (matchIndex === -1) {
+      break;
+    }
+    snippets.push(source.slice(matchIndex, matchIndex + length));
+    searchIndex = matchIndex + pattern.length;
+  }
+
+  return snippets;
+}
+
+function extractPostLoadUrlSegment(source) {
+  const loadUrlMatch = /await\s+\w+\.loadURL\([^)]*\);?/.exec(source);
+  if (!loadUrlMatch || loadUrlMatch.index === undefined) {
+    return "";
+  }
+  return source.slice(loadUrlMatch.index + loadUrlMatch[0].length);
+}
+
+function bodyCallsNamedFunctions(source, functionNames) {
+  return functionNames.some((functionName) =>
+    new RegExp(`\\b${escapeRegExp(functionName)}\\s*\\(`).test(source)
+  );
 }
 
 function extractFirstRequiredFunctionBody(source, functionNames, contractName) {

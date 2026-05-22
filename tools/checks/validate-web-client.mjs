@@ -100,6 +100,14 @@ for (const value of ["notifyShellReady", "notifyDesktopShellReady"]) {
   }
 }
 
+if (
+  !/const\s+didNotify\s*=\s*await\s+notifyShellReady\(\)[\s\S]*?if\s*\(!didNotify\)\s*\{\s*desktopShellReadyNotified\s*=\s*false;?\s*\}[\s\S]*?return\s+didNotify/.test(
+    desktopAdapter
+  )
+) {
+  fail("notifyDesktopShellReady must reset its latch when notifyShellReady resolves false so later calls can retry");
+}
+
 if (!mediaGrid.includes("@tanstack/react-virtual") || !mediaGrid.includes("useVirtualizer")) {
   fail("MediaGrid must use @tanstack/react-virtual for scalable media layout");
 }
