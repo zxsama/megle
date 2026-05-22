@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import ts from "typescript";
 import { inspectNativeBrowserWindowOptions } from "./native-browser-window-options.mjs";
 
 const root = process.cwd();
@@ -62,6 +63,13 @@ const taskPanel = read("apps/web/src/features/tasks/TaskPanel.tsx");
 const contextMenu = read("apps/web/src/features/file-ops/ContextMenu.tsx");
 const desktopBridge = read("apps/web/src/core/desktop.ts");
 const libraryFilterSources = libraryView + "\n" + (filterMenu ?? "");
+const desktopMainAst = ts.createSourceFile(
+  "apps/desktop/src/main.ts",
+  desktopMain,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TS
+);
 
 const nativeMaterial = inspectNativeBrowserWindowOptions(desktopMain);
 if (!nativeMaterial.browserWindowOptionsFound) {
@@ -114,47 +122,7 @@ for (const [source, value, message] of [
   }
 }
 
-const createWindowBody = extractFunctionBody(desktopMain, "createWindow");
-const readyToShowSnippets = extractPatternSnippets(createWindowBody, '"ready-to-show"', 400);
-const showFunctionNames = extractNamedFunctionBodies(desktopMain)
-  .filter(({ name, body }) => name !== "createWindow" && /\.show\(/.test(body))
-  .map(({ name }) => name);
-const postLoadUrlSegment = extractPostLoadUrlSegment(createWindowBody);
-
-if (/\.show\(/.test(createWindowBody)) {
-  fail("desktop window show timing must not run directly inside createWindow; visible reveal must be gated by shell-ready or launch-failure handlers");
-}
-
-if (
-  postLoadUrlSegment &&
-  (bodyCallsNamedFunctions(postLoadUrlSegment, showFunctionNames) || /\.show\(/.test(postLoadUrlSegment))
-) {
-  fail("desktop window show timing must not return to createWindow after loadURL through a renamed helper or direct show()");
-}
-
-if (
-  !readyToShowSnippets.some((snippet) => snippet.includes("armShellReadyFailureFallback"))
-) {
-  fail("desktop startup must arm a bounded shell-ready failure fallback from the ready-to-show path");
-}
-
-if (
-  readyToShowSnippets.some(
-    (snippet) => /\.show\(/.test(snippet) || bodyCallsNamedFunctions(snippet, showFunctionNames)
-  )
-) {
-  fail("ready-to-show handlers must not reveal the desktop window directly or through a helper");
-}
-
-const failureSignalSnippets = [
-  ...extractPatternSnippets(createWindowBody, '"did-fail-load"', 320),
-  ...extractPatternSnippets(createWindowBody, '"render-process-gone"', 320)
-];
-if (
-  !failureSignalSnippets.some((snippet) => snippet.includes("revealMainWindowForLaunchFailure"))
-) {
-  fail("desktop startup failure handlers must reveal the window so renderer bootstrap failures become visible");
-}
+assertDesktopRevealOrderingContract();
 
 if (!/Content-Security-Policy/.test(webIndex) || /unsafe-eval/.test(webIndex)) {
   fail("web index must declare a CSP without unsafe-eval so Electron startup does not emit CSP security warnings");
@@ -2366,49 +2334,280 @@ function extractFunctionBody(source, functionName) {
   return source.slice(bodyStart + 1, bodyEnd);
 }
 
-function extractNamedFunctionBodies(source) {
-  const functions = [];
-  const pattern = /function\s+([A-Za-z_$][\w$]*)\s*\(/g;
-  let match;
-
-  while ((match = pattern.exec(source)) !== null) {
-    functions.push({
-      name: match[1],
-      body: extractFunctionBody(source, match[1])
-    });
+function assertDesktopRevealOrderingContract() {
+  const namedFunctions = collectNamedFunctionData(desktopMainAst);
+  const createWindowData = namedFunctions.get("createWindow");
+  if (!createWindowData) {
+    fail("desktop startup contract missing createWindow");
+    return;
   }
 
+  const revealFunctionNames = collectRevealFunctionNames(namedFunctions);
+  const createWindowNode = createWindowData.node;
+  const parentMap = buildParentMap(createWindowNode);
+  const loadUrlCalls = collectCallExpressions(createWindowNode, (call) =>
+    isPropertyAccessCall(call, "loadURL")
+  );
+  const armCalls = collectCallExpressions(createWindowNode, (call) =>
+    calledFunctionName(call) === "armShellReadyFailureFallback"
+  );
+  const readyToShowHandlers = collectEventHandlers(createWindowNode, "ready-to-show");
+  const didFailLoadHandlers = collectEventHandlers(createWindowNode, "did-fail-load");
+  const renderProcessGoneHandlers = collectEventHandlers(createWindowNode, "render-process-gone");
+  const directShowCalls = collectCallExpressions(createWindowNode, (call) =>
+    isPropertyAccessCall(call, "show")
+  );
+
+  if (loadUrlCalls.length === 0) {
+    fail("desktop startup contract missing loadURL inside createWindow");
+    return;
+  }
+
+  if (directShowCalls.length > 0) {
+    fail("desktop window show timing must not run directly inside createWindow or its nested handlers");
+  }
+
+  const firstLoadUrlCall = loadUrlCalls[0];
+  const absoluteFallbackCall = armCalls.find(
+    (call) =>
+      getCreateWindowCallContext(call, parentMap) === "createWindow" &&
+      call.getStart(desktopMainAst) < firstLoadUrlCall.getStart(desktopMainAst)
+  );
+  if (!absoluteFallbackCall) {
+    fail("desktop startup must arm an absolute shell-ready failure fallback before loadURL begins navigation");
+  }
+
+  if (
+    !readyToShowHandlers.some((handler) =>
+      callbackContainsCall(handler.callback, "armShellReadyFailureFallback")
+    )
+  ) {
+    fail("desktop startup must re-arm a bounded shell-ready failure fallback from the ready-to-show path");
+  }
+
+  if (
+    readyToShowHandlers.some((handler) =>
+      callbackContainsRevealCalls(handler.callback, revealFunctionNames)
+    )
+  ) {
+    fail("ready-to-show handlers must not reveal the desktop window directly or through a helper");
+  }
+
+  if (
+    !didFailLoadHandlers.some((handler) =>
+      callbackContainsCall(handler.callback, "revealMainWindowForLaunchFailure")
+    )
+  ) {
+    fail("desktop startup failure handlers must reveal the window on did-fail-load");
+  }
+
+  if (
+    !renderProcessGoneHandlers.some((handler) =>
+      callbackContainsCall(handler.callback, "revealMainWindowForLaunchFailure")
+    )
+  ) {
+    fail("desktop startup failure handlers must reveal the window on render-process-gone");
+  }
+
+  const unexpectedRevealCalls = collectCallExpressions(createWindowNode, (call) => {
+    const name = calledFunctionName(call);
+    if (!name || !revealFunctionNames.has(name)) {
+      return false;
+    }
+    const context = getCreateWindowCallContext(call, parentMap);
+    return !(
+      name === "revealMainWindowForLaunchFailure" &&
+      (context === "event:did-fail-load" ||
+        context === "event:render-process-gone" ||
+        context === "catch")
+    );
+  });
+  if (unexpectedRevealCalls.length > 0) {
+    fail("desktop window reveal helpers must stay confined to shell-ready and explicit launch-failure paths");
+  }
+}
+
+function collectNamedFunctionData(sourceFile) {
+  const functions = new Map();
+
+  function visit(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text) {
+      const directCallees = new Set();
+      let callsShow = false;
+
+      function walkDirectFunctionBody(body) {
+        if (!body) {
+          return;
+        }
+
+        ts.forEachChild(body, function walk(child) {
+          if (ts.isFunctionLike(child)) {
+            return;
+          }
+          if (ts.isCallExpression(child)) {
+            const calleeName = calledFunctionName(child);
+            if (calleeName) {
+              directCallees.add(calleeName);
+            }
+            if (isPropertyAccessCall(child, "show")) {
+              callsShow = true;
+            }
+          }
+          ts.forEachChild(child, walk);
+        });
+      }
+
+      walkDirectFunctionBody(node.body);
+
+      functions.set(node.name.text, {
+        node,
+        directCallees,
+        callsShow
+      });
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
   return functions;
 }
 
-function extractPatternSnippets(source, pattern, length) {
-  const snippets = [];
-  let searchIndex = 0;
-
-  while (searchIndex < source.length) {
-    const matchIndex = source.indexOf(pattern, searchIndex);
-    if (matchIndex === -1) {
-      break;
-    }
-    snippets.push(source.slice(matchIndex, matchIndex + length));
-    searchIndex = matchIndex + pattern.length;
-  }
-
-  return snippets;
-}
-
-function extractPostLoadUrlSegment(source) {
-  const loadUrlMatch = /await\s+\w+\.loadURL\([^)]*\);?/.exec(source);
-  if (!loadUrlMatch || loadUrlMatch.index === undefined) {
-    return "";
-  }
-  return source.slice(loadUrlMatch.index + loadUrlMatch[0].length);
-}
-
-function bodyCallsNamedFunctions(source, functionNames) {
-  return functionNames.some((functionName) =>
-    new RegExp(`\\b${escapeRegExp(functionName)}\\s*\\(`).test(source)
+function collectRevealFunctionNames(namedFunctions) {
+  const revealFunctionNames = new Set(
+    [...namedFunctions.entries()]
+      .filter(([, data]) => data.callsShow)
+      .map(([name]) => name)
   );
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [name, data] of namedFunctions.entries()) {
+      if (revealFunctionNames.has(name)) {
+        continue;
+      }
+      if ([...data.directCallees].some((callee) => revealFunctionNames.has(callee))) {
+        revealFunctionNames.add(name);
+        changed = true;
+      }
+    }
+  }
+
+  return revealFunctionNames;
+}
+
+function collectCallExpressions(node, predicate) {
+  const matches = [];
+
+  function visit(current) {
+    if (ts.isCallExpression(current) && predicate(current)) {
+      matches.push(current);
+    }
+    ts.forEachChild(current, visit);
+  }
+
+  visit(node);
+  return matches;
+}
+
+function collectEventHandlers(node, eventName) {
+  return collectCallExpressions(
+    node,
+    (call) => matchEventRegistration(call)?.eventName === eventName
+  ).flatMap((call) => {
+    const registration = matchEventRegistration(call);
+    return registration ? [{ call, callback: registration.callback }] : [];
+  });
+}
+
+function callbackContainsCall(callback, functionName) {
+  return collectCallExpressions(callback.body, (call) => calledFunctionName(call) === functionName)
+    .length > 0;
+}
+
+function callbackContainsRevealCalls(callback, revealFunctionNames) {
+  return collectCallExpressions(callback.body, (call) => {
+    const name = calledFunctionName(call);
+    return Boolean(name && revealFunctionNames.has(name));
+  }).length > 0;
+}
+
+function buildParentMap(node) {
+  const parentMap = new Map();
+
+  function visit(current) {
+    ts.forEachChild(current, (child) => {
+      parentMap.set(child, current);
+      visit(child);
+    });
+  }
+
+  visit(node);
+  return parentMap;
+}
+
+function getCreateWindowCallContext(call, parentMap) {
+  let current = call;
+
+  while (current) {
+    if (ts.isCatchClause(current)) {
+      return "catch";
+    }
+
+    if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+      const parent = parentMap.get(current);
+      if (parent && ts.isCallExpression(parent)) {
+        const registration = matchEventRegistration(parent);
+        if (registration?.callback === current) {
+          return `event:${registration.eventName}`;
+        }
+      }
+    }
+
+    current = parentMap.get(current);
+  }
+
+  return "createWindow";
+}
+
+function matchEventRegistration(call) {
+  if (
+    !ts.isPropertyAccessExpression(call.expression) ||
+    (call.expression.name.text !== "on" && call.expression.name.text !== "once")
+  ) {
+    return null;
+  }
+
+  const [eventArg, callbackArg] = call.arguments;
+  if (!eventArg || !ts.isStringLiteral(eventArg)) {
+    return null;
+  }
+  if (
+    !callbackArg ||
+    (!ts.isArrowFunction(callbackArg) && !ts.isFunctionExpression(callbackArg))
+  ) {
+    return null;
+  }
+
+  return {
+    eventName: eventArg.text,
+    callback: callbackArg
+  };
+}
+
+function calledFunctionName(call) {
+  if (ts.isIdentifier(call.expression)) {
+    return call.expression.text;
+  }
+  if (ts.isPropertyAccessExpression(call.expression)) {
+    return call.expression.name.text;
+  }
+  return null;
+}
+
+function isPropertyAccessCall(call, propertyName) {
+  return ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === propertyName;
 }
 
 function extractFirstRequiredFunctionBody(source, functionNames, contractName) {

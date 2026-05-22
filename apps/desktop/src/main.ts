@@ -227,7 +227,13 @@ async function createWindow(): Promise<void> {
   });
 
   const devServer = process.env.MEGLE_WEB_URL ?? "http://127.0.0.1:5173";
-  await window.loadURL(devServer);
+  armShellReadyFailureFallback(window);
+  try {
+    await window.loadURL(devServer);
+  } catch (error) {
+    await revealMainWindowForLaunchFailure(window, "loadURL-rejected");
+    console.warn("[megle] desktop renderer loadURL rejected:", error);
+  }
 }
 
 async function ensureCoreReady(): Promise<CoreSession> {
@@ -292,6 +298,9 @@ function clearShellReadyFailureFallback() {
 }
 
 function armShellReadyFailureFallback(window: BrowserWindow) {
+  if (window.isDestroyed() || shellReadyVisibleWindowId === window.id) {
+    return;
+  }
   clearShellReadyFailureFallback();
   shellReadyFailureFallbackTimer = setTimeout(() => {
     shellReadyFailureFallbackTimer = null;
@@ -333,8 +342,15 @@ async function revealMainWindowForLaunchFailure(
   window: BrowserWindow,
   reason: string
 ): Promise<boolean> {
-  console.warn(`[megle] revealing window after renderer startup failure: ${reason}`);
-  return revealMainWindow(window);
+  if (window.isDestroyed() || shellReadyVisibleWindowId === window.id) {
+    clearShellReadyFailureFallback();
+    return !window.isDestroyed();
+  }
+  const didReveal = await revealMainWindow(window);
+  if (didReveal) {
+    console.warn(`[megle] revealing window after renderer startup failure: ${reason}`);
+  }
+  return didReveal;
 }
 
 function windowStatePath(): string {
