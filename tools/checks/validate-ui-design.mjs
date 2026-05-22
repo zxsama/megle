@@ -123,6 +123,7 @@ for (const [source, value, message] of [
 }
 
 assertDesktopRevealOrderingContract();
+assertDesktopRevealOrderingRegressionProbe();
 
 if (!/Content-Security-Policy/.test(webIndex) || /unsafe-eval/.test(webIndex)) {
   fail("web index must declare a CSP without unsafe-eval so Electron startup does not emit CSP security warnings");
@@ -2335,96 +2336,178 @@ function extractFunctionBody(source, functionName) {
 }
 
 function assertDesktopRevealOrderingContract() {
-  const namedFunctions = collectNamedFunctionData(desktopMainAst);
-  const createWindowData = namedFunctions.get("createWindow");
-  if (!createWindowData) {
-    fail("desktop startup contract missing createWindow");
-    return;
+  for (const message of collectDesktopRevealOrderingFailures(desktopMainAst)) {
+    fail(message);
+  }
+}
+
+function assertDesktopRevealOrderingRegressionProbe() {
+  const wrapperFallbackProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      const armFallback = () => armShellReadyFailureFallback(window);
+      armFallback();
+      window.once("ready-to-show", () => {
+        const rearmFallback = () => armShellReadyFailureFallback(window);
+        rearmFallback();
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const wrapperFallbackFailures = collectDesktopRevealOrderingFailures(wrapperFallbackProbe);
+  if (wrapperFallbackFailures.length > 0) {
+    fail("desktop reveal-order validator must treat const/arrow fallback wrappers as valid reachability paths");
   }
 
-  const revealFunctionNames = collectRevealFunctionNames(namedFunctions);
+  const wrapperRevealProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      armShellReadyFailureFallback(window);
+      window.once("ready-to-show", () => {
+        const revealLater = () => window.show();
+        revealLater();
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const wrapperRevealFailures = collectDesktopRevealOrderingFailures(wrapperRevealProbe);
+  if (
+    !wrapperRevealFailures.includes(
+      "ready-to-show handlers must not reveal the desktop window directly or through a helper"
+    )
+  ) {
+    fail("desktop reveal-order validator must catch const/arrow reveal wrappers inside ready-to-show");
+  }
+}
+
+function createSourceFileForDesktopRevealProbe(source) {
+  return ts.createSourceFile(
+    "desktop-reveal-probe.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+}
+
+function collectDesktopRevealOrderingFailures(sourceFile) {
+  const failures = [];
+  const namedFunctions = collectNamedFunctionData(sourceFile);
+  const createWindowData = namedFunctions.get("createWindow");
+  if (!createWindowData) {
+    return ["desktop startup contract missing createWindow"];
+  }
+
+  const revealFunctionNames = collectTransitiveHelperNames(namedFunctions, {
+    seedNames: ["revealMainWindowForLaunchFailure", "revealMainWindowForShellReady", "revealMainWindow"],
+    predicate: (data) => data.callsShow
+  });
+  const fallbackArmFunctionNames = collectTransitiveHelperNames(namedFunctions, {
+    seedNames: ["armShellReadyFailureFallback"]
+  });
+  const launchFailureFunctionNames = collectTransitiveHelperNames(namedFunctions, {
+    seedNames: ["revealMainWindowForLaunchFailure"]
+  });
   const createWindowNode = createWindowData.node;
   const parentMap = buildParentMap(createWindowNode);
-  const loadUrlCalls = collectCallExpressions(createWindowNode, (call) =>
+  const createWindowExecution = collectExecutionData(createWindowNode.body);
+  const loadUrlCalls = createWindowExecution.callExpressions.filter((call) =>
     isPropertyAccessCall(call, "loadURL")
-  );
-  const armCalls = collectCallExpressions(createWindowNode, (call) =>
-    calledFunctionName(call) === "armShellReadyFailureFallback"
   );
   const readyToShowHandlers = collectEventHandlers(createWindowNode, "ready-to-show");
   const didFailLoadHandlers = collectEventHandlers(createWindowNode, "did-fail-load");
   const renderProcessGoneHandlers = collectEventHandlers(createWindowNode, "render-process-gone");
-  const directShowCalls = collectCallExpressions(createWindowNode, (call) =>
-    isPropertyAccessCall(call, "show")
-  );
 
   if (loadUrlCalls.length === 0) {
-    fail("desktop startup contract missing loadURL inside createWindow");
-    return;
+    return ["desktop startup contract missing loadURL inside createWindow"];
   }
 
-  if (directShowCalls.length > 0) {
-    fail("desktop window show timing must not run directly inside createWindow or its nested handlers");
+  if (createWindowExecution.callsShow) {
+    failures.push("desktop window show timing must not run directly inside createWindow or its nested handlers");
   }
 
   const firstLoadUrlCall = loadUrlCalls[0];
-  const absoluteFallbackCall = armCalls.find(
+  const absoluteFallbackCall = createWindowExecution.callExpressions.find(
     (call) =>
+      callsAnyHelper(call, fallbackArmFunctionNames) &&
       getCreateWindowCallContext(call, parentMap) === "createWindow" &&
-      call.getStart(desktopMainAst) < firstLoadUrlCall.getStart(desktopMainAst)
+      call.getStart(sourceFile) < firstLoadUrlCall.getStart(sourceFile)
   );
   if (!absoluteFallbackCall) {
-    fail("desktop startup must arm an absolute shell-ready failure fallback before loadURL begins navigation");
+    failures.push("desktop startup must arm an absolute shell-ready failure fallback before loadURL begins navigation");
   }
 
   if (
     !readyToShowHandlers.some((handler) =>
-      callbackContainsCall(handler.callback, "armShellReadyFailureFallback")
+      callbackContainsHelperCall(handler.callback, fallbackArmFunctionNames)
     )
   ) {
-    fail("desktop startup must re-arm a bounded shell-ready failure fallback from the ready-to-show path");
+    failures.push("desktop startup must re-arm a bounded shell-ready failure fallback from the ready-to-show path");
   }
 
   if (
     readyToShowHandlers.some((handler) =>
-      callbackContainsRevealCalls(handler.callback, revealFunctionNames)
+      callbackContainsHelperCall(handler.callback, revealFunctionNames)
     )
   ) {
-    fail("ready-to-show handlers must not reveal the desktop window directly or through a helper");
+    failures.push("ready-to-show handlers must not reveal the desktop window directly or through a helper");
   }
 
   if (
     !didFailLoadHandlers.some((handler) =>
-      callbackContainsCall(handler.callback, "revealMainWindowForLaunchFailure")
+      callbackContainsHelperCall(handler.callback, launchFailureFunctionNames)
     )
   ) {
-    fail("desktop startup failure handlers must reveal the window on did-fail-load");
+    failures.push("desktop startup failure handlers must reveal the window on did-fail-load");
   }
 
   if (
     !renderProcessGoneHandlers.some((handler) =>
-      callbackContainsCall(handler.callback, "revealMainWindowForLaunchFailure")
+      callbackContainsHelperCall(handler.callback, launchFailureFunctionNames)
     )
   ) {
-    fail("desktop startup failure handlers must reveal the window on render-process-gone");
+    failures.push("desktop startup failure handlers must reveal the window on render-process-gone");
   }
 
-  const unexpectedRevealCalls = collectCallExpressions(createWindowNode, (call) => {
-    const name = calledFunctionName(call);
-    if (!name || !revealFunctionNames.has(name)) {
-      return false;
-    }
-    const context = getCreateWindowCallContext(call, parentMap);
-    return !(
-      name === "revealMainWindowForLaunchFailure" &&
-      (context === "event:did-fail-load" ||
-        context === "event:render-process-gone" ||
-        context === "catch")
-    );
-  });
+  const unexpectedRevealCalls = collectReachableHelperCalls(createWindowNode.body, revealFunctionNames)
+    .filter((call) => {
+      const context = getCreateWindowCallContext(call, parentMap);
+      return !(
+        callsAnyHelper(call, launchFailureFunctionNames) &&
+        (context === "event:did-fail-load" ||
+          context === "event:render-process-gone" ||
+          context === "catch")
+      );
+    });
   if (unexpectedRevealCalls.length > 0) {
-    fail("desktop window reveal helpers must stay confined to shell-ready and explicit launch-failure paths");
+    failures.push("desktop window reveal helpers must stay confined to shell-ready and explicit launch-failure paths");
   }
+
+  return failures;
 }
 
 function collectNamedFunctionData(sourceFile) {
@@ -2432,38 +2515,17 @@ function collectNamedFunctionData(sourceFile) {
 
   function visit(node) {
     if (ts.isFunctionDeclaration(node) && node.name?.text) {
-      const directCallees = new Set();
-      let callsShow = false;
-
-      function walkDirectFunctionBody(body) {
-        if (!body) {
-          return;
-        }
-
-        ts.forEachChild(body, function walk(child) {
-          if (ts.isFunctionLike(child)) {
-            return;
-          }
-          if (ts.isCallExpression(child)) {
-            const calleeName = calledFunctionName(child);
-            if (calleeName) {
-              directCallees.add(calleeName);
-            }
-            if (isPropertyAccessCall(child, "show")) {
-              callsShow = true;
-            }
-          }
-          ts.forEachChild(child, walk);
-        });
-      }
-
-      walkDirectFunctionBody(node.body);
-
-      functions.set(node.name.text, {
-        node,
-        directCallees,
-        callsShow
-      });
+      functions.set(node.name.text, createNamedFunctionData(node.name.text, node, node.body));
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+    ) {
+      functions.set(
+        node.name.text,
+        createNamedFunctionData(node.name.text, node.initializer, node.initializer.body)
+      );
     }
 
     ts.forEachChild(node, visit);
@@ -2473,28 +2535,100 @@ function collectNamedFunctionData(sourceFile) {
   return functions;
 }
 
-function collectRevealFunctionNames(namedFunctions) {
-  const revealFunctionNames = new Set(
-    [...namedFunctions.entries()]
-      .filter(([, data]) => data.callsShow)
-      .map(([name]) => name)
-  );
+function createNamedFunctionData(name, node, body) {
+  const execution = collectExecutionData(body);
+  return {
+    name,
+    node,
+    directCallees: execution.calledNames,
+    callsShow: execution.callsShow
+  };
+}
+
+function collectTransitiveHelperNames(namedFunctions, { seedNames = [], predicate } = {}) {
+  const helperNames = new Set(seedNames);
+
+  if (predicate) {
+    for (const [name, data] of namedFunctions.entries()) {
+      if (predicate(data)) {
+        helperNames.add(name);
+      }
+    }
+  }
 
   let changed = true;
   while (changed) {
     changed = false;
     for (const [name, data] of namedFunctions.entries()) {
-      if (revealFunctionNames.has(name)) {
+      if (helperNames.has(name)) {
         continue;
       }
-      if ([...data.directCallees].some((callee) => revealFunctionNames.has(callee))) {
-        revealFunctionNames.add(name);
+      if ([...data.directCallees].some((callee) => helperNames.has(callee))) {
+        helperNames.add(name);
         changed = true;
       }
     }
   }
 
-  return revealFunctionNames;
+  return helperNames;
+}
+
+function collectExecutionData(body) {
+  const calledNames = new Set();
+  const callExpressions = [];
+  let callsShow = false;
+
+  if (!body) {
+    return { calledNames, callExpressions, callsShow };
+  }
+
+  function visit(current) {
+    if (ts.isFunctionLike(current)) {
+      return;
+    }
+    if (ts.isCallExpression(current)) {
+      callExpressions.push(current);
+      const calleeName = calledFunctionName(current);
+      if (calleeName) {
+        calledNames.add(calleeName);
+      }
+      if (isPropertyAccessCall(current, "show")) {
+        callsShow = true;
+      }
+    }
+    ts.forEachChild(current, visit);
+  }
+
+  visit(body);
+  return { calledNames, callExpressions, callsShow };
+}
+
+function collectReachableHelperCalls(body, helperNames) {
+  return collectExecutionData(body).callExpressions.filter((call) =>
+    callsAnyHelper(call, helperNames)
+  );
+}
+
+function callsAnyHelper(call, helperNames) {
+  const calleeName = calledFunctionName(call);
+  return Boolean(calleeName && helperNames.has(calleeName));
+}
+
+function collectEventHandlers(node, eventName) {
+  return collectCallExpressions(
+    node,
+    (call) => matchEventRegistration(call)?.eventName === eventName
+  ).flatMap((call) => {
+    const registration = matchEventRegistration(call);
+    return registration ? [{ call, callback: registration.callback }] : [];
+  });
+}
+
+function callbackContainsHelperCall(callback, helperNames) {
+  return (
+    collectReachableHelperCalls(callback.body, helperNames).length > 0 ||
+    collectExecutionData(callback.body).callsShow
+  );
 }
 
 function collectCallExpressions(node, predicate) {
@@ -2509,28 +2643,6 @@ function collectCallExpressions(node, predicate) {
 
   visit(node);
   return matches;
-}
-
-function collectEventHandlers(node, eventName) {
-  return collectCallExpressions(
-    node,
-    (call) => matchEventRegistration(call)?.eventName === eventName
-  ).flatMap((call) => {
-    const registration = matchEventRegistration(call);
-    return registration ? [{ call, callback: registration.callback }] : [];
-  });
-}
-
-function callbackContainsCall(callback, functionName) {
-  return collectCallExpressions(callback.body, (call) => calledFunctionName(call) === functionName)
-    .length > 0;
-}
-
-function callbackContainsRevealCalls(callback, revealFunctionNames) {
-  return collectCallExpressions(callback.body, (call) => {
-    const name = calledFunctionName(call);
-    return Boolean(name && revealFunctionNames.has(name));
-  }).length > 0;
 }
 
 function buildParentMap(node) {
