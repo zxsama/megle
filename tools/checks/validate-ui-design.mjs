@@ -2567,6 +2567,81 @@ function assertDesktopRevealOrderingRegressionProbe() {
   ) {
     fail("desktop reveal-order validator must catch function IIFE reveal wrappers inside ready-to-show");
   }
+
+  const deadNestedHandlerProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      const fakeReadyToShow = () => {
+        window.once("ready-to-show", () => {
+          armShellReadyFailureFallback(window);
+        });
+      };
+      const fakeFailures = () => {
+        window.webContents.on("did-fail-load", () => {
+          revealMainWindowForLaunchFailure(window);
+        });
+        window.webContents.on("render-process-gone", () => {
+          revealMainWindowForLaunchFailure(window);
+        });
+      };
+      void fakeReadyToShow;
+      void fakeFailures;
+      armShellReadyFailureFallback(window);
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const deadNestedHandlerFailures = collectDesktopRevealOrderingFailures(deadNestedHandlerProbe);
+  if (
+    !deadNestedHandlerFailures.includes(
+      "desktop startup must re-arm a bounded shell-ready failure fallback from the ready-to-show path"
+    ) ||
+    !deadNestedHandlerFailures.includes(
+      "desktop startup failure handlers must reveal the window on did-fail-load"
+    ) ||
+    !deadNestedHandlerFailures.includes(
+      "desktop startup failure handlers must reveal the window on render-process-gone"
+    )
+  ) {
+    fail("desktop reveal-order validator must ignore dead nested handler registrations");
+  }
+
+  const bracketRevealProbe = createSourceFileForDesktopRevealProbe(`
+    async function createWindow() {
+      const window = createMockWindow();
+      armShellReadyFailureFallback(window);
+      window.once("ready-to-show", () => {
+        const reveal = { later: () => window.show() };
+        reveal["later"]();
+      });
+      window.webContents.on("did-fail-load", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      window.webContents.on("render-process-gone", () => {
+        revealMainWindowForLaunchFailure(window);
+      });
+      await window.loadURL("http://127.0.0.1:5173");
+    }
+    function armShellReadyFailureFallback(window) {
+      return window;
+    }
+    function revealMainWindowForLaunchFailure(window) {
+      window.show();
+    }
+  `);
+  const bracketRevealFailures = collectDesktopRevealOrderingFailures(bracketRevealProbe);
+  if (
+    !bracketRevealFailures.includes(
+      "ready-to-show handlers must not reveal the desktop window directly or through a helper"
+    )
+  ) {
+    fail("desktop reveal-order validator must catch bracket-notation object-member reveal wrappers inside ready-to-show");
+  }
 }
 
 function createSourceFileForDesktopRevealProbe(source) {
@@ -2603,9 +2678,12 @@ function collectDesktopRevealOrderingFailures(sourceFile) {
   const loadUrlCalls = createWindowExecution.callExpressions.filter((call) =>
     isPropertyAccessCall(call, "loadURL")
   );
-  const readyToShowHandlers = collectEventHandlers(createWindowNode, "ready-to-show");
-  const didFailLoadHandlers = collectEventHandlers(createWindowNode, "did-fail-load");
-  const renderProcessGoneHandlers = collectEventHandlers(createWindowNode, "render-process-gone");
+  const readyToShowHandlers = collectReachableEventHandlers(createWindowNode.body, "ready-to-show");
+  const didFailLoadHandlers = collectReachableEventHandlers(createWindowNode.body, "did-fail-load");
+  const renderProcessGoneHandlers = collectReachableEventHandlers(
+    createWindowNode.body,
+    "render-process-gone"
+  );
 
   if (loadUrlCalls.length === 0) {
     return ["desktop startup contract missing loadURL inside createWindow"];
@@ -2797,6 +2875,11 @@ function collectExecutionData(body) {
       if (inlineIife) {
         visit(inlineIife.body);
       }
+    } else if (ts.isNewExpression(current)) {
+      const promiseExecutor = promiseExecutorFunctionExpression(current);
+      if (promiseExecutor) {
+        visit(promiseExecutor.body);
+      }
     }
     if (ts.isFunctionLike(current)) {
       return;
@@ -2829,6 +2912,13 @@ function collectEventHandlers(node, eventName) {
   });
 }
 
+function collectReachableEventHandlers(body, eventName) {
+  return collectExecutionData(body).callExpressions.flatMap((call) => {
+    const registration = matchEventRegistration(call);
+    return registration?.eventName === eventName ? [{ call, callback: registration.callback }] : [];
+  });
+}
+
 function callbackContainsHelperCall(callback, helperNames) {
   return (
     collectReachableHelperCalls(callback.body, helperNames).length > 0 ||
@@ -2839,14 +2929,17 @@ function callbackContainsHelperCall(callback, helperNames) {
 function collectCallExpressions(node, predicate) {
   const matches = [];
 
-  function visit(current) {
+  function visit(current, isRoot = false) {
+    if (!isRoot && ts.isFunctionLike(current)) {
+      return;
+    }
     if (ts.isCallExpression(current) && predicate(current)) {
       matches.push(current);
     }
-    ts.forEachChild(current, visit);
+    ts.forEachChild(current, (child) => visit(child, false));
   }
 
-  visit(node);
+  visit(node, true);
   return matches;
 }
 
@@ -2918,11 +3011,18 @@ function calledFunctionName(call) {
     return call.expression.text;
   }
   if (ts.isPropertyAccessExpression(call.expression)) {
-    const expressionRoot = propertyAccessExpressionRoot(call.expression);
+    const expressionRoot = propertyAccessExpressionRoot(call.expression.expression);
     if (expressionRoot) {
       return `${expressionRoot}.${call.expression.name.text}`;
     }
     return call.expression.name.text;
+  }
+  if (ts.isElementAccessExpression(call.expression)) {
+    const expressionRoot = propertyAccessExpressionRoot(call.expression.expression);
+    const staticKey = staticElementAccessKey(call.expression.argumentExpression);
+    if (expressionRoot && staticKey !== null) {
+      return `${expressionRoot}.${staticKey}`;
+    }
   }
   return null;
 }
@@ -2955,16 +3055,54 @@ function objectLiteralPropertyName(name) {
   return null;
 }
 
-function propertyAccessExpressionRoot(expression) {
-  if (ts.isIdentifier(expression.expression)) {
-    return expression.expression.text;
+function promiseExecutorFunctionExpression(expression) {
+  if (
+    !ts.isIdentifier(expression.expression) ||
+    expression.expression.text !== "Promise"
+  ) {
+    return null;
   }
-  if (ts.isPropertyAccessExpression(expression.expression)) {
+  const [executor] = expression.arguments;
+  if (
+    executor &&
+    (ts.isArrowFunction(executor) || ts.isFunctionExpression(executor))
+  ) {
+    return executor;
+  }
+  return null;
+}
+
+function propertyAccessExpressionRoot(expression) {
+  if (ts.isIdentifier(expression)) {
+    return expression.text;
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
     const parentRoot = propertyAccessExpressionRoot(expression.expression);
     if (!parentRoot) {
       return null;
     }
-    return `${parentRoot}.${expression.expression.name.text}`;
+    return `${parentRoot}.${expression.name.text}`;
+  }
+  if (ts.isElementAccessExpression(expression)) {
+    const parentRoot = propertyAccessExpressionRoot(expression.expression);
+    const staticKey = staticElementAccessKey(expression.argumentExpression);
+    if (!parentRoot || staticKey === null) {
+      return null;
+    }
+    return `${parentRoot}.${staticKey}`;
+  }
+  return null;
+}
+
+function staticElementAccessKey(argumentExpression) {
+  if (!argumentExpression) {
+    return null;
+  }
+  if (ts.isStringLiteral(argumentExpression) || ts.isNumericLiteral(argumentExpression)) {
+    return argumentExpression.text;
+  }
+  if (ts.isNoSubstitutionTemplateLiteral(argumentExpression)) {
+    return argumentExpression.text;
   }
   return null;
 }
