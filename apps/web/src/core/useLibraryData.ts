@@ -17,6 +17,8 @@ import { createCoreClient } from "./client";
 import { readDesktopDiagnostics, type DesktopDiagnostics } from "./desktop";
 import {
   isFreshThumbnailForMediaRecord,
+  isLiveThumbnailResponseForMediaRecord,
+  mediaContentSignature,
   readCachedThumbnailStates,
   requestThumbnailState,
   shouldRequestThumbnailState
@@ -148,6 +150,7 @@ export function useLibraryData(): LibraryState {
   const [thumbnailStatesByMediaId, setThumbnailStatesByMediaId] = useState<
     Record<number, ThumbnailResponse>
   >({});
+  const thumbnailStateSignaturesByMediaIdRef = useRef<Record<number, string>>({});
   const [mediaNextCursor, setMediaNextCursor] = useState<string | null>(null);
   const mediaHasMore = mediaNextCursor !== null;
   const [selectedRootId, selectRoot] = useState<number | null>(null);
@@ -182,11 +185,19 @@ export function useLibraryData(): LibraryState {
   const mediaByIdRef = useRef(mediaById);
   mediaByIdRef.current = mediaById;
   const freshThumbnailStatesByMediaId = useMemo(
-    () => filterFreshThumbnailStates(thumbnailStatesByMediaId, mediaById),
+    () =>
+      filterFreshThumbnailStates(
+        thumbnailStatesByMediaId,
+        mediaById,
+        thumbnailStateSignaturesByMediaIdRef.current
+      ),
     [mediaById, thumbnailStatesByMediaId]
   );
 
   const selectedMedia = media.find((item) => item.id === selectedMediaId) ?? null;
+  const selectedMediaThumbnailRequestKey = selectedMedia
+    ? mediaContentSignature(selectedMedia)
+    : null;
   const folders = useMemo(
     () => Object.values(folderChildrenByParent).flat(),
     [folderChildrenByParent]
@@ -221,6 +232,11 @@ export function useLibraryData(): LibraryState {
 
     const cachedStates = readCachedThumbnailStates(mediaRecords);
     if (Object.keys(cachedStates).length > 0) {
+      recordThumbnailStateSignatures(
+        cachedStates,
+        mediaByIdRef.current,
+        thumbnailStateSignaturesByMediaIdRef.current
+      );
       setThumbnailStatesByMediaId((current) => mergeThumbnailStates(current, cachedStates));
     }
 
@@ -229,14 +245,25 @@ export function useLibraryData(): LibraryState {
         continue;
       }
 
+      const requestedMediaSignature = mediaContentSignature(mediaRecord);
       void requestThumbnailState(mediaRecord)
         .then((thumbnail) => {
           setThumbnailStatesByMediaId((current) => {
             const currentMediaRecord = mediaByIdRef.current.get(mediaRecord.id);
-            if (!currentMediaRecord || !isFreshThumbnailForMediaRecord(currentMediaRecord, thumbnail)) {
+            const currentMediaSignature = currentMediaRecord
+              ? mediaContentSignature(currentMediaRecord)
+              : null;
+            if (
+              !currentMediaRecord ||
+              currentMediaSignature !== requestedMediaSignature ||
+              !isLiveThumbnailResponseForMediaRecord(currentMediaRecord, thumbnail)
+            ) {
+              delete thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id];
               return removeThumbnailState(current, mediaRecord.id);
             }
 
+            thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id] =
+              currentMediaSignature;
             if (current[mediaRecord.id] === thumbnail) {
               return current;
             }
@@ -247,10 +274,22 @@ export function useLibraryData(): LibraryState {
           });
         })
         .catch((cause) => {
-          setThumbnailStatesByMediaId((current) => ({
-            ...current,
-            [mediaRecord.id]: failedThumbnailState(mediaRecord.id, cause)
-          }));
+          setThumbnailStatesByMediaId((current) => {
+            const currentMediaRecord = mediaByIdRef.current.get(mediaRecord.id);
+            const currentMediaSignature = currentMediaRecord
+              ? mediaContentSignature(currentMediaRecord)
+              : null;
+            if (!currentMediaRecord || currentMediaSignature !== requestedMediaSignature) {
+              delete thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id];
+              return removeThumbnailState(current, mediaRecord.id);
+            }
+            thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id] =
+              currentMediaSignature;
+            return {
+              ...current,
+              [mediaRecord.id]: failedThumbnailState(mediaRecord.id, cause)
+            };
+          });
         });
     }
   }, []);
@@ -482,11 +521,11 @@ export function useLibraryData(): LibraryState {
   }, [client, selectedMediaId]);
 
   useEffect(() => {
-    if (selectedMediaId === null) {
+    if (!selectedMedia) {
       return;
     }
-    requestThumbnailStates([selectedMediaId]);
-  }, [requestThumbnailStates, selectedMediaId]);
+    requestThumbnailStates([selectedMedia.id]);
+  }, [requestThumbnailStates, selectedMedia, selectedMediaThumbnailRequestKey]);
 
   const previousTaskStatusRef = useRef<Map<number, TaskRecord["status"]>>(new Map());
   useEffect(() => {
@@ -1183,10 +1222,14 @@ function clearFolderChildPageKeys(keys: Set<string>, folderId: number): void {
 function failedThumbnailState(mediaId: number, cause: unknown): ThumbnailResponse {
   return {
     fileId: mediaId,
-    profile: "grid_320",
+    target: "grid_320",
     state: "failed",
     shortSidePx: 320,
     outputFormat: "image/webp",
+    width: null,
+    height: null,
+    byteSize: null,
+    servedBy: null,
     asset: null,
     error: errorMessage(cause),
     updatedAt: null
@@ -1209,19 +1252,38 @@ function mergeThumbnailStates(
   return changed ? next : current;
 }
 
+function recordThumbnailStateSignatures(
+  states: Record<number, ThumbnailResponse>,
+  mediaById: Map<number, MediaRecord>,
+  signaturesByMediaId: Record<number, string>
+): void {
+  for (const mediaId of Object.keys(states)) {
+    const mediaRecord = mediaById.get(Number(mediaId));
+    if (mediaRecord) {
+      signaturesByMediaId[Number(mediaId)] = mediaContentSignature(mediaRecord);
+    }
+  }
+}
+
 function filterFreshThumbnailStates(
   current: Record<number, ThumbnailResponse>,
-  mediaById: Map<number, MediaRecord>
+  mediaById: Map<number, MediaRecord>,
+  signaturesByMediaId: Record<number, string>
 ): Record<number, ThumbnailResponse> {
   let changed = false;
   const next: Record<number, ThumbnailResponse> = {};
   for (const [mediaId, thumbnail] of Object.entries(current)) {
     const key = Number(mediaId);
     const mediaRecord = mediaById.get(key);
-    if (mediaRecord && isFreshThumbnailForMediaRecord(mediaRecord, thumbnail)) {
+    if (
+      mediaRecord &&
+      signaturesByMediaId[key] === mediaContentSignature(mediaRecord) &&
+      isFreshThumbnailForMediaRecord(mediaRecord, thumbnail)
+    ) {
       next[key] = thumbnail;
     } else {
       changed = true;
+      delete signaturesByMediaId[key];
     }
   }
   return changed ? next : current;

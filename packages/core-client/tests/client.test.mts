@@ -8,6 +8,7 @@ interface RecordedRequest {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal?: AbortSignal | null;
 }
 
 const BASE_URL = "http://127.0.0.1:47321/api";
@@ -28,7 +29,7 @@ function mockFetch(responseBody: unknown, status = 200) {
     if (init?.body) {
       body = init.body instanceof ArrayBuffer ? "" : String(init.body);
     }
-    recorded.push({ url, method, headers, body });
+    recorded.push({ url, method, headers, body, signal: init?.signal ?? null });
     return new Response(JSON.stringify(responseBody), {
       status,
       headers: { "content-type": "application/json" }
@@ -133,6 +134,59 @@ describe("createCoreClient", () => {
     assert.equal(recorded[0].url, `${BASE_URL}/media/42/preview`);
     assert.equal(recorded[0].headers["x-megle-session"], "secret");
     assert.equal(await blob.text(), JSON.stringify("original bytes"));
+  });
+
+  test("getPreviewBlob forwards abort signal", async () => {
+    mockFetch("original bytes");
+    const controller = new AbortController();
+    await client().getPreviewBlob(42, { signal: controller.signal });
+    assert.equal(recorded[0].signal, controller.signal);
+  });
+
+  test("getPreviewBlob attaches version cache buster", async () => {
+    mockFetch("original bytes");
+    await client().getPreviewBlob(42, { version: "42:1000:2048:ready" });
+    assert.equal(recorded[0].url, `${BASE_URL}/media/42/preview?v=42%3A1000%3A2048%3Aready`);
+  });
+
+  test("getThumbnail requests the default grid target", async () => {
+    mockFetch({
+      fileId: 42,
+      target: "grid_320",
+      state: "queued",
+      shortSidePx: 320,
+      outputFormat: "image/webp",
+      width: null,
+      height: null,
+      byteSize: null,
+      servedBy: null,
+      asset: null,
+      error: null,
+      updatedAt: 1
+    });
+    await client().getThumbnail(42);
+    assert.equal(recorded[0].method, "GET");
+    assert.equal(recorded[0].url, `${BASE_URL}/media/42/thumbnail?target=grid_320`);
+  });
+
+  test("getThumbnailBlob requests the default grid target", async () => {
+    mockFetch("thumbnail bytes");
+    await client().getThumbnailBlob(42);
+    assert.equal(recorded[0].method, "GET");
+    assert.equal(recorded[0].url, `${BASE_URL}/media/42/thumbnail/blob?target=grid_320`);
+  });
+
+  test("getThumbnailBlob forwards abort signal", async () => {
+    mockFetch("thumbnail bytes");
+    const controller = new AbortController();
+    await client().getThumbnailBlob(42, "grid_320", { signal: controller.signal });
+    assert.equal(recorded[0].signal, controller.signal);
+  });
+
+  test("getThumbnailBlob attaches version cache buster", async () => {
+    mockFetch("thumbnail bytes");
+    await client().getThumbnailBlob(42, "grid_320", { version: 1234 });
+    assert.equal(recorded[0].url, `${BASE_URL}/media/42/thumbnail/blob?target=grid_320&v=1234`);
   });
 
   test("CoreApiError is thrown on non-2xx with parsed body", async () => {

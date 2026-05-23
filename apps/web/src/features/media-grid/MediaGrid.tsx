@@ -2,8 +2,11 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
-import { getCoreClientConfig } from "../../core/client";
-import { createCoreClient } from "@megle/core-client";
+import {
+  mediaContentSignature,
+  previewPlaceholderDataUrl,
+  requestThumbnailBlob
+} from "../../core/mediaResources";
 import { workbenchLayout } from "../../design/tokens";
 
 interface MediaGridProps {
@@ -81,24 +84,29 @@ export function MediaGrid({
 
   const visibleMedia = useMemo(() => {
     const mediaIdSet = new Set<number>();
+    const mediaSignatureSet = new Set<string>();
     for (const virtualRow of virtualItems) {
       if (virtualRow.index >= rows.length) continue;
       for (const item of rows[virtualRow.index] ?? []) {
         mediaIdSet.add(item.id);
+        mediaSignatureSet.add(mediaContentSignature(item));
       }
     }
     const mediaIds = [...mediaIdSet].sort((left, right) => left - right);
+    const mediaSignatures = [...mediaSignatureSet].sort();
     return {
       ids: mediaIds,
-      key: mediaIds.join(":")
+      key: mediaIds.join(":"),
+      signatureKey: mediaSignatures.join("|")
     };
   }, [rows, virtualItems]);
   const visibleMediaIds = visibleMedia.ids;
   const visibleMediaKey = visibleMedia.key;
+  const visibleMediaSignatureKey = visibleMedia.signatureKey;
 
   useEffect(() => {
     onRequestThumbnailStates(visibleMediaIds);
-  }, [onRequestThumbnailStates, visibleMediaKey]);
+  }, [onRequestThumbnailStates, visibleMediaKey, visibleMediaSignatureKey]);
 
   useEffect(() => {
     const hasPendingThumbnail = virtualItems.some((virtualRow) =>
@@ -114,7 +122,14 @@ export function MediaGrid({
       onRequestThumbnailStates(visibleMediaIds);
     }, 1500);
     return () => window.clearTimeout(timer);
-  }, [onRequestThumbnailStates, rows, thumbnailStatesByMediaId, virtualItems, visibleMediaKey]);
+  }, [
+    onRequestThumbnailStates,
+    rows,
+    thumbnailStatesByMediaId,
+    virtualItems,
+    visibleMediaKey,
+    visibleMediaSignatureKey
+  ]);
 
   function moveSelection(offset: number) {
     if (items.length === 0) return;
@@ -303,9 +318,22 @@ function ThumbnailStateView({
   thumbnail?: ThumbnailResponse;
 }) {
   const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
+  const previewPlaceholderUrl = previewPlaceholderDataUrl(item);
+  const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
 
-  if (state === "ready") {
-    return <ReadyThumbnail fileId={item.id} alt={item.name} />;
+  if (hasLiveReadyThumbnail) {
+    return (
+      <ReadyThumbnail
+        fileId={item.id}
+        alt={item.name}
+        previewPlaceholderUrl={previewPlaceholderUrl}
+        thumbnailUpdatedAt={thumbnail.updatedAt}
+      />
+    );
+  }
+
+  if (state === "ready" && previewPlaceholderUrl) {
+    return <PlaceholderThumbnail alt={item.name} src={previewPlaceholderUrl} />;
   }
 
   if (state === "failed") {
@@ -317,6 +345,9 @@ function ThumbnailStateView({
   }
 
   if (state === "skipped_small") {
+    if (previewPlaceholderUrl) {
+      return <PlaceholderThumbnail alt={item.name} src={previewPlaceholderUrl} />;
+    }
     return (
       <div className="tile-thumb tile-thumb-skipped">
         <span>{item.kind ?? "file"}</span>
@@ -325,11 +356,18 @@ function ThumbnailStateView({
   }
 
   if (state === "queued") {
+    if (previewPlaceholderUrl) {
+      return <PlaceholderThumbnail alt={item.name} src={previewPlaceholderUrl} />;
+    }
     return (
       <div className="tile-thumb tile-thumb-loading">
         <span>queued</span>
       </div>
     );
+  }
+
+  if (previewPlaceholderUrl) {
+    return <PlaceholderThumbnail alt={item.name} src={previewPlaceholderUrl} />;
   }
 
   return (
@@ -356,7 +394,12 @@ function shouldRefreshThumbnailState(
   item: MediaRecord,
   thumbnail: ThumbnailResponse | undefined
 ): boolean {
-  const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
+  const rowState = normalizeMediaThumbnailState(item.thumbnailState);
+  const hasLiveThumbnailMetadata = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
+  if (!hasLiveThumbnailMetadata && rowState === "ready") {
+    return true;
+  }
+  const state = thumbnail?.state ?? rowState;
   return state === "pending" || state === "queued";
 }
 
@@ -383,8 +426,25 @@ function chunk<T>(items: T[], size: number): T[][] {
   return rows;
 }
 
+function PlaceholderThumbnail({ alt, src }: { alt: string; src: string }) {
+  return (
+    <div className="tile-thumb tile-thumb-placeholder" data-preview-placeholder="grid">
+      <img alt={alt} className="tile-thumb-image" loading="lazy" src={src} />
+    </div>
+  );
+}
 
-function ReadyThumbnail({ fileId, alt }: { fileId: number; alt: string }) {
+function ReadyThumbnail({
+  fileId,
+  alt,
+  previewPlaceholderUrl,
+  thumbnailUpdatedAt
+}: {
+  fileId: number;
+  alt: string;
+  previewPlaceholderUrl: string | null;
+  thumbnailUpdatedAt: number | null;
+}) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
 
@@ -394,9 +454,7 @@ function ReadyThumbnail({ fileId, alt }: { fileId: number; alt: string }) {
     setError(false);
     setSrc(null);
 
-    const client = createCoreClient(getCoreClientConfig());
-    client
-      .getThumbnailBlob(fileId)
+    requestThumbnailBlob(fileId, thumbnailUpdatedAt)
       .then((blob) => {
         if (revoked) return;
         objectUrl = URL.createObjectURL(blob);
@@ -410,7 +468,7 @@ function ReadyThumbnail({ fileId, alt }: { fileId: number; alt: string }) {
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId]);
+  }, [fileId, thumbnailUpdatedAt]);
 
   if (error) {
     return (
@@ -421,6 +479,9 @@ function ReadyThumbnail({ fileId, alt }: { fileId: number; alt: string }) {
   }
 
   if (!src) {
+    if (previewPlaceholderUrl) {
+      return <PlaceholderThumbnail alt={alt} src={previewPlaceholderUrl} />;
+    }
     return (
       <div className="tile-thumb tile-thumb-loading">
         <span>loading</span>

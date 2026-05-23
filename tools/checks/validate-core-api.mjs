@@ -28,6 +28,7 @@ const thumbnailSourceMigrationSql = read("crates/core/migrations/0005_thumbnail_
 const thumbnailTaskAttemptMigrationSql = read("crates/core/migrations/0006_thumbnail_task_attempt_fingerprint.sql");
 const taskStatusContractMigrationSql = read("crates/core/migrations/0007_task_status_contract.sql");
 const taskAttemptGenerationMigrationSql = read("crates/core/migrations/0008_task_attempt_generation.sql");
+const previewServedByMigrationSql = read("crates/core/migrations/0013_preview_served_by.sql");
 const thumbnailsRs = read("crates/core/src/thumbnails/mod.rs");
 const pluginsRs = read("crates/core/src/plugins/mod.rs");
 const fsopsRs = read("crates/core/src/fsops/mod.rs");
@@ -155,6 +156,9 @@ if (!dbMigrationsRs.includes('include_str!("../../migrations/0010_media_fts_cont
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0011_plugins_extended.sql")')) {
   fail("db plugins extended migration include path changed or missing");
 }
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0013_preview_served_by.sql")')) {
+  fail("db preview served_by migration include path changed or missing");
+}
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");
 }
@@ -211,7 +215,7 @@ for (const value of ["image", "video", "other"]) {
 
 for (const value of ["grid_320"]) {
   if (!openApi.includes(value) || !routesRs.includes(value) || !thumbnailsRs.includes(value)) {
-    fail(`thumbnail profile value is not aligned: ${value}`);
+    fail(`thumbnail target value is not aligned: ${value}`);
   }
 }
 for (const value of ["pending", "queued", "ready", "failed", "skipped_small"]) {
@@ -219,10 +223,26 @@ for (const value of ["pending", "queued", "ready", "failed", "skipped_small"]) {
     fail(`thumbnail status value is not aligned: ${value}`);
   }
 }
-for (const value of ["image/webp", "shortSidePx", "outputFormat", "ThumbnailResponse"]) {
+for (const value of [
+  "image/webp",
+  "shortSidePx",
+  "outputFormat",
+  "ThumbnailResponse",
+  "previewPlaceholder",
+  "previewPlaceholderFormat",
+  "target",
+  "width",
+  "height",
+  "byteSize",
+  "servedBy",
+  "db_blob"
+]) {
   if (!openApi.includes(value)) {
     fail(`OpenAPI thumbnail contract missing ${value}`);
   }
+}
+if (/cacheKey:\n/.test(openApi) || /cache_key:\s*String/.test(routesRs)) {
+  fail("thumbnail public API must not expose disk cache keys");
 }
 for (const value of ["short_side_px", "output_format", "skipped_small", "image/webp"]) {
   if (!migrationSql.includes(value) || !thumbnailMigrationSql.includes(value)) {
@@ -241,6 +261,19 @@ for (const value of ["thumbnail_source_fingerprint", "thumbnail_task_attempt_fin
   if (!thumbnailTaskAttemptMigrationSql.includes(value)) {
     fail(`thumbnail task attempt fingerprint migration missing ${value}`);
   }
+}
+for (const value of ["served_by", "db_blob", "version, name, applied_at", "preview_served_by"]) {
+  if (!previewServedByMigrationSql.includes(value)) {
+    fail(`preview served_by migration missing ${value}`);
+  }
+}
+for (const value of ["served_by", "db_blob"]) {
+  if (!dbModRs.includes(value)) {
+    fail(`thumbnail served_by ledger support missing ${value}`);
+  }
+}
+if (/cache_key:\s*Some\(cache_key/.test(tasksRs)) {
+  fail("thumbnail tasks must not persist runtime disk cache keys for DB blob thumbnails");
 }
 for (const value of [
   "DROP TABLE IF EXISTS thumbs_new",
@@ -439,7 +472,7 @@ if (!mediaOperation.includes('"400"') || !mediaOperation.includes("ErrorResponse
 const thumbnailOperation = operationBlock("/media/{fileId}/thumbnail", "get");
 for (const value of [
   "ThumbnailResponse",
-  "profile",
+  "target",
   '"200"',
   '"202"',
   '"404"',
@@ -465,9 +498,21 @@ for (const [name, action] of [
   }
 }
 const thumbnailBody = functionBody("get_thumbnail");
-for (const value of ["Json<ThumbnailResponse>", "get_thumbnail", "StatusCode::OK", "StatusCode::ACCEPTED"]) {
+for (const value of ["Json<ThumbnailResponse>", "get_thumbnail", "target", "StatusCode::OK", "StatusCode::ACCEPTED"]) {
   if (!thumbnailBody.includes(value)) {
     fail(`GET /api/media/{fileId}/thumbnail implementation missing ${value}`);
+  }
+}
+const thumbnailBlobBody = functionBody("get_thumbnail_blob");
+for (const value of ["get_thumb_blob", "target", "db_blob"]) {
+  if (!thumbnailBlobBody.includes(value)) {
+    fail(`GET /api/media/{fileId}/thumbnail/blob implementation missing ${value}`);
+  }
+}
+const thumbnailBlobOperation = operationBlock("/media/{fileId}/thumbnail/blob", "get");
+for (const value of ["target", "image/webp", "x-megle-served-by", "db_blob"]) {
+  if (!thumbnailBlobOperation.includes(value)) {
+    fail(`OpenAPI GET /media/{fileId}/thumbnail/blob missing ${value}`);
   }
 }
 const previewOperation = operationBlock("/media/{fileId}/preview", "get");

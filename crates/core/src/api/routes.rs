@@ -11,7 +11,8 @@ use std::path::Path as FilePath;
 use crate::api::AppState;
 use crate::db::{
     FolderRecord, MediaPageQuery, MediaRecord, NewRoot, PluginRecord, RootRecord, SearchQuery,
-    TagError, TagRecord, TaskRecord, ThumbnailRecord, UserMetadataPatch, UserMetadataRecord,
+    TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailRecord, UserMetadataPatch,
+    UserMetadataRecord,
 };
 use crate::fsops::{
     self, DeleteRequest, FileOperationRecord, FsOpsError, FsOpsErrorCode, MoveRequest,
@@ -176,7 +177,7 @@ struct ListMediaQuery {
 
 #[derive(Debug, Deserialize)]
 struct ThumbnailQuery {
-    profile: Option<String>,
+    target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,7 +288,6 @@ struct CodedErrorResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ThumbnailAsset {
-    cache_key: String,
     width: i64,
     height: i64,
     byte_size: i64,
@@ -297,10 +297,14 @@ struct ThumbnailAsset {
 #[serde(rename_all = "camelCase")]
 struct ThumbnailResponse {
     file_id: i64,
-    profile: String,
+    target: String,
     state: String,
     short_side_px: i64,
     output_format: String,
+    width: Option<i64>,
+    height: Option<i64>,
+    byte_size: Option<i64>,
+    served_by: Option<String>,
     asset: Option<ThumbnailAsset>,
     error: Option<String>,
     updated_at: Option<i64>,
@@ -526,16 +530,16 @@ async fn get_thumbnail(
     Path(file_id): Path<i64>,
     Query(query): Query<ThumbnailQuery>,
 ) -> ApiResult<(StatusCode, Json<ThumbnailResponse>)> {
-    let profile = normalize_profile(query.profile.as_deref())
-        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
-    let (thumbnail, queued_task) = {
+    let target = normalize_profile(query.target.as_deref())
+        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
+    let (thumbnail, blob, queued_task) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
-            .get_thumbnail(file_id, profile)?
+            .get_thumbnail(file_id, target)?
             .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
-        if is_pending_status(&thumbnail.state) {
+        let (thumbnail, queued_task) = if is_pending_status(&thumbnail.state) {
             let request = database
-                .request_thumbnail_task(file_id, profile)
+                .request_thumbnail_task(file_id, target)
                 .map_err(map_thumbnail_request_error)?;
             let queued_task_id = if request.queued {
                 request.task_id
@@ -552,7 +556,13 @@ async fn get_thumbnail(
             (request.thumbnail, queued_task)
         } else {
             (thumbnail, None)
-        }
+        };
+        let blob = if thumbnail.state.as_str() == "ready" {
+            database.get_thumb_blob(file_id, target)?
+        } else {
+            None
+        };
+        (thumbnail, blob, queued_task)
     };
     if let Some((task_id, attempt_generation)) = queued_task {
         enqueue_task(&state, task_id, attempt_generation).await?;
@@ -562,7 +572,7 @@ async fn get_thumbnail(
     } else {
         StatusCode::OK
     };
-    Ok((status, Json(thumbnail_response(thumbnail))))
+    Ok((status, Json(thumbnail_response(thumbnail, blob))))
 }
 
 async fn get_thumbnail_blob(
@@ -572,12 +582,12 @@ async fn get_thumbnail_blob(
 ) -> ApiResult<axum::response::Response> {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
     use axum::response::Response;
-    let profile = normalize_profile(query.profile.as_deref())
-        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
-    let (cache_root, cache_key) = {
+    let target = normalize_profile(query.target.as_deref())
+        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
+    let blob = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
-            .get_thumbnail(file_id, profile)?
+            .get_thumbnail(file_id, target)?
             .ok_or_else(|| CoreError::not_found("media item not found".to_string()))?;
         if thumbnail.state.as_str() != "ready" {
             return Err(CoreError::bad_request(format!(
@@ -585,19 +595,15 @@ async fn get_thumbnail_blob(
                 thumbnail.state
             )));
         }
-        let cache_key = thumbnail
-            .cache_key
-            .ok_or_else(|| CoreError::not_found("thumbnail cache key missing".to_string()))?;
-        (database.default_thumbnail_cache_dir(), cache_key)
+        database
+            .get_thumb_blob(file_id, target)?
+            .ok_or_else(|| CoreError::not_found("thumbnail blob missing".to_string()))?
     };
-    let cache_path = cache_root.join(&cache_key);
-    let bytes = tokio::fs::read(&cache_path)
-        .await
-        .map_err(|err| CoreError::not_found(format!("thumbnail cache file missing: {err}")))?;
     Response::builder()
-        .header(CONTENT_TYPE, "image/webp")
+        .header(CONTENT_TYPE, blob.output_format)
         .header(CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .body(axum::body::Body::from(bytes))
+        .header("x-megle-served-by", "db_blob")
+        .body(axum::body::Body::from(blob.data))
         .map_err(|err| CoreError::bad_request(format!("failed to build thumbnail response: {err}")))
 }
 
@@ -1066,30 +1072,56 @@ fn accepted() -> AcceptedResponse {
     }
 }
 
-fn thumbnail_response(thumbnail: ThumbnailRecord) -> ThumbnailResponse {
-    let asset = match (
-        thumbnail.state.as_str(),
-        thumbnail.cache_key,
-        thumbnail.width,
-        thumbnail.height,
-        thumbnail.byte_size,
-    ) {
-        ("ready", Some(cache_key), Some(width), Some(height), Some(byte_size)) => {
-            Some(ThumbnailAsset {
-                cache_key,
-                width,
-                height,
-                byte_size,
-            })
-        }
-        _ => None,
+fn thumbnail_response(
+    thumbnail: ThumbnailRecord,
+    blob: Option<ThumbBlobRecord>,
+) -> ThumbnailResponse {
+    let ready_blob = if thumbnail.state.as_str() == "ready" {
+        blob.as_ref()
+    } else {
+        None
     };
+    let width = ready_blob.map(|blob| blob.width).or_else(|| {
+        (thumbnail.state.as_str() != "ready")
+            .then_some(thumbnail.width)
+            .flatten()
+    });
+    let height = ready_blob.map(|blob| blob.height).or_else(|| {
+        (thumbnail.state.as_str() != "ready")
+            .then_some(thumbnail.height)
+            .flatten()
+    });
+    let byte_size = ready_blob.map(|blob| blob.byte_size).or_else(|| {
+        (thumbnail.state.as_str() != "ready")
+            .then_some(thumbnail.byte_size)
+            .flatten()
+    });
+    let output_format = ready_blob
+        .map(|blob| blob.output_format.clone())
+        .unwrap_or_else(|| thumbnail.output_format.clone());
+    let served_by = if ready_blob.is_some() {
+        thumbnail
+            .served_by
+            .clone()
+            .or_else(|| Some("db_blob".to_string()))
+    } else {
+        None
+    };
+    let asset = ready_blob.map(|blob| ThumbnailAsset {
+        width: blob.width,
+        height: blob.height,
+        byte_size: blob.byte_size,
+    });
     ThumbnailResponse {
         file_id: thumbnail.file_id,
-        profile: thumbnail.profile,
+        target: thumbnail.profile,
         state: thumbnail.state,
         short_side_px: thumbnail.short_side_px,
-        output_format: thumbnail.output_format,
+        output_format,
+        width,
+        height,
+        byte_size,
+        served_by,
         asset,
         error: thumbnail.error,
         updated_at: thumbnail.updated_at,
@@ -1143,7 +1175,7 @@ fn map_thumbnail_request_error(error: anyhow::Error) -> CoreError {
         return CoreError::not_found(message);
     }
     if message.contains("unsupported thumbnail profile") {
-        return CoreError::bad_request(message);
+        return CoreError::bad_request(message.replace("profile", "target"));
     }
     error.into()
 }
@@ -1526,7 +1558,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1535,7 +1567,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = response_json(response).await;
         assert_eq!(body["fileId"], file_id);
-        assert_eq!(body["profile"], "grid_320");
+        assert_eq!(body["target"], "grid_320");
         assert_eq!(body["state"], "queued");
         assert_eq!(body["shortSidePx"], 320);
         assert_eq!(body["outputFormat"], "image/webp");
@@ -1649,7 +1681,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1668,7 +1700,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1732,6 +1764,16 @@ mod tests {
         .expect("insert ready thumbnail");
         conn.execute(
             r#"
+            INSERT INTO thumb_blobs(
+                file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at
+            )
+            VALUES (?1, 'grid_320', x'524946460400000057454250', 427, 320, 4096, 'image/webp', 10, 10)
+            "#,
+            [ready_file_id],
+        )
+        .expect("insert ready thumbnail blob");
+        conn.execute(
+            r#"
             INSERT INTO thumbs(file_id, profile, state, source_fingerprint, updated_at)
             VALUES (?1, 'grid_320', 'skipped_small', ?2, 11)
             "#,
@@ -1750,7 +1792,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{ready_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{ready_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1760,17 +1802,18 @@ mod tests {
         assert_eq!(ready_response.status(), StatusCode::OK);
         let ready = response_json(ready_response).await;
         assert_eq!(ready["state"], "ready");
-        assert_eq!(ready["asset"]["cacheKey"], "aa/bb/key.webp");
         assert_eq!(ready["asset"]["width"], 427);
         assert_eq!(ready["asset"]["height"], 320);
         assert_eq!(ready["asset"]["byteSize"], 4096);
+        assert!(ready["asset"].get("cacheKey").is_none());
+        assert_eq!(ready["servedBy"], "db_blob");
 
         let skipped_response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{skipped_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{skipped_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1780,10 +1823,139 @@ mod tests {
         assert_eq!(skipped_response.status(), StatusCode::OK);
         let skipped = response_json(skipped_response).await;
         assert_eq!(skipped["state"], "skipped_small");
-        assert_eq!(skipped["profile"], "grid_320");
+        assert_eq!(skipped["target"], "grid_320");
         assert!(skipped["asset"].is_null());
 
         let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_blob_route_reads_from_thumb_blobs() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: None,
+                width: Some(2),
+                height: Some(1),
+                byte_size: Some(12),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("mark thumbnail ready");
+        let blob_bytes = b"RIFF\x04\0\0\0WEBP".to_vec();
+        database
+            .upsert_thumb_blob(crate::db::ThumbBlobRecord {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                data: blob_bytes.clone(),
+                width: 2,
+                height: 1,
+                byte_size: blob_bytes.len() as i64,
+                output_format: crate::thumbnails::GENERATED_FORMAT.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .expect("seed thumb blob");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{file_id}/thumbnail/blob?target=grid_320"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail blob");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/webp"
+        );
+        assert_eq!(
+            response.headers().get("x-megle-served-by").unwrap(),
+            "db_blob"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read blob body");
+        assert_eq!(&bytes[..], blob_bytes.as_slice());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_reports_ready_blob_metadata_without_cache_key() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: None,
+                width: Some(1),
+                height: Some(1),
+                byte_size: Some(1),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("mark thumbnail ready");
+        let blob_bytes = b"RIFF\x08\0\0\0WEBPblob".to_vec();
+        database
+            .upsert_thumb_blob(crate::db::ThumbBlobRecord {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                data: blob_bytes,
+                width: 427,
+                height: 320,
+                byte_size: 4096,
+                output_format: crate::thumbnails::GENERATED_FORMAT.to_string(),
+                created_at: 1,
+                updated_at: 2,
+            })
+            .expect("seed thumb blob");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail state");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["state"], "ready");
+        assert_eq!(body["target"], "grid_320");
+        assert_eq!(body["width"], 427);
+        assert_eq!(body["height"], 320);
+        assert_eq!(body["byteSize"], 4096);
+        assert_eq!(body["servedBy"], "db_blob");
+        assert_eq!(body["asset"]["width"], 427);
+        assert_eq!(body["asset"]["height"], 320);
+        assert_eq!(body["asset"]["byteSize"], 4096);
+        assert!(body["asset"].get("cacheKey").is_none());
     }
 
     #[tokio::test]
@@ -1834,7 +2006,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{queued_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{queued_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1852,7 +2024,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{failed_current_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{failed_current_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1870,9 +2042,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!(
-                        "/api/media/{queued_file_id}/thumbnail?profile=grid"
-                    ))
+                    .uri(format!("/api/media/{queued_file_id}/thumbnail?target=grid"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1884,7 +2054,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/api/media/999999/thumbnail?profile=grid_320")
+                    .uri("/api/media/999999/thumbnail?target=grid_320")
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1943,7 +2113,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method(Method::GET)
-                        .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                        .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                         .body(Body::empty())
                         .expect("build request"),
                 )
@@ -2473,7 +2643,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )

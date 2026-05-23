@@ -56,6 +56,18 @@ async fn main() -> anyhow::Result<()> {
 
     let database = db::Database::open(&db_path)?;
     database.apply_migrations()?;
+    match database.import_legacy_thumbnail_cache() {
+        Ok(imported) if imported > 0 => {
+            tracing::info!(
+                imported,
+                "imported legacy thumbnail-cache entries into thumb_blobs"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "legacy thumbnail-cache import failed at startup");
+        }
+    }
 
     let plugins_dir = plugins::resolve_plugins_dir(&db_path);
     if let Err(error) = plugins::discover_and_persist(&database, &plugins_dir) {

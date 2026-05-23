@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
-import { createCoreClient } from "@megle/core-client";
-import { getCoreClientConfig } from "../../core/client";
+import {
+  mediaContentSignature,
+  previewPlaceholderDataUrl,
+  requestOriginalPreviewBlob,
+  requestThumbnailBlob
+} from "../../core/mediaResources";
 
 export function MediaPreview({
   media,
@@ -14,26 +18,39 @@ export function MediaPreview({
   source?: "thumbnail" | "original";
   thumbnail?: ThumbnailResponse;
 }) {
+  const previewPlaceholderUrl = previewPlaceholderDataUrl(media);
+  const originalVersionKey = mediaContentSignature(media);
+  const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
+  const fallbackThumbnail = useThumbnailFallbackUrl(
+    source === "original" && hasLiveReadyThumbnail ? thumbnail.fileId : null,
+    thumbnail?.updatedAt ?? null
+  );
+  const fallbackUrl = fallbackThumbnail ?? previewPlaceholderUrl;
+
   if (source === "original") {
     return (
       <ReadyPreviewMedia
         alt={media.name}
-        fileId={media.id}
+        fallbackUrl={fallbackUrl}
         kind={media.kind}
+        media={media}
         onMediaReady={onMediaReady}
         source="original"
+        versionKey={originalVersionKey}
       />
     );
   }
 
-  if (thumbnail?.state === "ready") {
+  if (hasLiveReadyThumbnail) {
     return (
       <ReadyPreviewMedia
         alt={media.name}
-        fileId={media.id}
+        fallbackUrl={previewPlaceholderUrl}
         kind={media.kind}
+        media={media}
         onMediaReady={onMediaReady}
         source="thumbnail"
+        versionKey={thumbnail.updatedAt}
       />
     );
   }
@@ -47,11 +64,18 @@ export function MediaPreview({
   }
 
   if (thumbnail?.state === "skipped_small") {
+    if (previewPlaceholderUrl) {
+      return <PreviewFallbackImage alt={media.name} src={previewPlaceholderUrl} state="skipped" />;
+    }
     return (
       <div className="preview-placeholder skipped">
         <span>{media.kind ?? "file"}</span>
       </div>
     );
+  }
+
+  if (previewPlaceholderUrl) {
+    return <PreviewFallbackImage alt={media.name} src={previewPlaceholderUrl} state="pending" />;
   }
 
   return (
@@ -61,18 +85,73 @@ export function MediaPreview({
   );
 }
 
-function ReadyPreviewMedia({
+function useThumbnailFallbackUrl(fileId: number | null, versionKey: number | null): string | null {
+  const [fallbackThumbnail, setFallbackThumbnail] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (fileId === null) {
+      setFallbackThumbnail(null);
+      return undefined;
+    }
+
+    let revoked = false;
+    let objectUrl: string | null = null;
+    setFallbackThumbnail(null);
+
+    requestThumbnailBlob(fileId, versionKey)
+      .then((blob) => {
+        if (revoked) return;
+        objectUrl = URL.createObjectURL(blob);
+        setFallbackThumbnail(objectUrl);
+      })
+      .catch(() => {
+        if (!revoked) setFallbackThumbnail(null);
+      });
+
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [fileId, versionKey]);
+
+  return fallbackThumbnail;
+}
+
+function PreviewFallbackImage({
   alt,
-  fileId,
-  kind,
-  onMediaReady,
-  source
+  src,
+  state
 }: {
   alt: string;
-  fileId: number;
+  src: string;
+  state: "pending" | "skipped";
+}) {
+  return (
+    <div
+      className={`preview-placeholder ${state} preview-placeholder-image`}
+      data-preview-placeholder="preview"
+    >
+      <img alt={alt} className="preview-image preview-fallback-image" src={src} />
+    </div>
+  );
+}
+
+function ReadyPreviewMedia({
+  alt,
+  fallbackUrl,
+  kind,
+  media,
+  onMediaReady,
+  source,
+  versionKey
+}: {
+  alt: string;
+  fallbackUrl: string | null;
   kind?: string | null;
+  media: MediaRecord;
   onMediaReady?: () => void;
   source: "thumbnail" | "original";
+  versionKey?: number | string | null;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
@@ -83,9 +162,10 @@ function ReadyPreviewMedia({
     setSrc(null);
     setError(false);
 
-    const client = createCoreClient(getCoreClientConfig());
-    const request =
-      source === "original" ? client.getPreviewBlob(fileId) : client.getThumbnailBlob(fileId);
+    const controller = source === "original" ? new AbortController() : null;
+    const request = controller
+      ? requestOriginalPreviewBlob(media, { signal: controller.signal })
+      : requestThumbnailBlob(media.id, typeof versionKey === "number" ? versionKey : null);
     request
       .then((blob) => {
         if (revoked) return;
@@ -93,14 +173,15 @@ function ReadyPreviewMedia({
         setSrc(objectUrl);
       })
       .catch(() => {
-        if (!revoked) setError(true);
+        if (!revoked && !controller?.signal.aborted) setError(true);
       });
 
     return () => {
       revoked = true;
+      controller?.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId, source]);
+  }, [media.id, source, versionKey]);
 
   if (error) {
     return (
@@ -111,6 +192,9 @@ function ReadyPreviewMedia({
   }
 
   if (!src) {
+    if (fallbackUrl) {
+      return <PreviewFallbackImage alt={alt} src={fallbackUrl} state="pending" />;
+    }
     return (
       <div className="preview-placeholder pending">
         <span>loading</span>

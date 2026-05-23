@@ -20,3 +20,7 @@ pub const MEDIA_FTS_CONTENTLESS_DELETE_MIGRATION: &str =
 #[allow(dead_code)]
 pub const PLUGINS_EXTENDED_MIGRATION: &str =
     include_str!("../../migrations/0011_plugins_extended.sql");
+pub const PREVIEW_PIPELINE_REFACTOR_MIGRATION: &str =
+    include_str!("../../migrations/0012_preview_pipeline_refactor.sql");
+pub const PREVIEW_SERVED_BY_MIGRATION: &str =
+    include_str!("../../migrations/0013_preview_served_by.sql");

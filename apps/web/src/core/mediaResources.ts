@@ -2,19 +2,36 @@ import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { createCoreClient } from "./client";
 
 export type ThumbnailStateByMediaId = Record<number, ThumbnailResponse>;
+type CachedThumbnailEntry = {
+  mediaSignature: string;
+  thumbnail: ThumbnailResponse;
+};
+type CachedOriginalPreviewEntry = {
+  mediaSignature: string;
+  blob: Blob;
+};
+type OriginalPreviewRequestOptions = {
+  signal?: AbortSignal;
+};
+
+export const GRID_THUMBNAIL_TARGET = "grid_320";
 
 const thumbnailClient = createCoreClient();
-export const thumbnailResourceCache = new Map<number, ThumbnailResponse>();
+export const thumbnailResourceCache = new Map<number, CachedThumbnailEntry>();
 export const inFlightThumbnailRequests = new Map<string, Promise<ThumbnailResponse>>();
+export const inFlightThumbnailBlobRequests = new Map<string, Promise<Blob>>();
+export const originalPreviewBlobCache = new Map<number, CachedOriginalPreviewEntry>();
+export const inFlightOriginalPreviewRequests = new Map<string, Promise<Blob>>();
+const ORIGINAL_PREVIEW_CACHE_LIMIT = 5;
 
 export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<ThumbnailResponse> {
   const mediaId = mediaRecord.id;
   const requestKey = thumbnailRequestKey(mediaRecord);
   const cached = thumbnailResourceCache.get(mediaId);
   if (cached) {
-    if (isFreshThumbnailForMediaRecord(mediaRecord, cached)) {
-      if (cached.state !== "pending" && cached.state !== "queued") {
-        return cached;
+    if (isFreshCachedThumbnailForMediaRecord(mediaRecord, cached)) {
+      if (cached.thumbnail.state !== "pending" && cached.thumbnail.state !== "queued") {
+        return cached.thumbnail;
       }
     } else {
       thumbnailResourceCache.delete(mediaId);
@@ -27,10 +44,13 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   }
 
   const request = thumbnailClient
-    .getThumbnail(mediaId)
+    .getThumbnail(mediaId, GRID_THUMBNAIL_TARGET)
     .then((thumbnail) => {
-      if (isFreshThumbnailForMediaRecord(mediaRecord, thumbnail)) {
-        thumbnailResourceCache.set(mediaId, thumbnail);
+      if (isLiveThumbnailResponseForMediaRecord(mediaRecord, thumbnail)) {
+        thumbnailResourceCache.set(mediaId, {
+          mediaSignature: mediaContentSignature(mediaRecord),
+          thumbnail
+        });
       } else {
         thumbnailResourceCache.delete(mediaId);
       }
@@ -43,15 +63,84 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   return request;
 }
 
+export async function requestThumbnailBlob(
+  fileId: number,
+  versionKey: number | null = null
+): Promise<Blob> {
+  const requestKey = `${fileId}:${GRID_THUMBNAIL_TARGET}:${versionKey ?? "current"}`;
+  const inFlight = inFlightThumbnailBlobRequests.get(requestKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = thumbnailClient
+    .getThumbnailBlob(fileId, GRID_THUMBNAIL_TARGET, { version: versionKey })
+    .finally(() => {
+      inFlightThumbnailBlobRequests.delete(requestKey);
+    });
+  inFlightThumbnailBlobRequests.set(requestKey, request);
+  return request;
+}
+
+export function requestOriginalPreviewBlob(
+  mediaRecord: MediaRecord,
+  options: OriginalPreviewRequestOptions = {}
+): Promise<Blob> {
+  const mediaSignature = mediaContentSignature(mediaRecord);
+  const cached = originalPreviewBlobCache.get(mediaRecord.id);
+  if (cached) {
+    if (cached.mediaSignature === mediaSignature) {
+      originalPreviewBlobCache.delete(mediaRecord.id);
+      originalPreviewBlobCache.set(mediaRecord.id, cached);
+      return withAbortSignal(Promise.resolve(cached.blob), options.signal);
+    }
+    originalPreviewBlobCache.delete(mediaRecord.id);
+  }
+
+  if (options.signal?.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  const requestKey = originalPreviewRequestKey(mediaRecord);
+  const inFlight = inFlightOriginalPreviewRequests.get(requestKey);
+  if (inFlight) {
+    return withAbortSignal(inFlight, options.signal);
+  }
+
+  const request = thumbnailClient
+    .getPreviewBlob(mediaRecord.id, {
+      version: mediaContentSignature(mediaRecord)
+    })
+    .then((blob) => {
+      originalPreviewBlobCache.set(mediaRecord.id, {
+        mediaSignature,
+        blob
+      });
+      pruneOriginalPreviewCache();
+      return blob;
+    })
+    .finally(() => {
+      inFlightOriginalPreviewRequests.delete(requestKey);
+    });
+  inFlightOriginalPreviewRequests.set(requestKey, request);
+  return withAbortSignal(request, options.signal);
+}
+
+export function prefetchOriginalPreview(mediaRecord: MediaRecord): void {
+  void requestOriginalPreviewBlob(mediaRecord).catch(() => {
+    originalPreviewBlobCache.delete(mediaRecord.id);
+  });
+}
+
 export function readCachedThumbnailStates(mediaRecords: MediaRecord[]): ThumbnailStateByMediaId {
   const states: ThumbnailStateByMediaId = {};
   for (const mediaRecord of mediaRecords) {
-    const thumbnail = thumbnailResourceCache.get(mediaRecord.id);
-    if (!thumbnail) {
+    const entry = thumbnailResourceCache.get(mediaRecord.id);
+    if (!entry) {
       continue;
     }
-    if (isFreshThumbnailForMediaRecord(mediaRecord, thumbnail)) {
-      states[mediaRecord.id] = thumbnail;
+    if (isFreshCachedThumbnailForMediaRecord(mediaRecord, entry)) {
+      states[mediaRecord.id] = entry.thumbnail;
     } else {
       thumbnailResourceCache.delete(mediaRecord.id);
     }
@@ -64,9 +153,6 @@ export function shouldRequestThumbnailState(mediaRecord: MediaRecord): boolean {
   if (mediaState === "failed" || mediaState === "skipped_small") {
     return false;
   }
-  if (mediaState === "ready") {
-    return Boolean(mediaRecord.thumbnailCacheKey);
-  }
   return true;
 }
 
@@ -74,16 +160,79 @@ export function isFreshThumbnailForMediaRecord(
   mediaRecord: MediaRecord,
   thumbnail: ThumbnailResponse
 ): boolean {
+  return isFreshThumbnailResponseForMediaRecord(mediaRecord, thumbnail);
+}
+
+export function isFreshCachedThumbnailForMediaRecord(
+  mediaRecord: MediaRecord,
+  entry: CachedThumbnailEntry
+): boolean {
+  if (entry.mediaSignature !== mediaContentSignature(mediaRecord)) {
+    return false;
+  }
+  return isFreshThumbnailResponseForMediaRecord(mediaRecord, entry.thumbnail);
+}
+
+function isFreshThumbnailResponseForMediaRecord(
+  mediaRecord: MediaRecord,
+  thumbnail: ThumbnailResponse
+): boolean {
   if (thumbnail.fileId !== mediaRecord.id) {
+    return false;
+  }
+  if (thumbnail.target !== GRID_THUMBNAIL_TARGET) {
+    return false;
+  }
+  const mediaState = explicitMediaThumbnailState(mediaRecord.thumbnailState);
+  if (
+    isTerminalThumbnailState(thumbnail.state) &&
+    mediaState !== null &&
+    mediaState !== thumbnail.state
+  ) {
     return false;
   }
 
   // Trust the thumbnail response state directly. The /media listing
-  // endpoint omits per-row thumbnailState/thumbnailCacheKey for
+  // endpoint may omit per-row thumbnailState during paging for
   // performance, so we cannot cross-validate against the media row.
   // Pending/queued states are short-lived and are simply re-requested
   // on the next poll.
   return true;
+}
+
+export function isLiveThumbnailResponseForMediaRecord(
+  mediaRecord: MediaRecord,
+  thumbnail: ThumbnailResponse
+): boolean {
+  return thumbnail.fileId === mediaRecord.id && thumbnail.target === GRID_THUMBNAIL_TARGET;
+}
+
+function explicitMediaThumbnailState(
+  value: string | null | undefined
+): ThumbnailResponse["state"] | null {
+  if (
+    value === "pending" ||
+    value === "queued" ||
+    value === "ready" ||
+    value === "failed" ||
+    value === "skipped_small"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function isTerminalThumbnailState(value: ThumbnailResponse["state"]): boolean {
+  return value === "ready" || value === "failed" || value === "skipped_small";
+}
+
+export function previewPlaceholderDataUrl(mediaRecord: MediaRecord): string | null {
+  const bytes = mediaRecord.previewPlaceholder;
+  if (!bytes || bytes.length === 0) {
+    return null;
+  }
+  const mediaType = mediaRecord.previewPlaceholderFormat ?? "image/webp";
+  return `data:${mediaType};base64,${bytesToBase64(bytes)}`;
 }
 
 function normalizeMediaThumbnailState(value: string | null | undefined): ThumbnailResponse["state"] {
@@ -100,9 +249,54 @@ function normalizeMediaThumbnailState(value: string | null | undefined): Thumbna
 }
 
 function thumbnailRequestKey(mediaRecord: MediaRecord): string {
+  return [mediaContentSignature(mediaRecord), GRID_THUMBNAIL_TARGET].join(":");
+}
+
+function originalPreviewRequestKey(mediaRecord: MediaRecord): string {
+  return [mediaContentSignature(mediaRecord), "original"].join(":");
+}
+
+function pruneOriginalPreviewCache(): void {
+  while (originalPreviewBlobCache.size > ORIGINAL_PREVIEW_CACHE_LIMIT) {
+    const firstKey = originalPreviewBlobCache.keys().next().value;
+    if (firstKey === undefined) break;
+    originalPreviewBlobCache.delete(firstKey);
+  }
+}
+
+function withAbortSignal<T>(request: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return request;
+  if (signal.aborted) return Promise.reject(createAbortError());
+
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(createAbortError());
+    signal.addEventListener("abort", abort, { once: true });
+    request.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", abort);
+    });
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+export function mediaContentSignature(mediaRecord: MediaRecord): string {
   return [
     mediaRecord.id,
-    normalizeMediaThumbnailState(mediaRecord.thumbnailState),
-    mediaRecord.thumbnailCacheKey ?? ""
+    mediaRecord.mtime,
+    mediaRecord.size,
+    normalizeMediaThumbnailState(mediaRecord.thumbnailState)
   ].join(":");
+}
+
+function bytesToBase64(bytes: number[]): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    const chunk = bytes.slice(offset, offset + 8192);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }

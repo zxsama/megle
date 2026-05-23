@@ -74,6 +74,8 @@ export interface MediaRecord {
   height?: number | null;
   durationMs?: number | null;
   codec?: string | null;
+  previewPlaceholder?: number[] | null;
+  previewPlaceholderFormat?: string | null;
   thumbnailState?: string | null;
   thumbnailCacheKey?: string | null;
   rating?: number | null;
@@ -130,7 +132,6 @@ export interface SetFileTagsRequest {
 }
 
 export interface ThumbnailAsset {
-  cacheKey: string;
   width: number;
   height: number;
   byteSize: number;
@@ -138,10 +139,14 @@ export interface ThumbnailAsset {
 
 export interface ThumbnailResponse {
   fileId: number;
-  profile: "grid_320";
+  target: "grid_320";
   state: "pending" | "queued" | "ready" | "failed" | "skipped_small";
   shortSidePx: number;
   outputFormat: "image/webp";
+  width: number | null;
+  height: number | null;
+  byteSize: number | null;
+  servedBy: "db_blob" | null;
   asset: ThumbnailAsset | null;
   error: string | null;
   updatedAt: number | null;

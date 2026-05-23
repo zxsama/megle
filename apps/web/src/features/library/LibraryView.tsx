@@ -92,6 +92,7 @@ export function LibraryCenterPane({
           {previewMedia ? (
             <CentralPreviewStage
               selectedMedia={previewMedia}
+              thumbnail={library.thumbnailStatesByMediaId[previewMedia.id]}
               onClosePreview={onClosePreview}
               onCommandChange={onPreviewCommandChange}
               onPreviewNext={onPreviewNext}

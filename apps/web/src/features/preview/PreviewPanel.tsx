@@ -27,7 +27,7 @@ export function PreviewPanel({
               <MediaPreview
                 media={selectedMedia}
                 onMediaReady={undefined}
-                source="original"
+                source="thumbnail"
                 thumbnail={thumbnail}
               />
             </div>

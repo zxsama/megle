@@ -10,6 +10,7 @@ use crate::db::{
     Database, FileUpsert, FolderUpsert, RootRecord, ScanFileUpsert, ScanWriteBatch,
     TaskScanProgress,
 };
+use crate::thumbnails::generate_preview_placeholder;
 
 pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 1_000;
 
@@ -354,6 +355,29 @@ fn probe_image_dimensions(
                     database.update_media_dimensions(*file_id, width as i64, height as i64)
                 {
                     tracing::debug!(file_id = *file_id, %error, "failed to record probed dimensions");
+                }
+                match generate_preview_placeholder(path) {
+                    Ok(placeholder) => {
+                        if let Err(error) = database.update_media_preview_placeholder(
+                            *file_id,
+                            &placeholder.data,
+                            placeholder.output_format,
+                        ) {
+                            tracing::debug!(
+                                file_id = *file_id,
+                                %error,
+                                "failed to record preview placeholder"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            file_id = *file_id,
+                            path = %path.display(),
+                            %error,
+                            "preview placeholder generation failed"
+                        );
+                    }
                 }
             }
             Err(error) => {
@@ -1012,6 +1036,52 @@ mod tests {
     }
 
     #[test]
+    fn scan_root_writes_preview_placeholder_for_images() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("image.jpg"), 800, 400);
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.display().to_string(),
+                display_name: "preview-placeholder".to_string(),
+            })
+            .expect("add root");
+        let root = database
+            .get_root(root_id)
+            .expect("get root")
+            .expect("root exists");
+
+        crate::scan::scan_root(&mut database, &root).expect("scan root");
+
+        let media = database
+            .get_media(1)
+            .expect("get media")
+            .expect("media exists");
+        let placeholder = media
+            .preview_placeholder
+            .as_deref()
+            .expect("preview placeholder bytes");
+        assert_eq!(&placeholder[0..4], b"RIFF");
+        assert_eq!(&placeholder[8..12], b"WEBP");
+        assert!(placeholder.len() <= 8192);
+        let dimensions = image::load_from_memory(placeholder)
+            .expect("decode preview placeholder")
+            .into_rgba8()
+            .dimensions();
+        assert!(dimensions.0 <= crate::thumbnails::PREVIEW_PLACEHOLDER_MAX_SIDE_PX);
+        assert!(dimensions.1 <= crate::thumbnails::PREVIEW_PLACEHOLDER_MAX_SIDE_PX);
+        assert_eq!(
+            media.preview_placeholder_format.as_deref(),
+            Some("image/webp")
+        );
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
     fn scan_root_leaves_metadata_pending_when_image_dimensions_probe_fails() {
         let temp_root = unique_temp_dir();
         fs::create_dir_all(&temp_root).expect("create root dir");
@@ -1147,5 +1217,14 @@ mod tests {
                 .as_nanos(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
+    }
+
+    fn write_test_image(path: &Path, width: u32, height: u32) {
+        let buffer = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 255) as u8, (y % 255) as u8, 32])
+        });
+        image::DynamicImage::ImageRgb8(buffer)
+            .save(path)
+            .expect("write test image");
     }
 }

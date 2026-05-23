@@ -49,8 +49,14 @@ export class CoreApiError extends Error {
   }
 }
 
+export interface BlobRequestOptions {
+  signal?: AbortSignal;
+  version?: number | string | null;
+}
+
 type QueryParams = Partial<ListMediaParams & ListFolderChildrenParams> & {
-  profile?: "grid_320";
+  target?: "grid_320";
+  v?: number | string | null;
 };
 
 export function createCoreClient(config: CoreClientConfig) {
@@ -75,12 +81,15 @@ export function createCoreClient(config: CoreClientConfig) {
     return body as T;
   }
 
-  async function fetchBlob(path: string): Promise<Blob> {
+  async function fetchBlob(path: string, options: BlobRequestOptions = {}): Promise<Blob> {
     const headers = new Headers();
     if (config.sessionToken) {
       headers.set("x-megle-session", config.sessionToken);
     }
-    const response = await fetch(resolveUrl(config.baseUrl, path), { headers });
+    const response = await fetch(resolveUrl(config.baseUrl, path), {
+      headers,
+      signal: options.signal
+    });
     if (!response.ok) {
       const body = await readResponseBody(response);
       throw new CoreApiError(response.status, body);
@@ -117,12 +126,20 @@ export function createCoreClient(config: CoreClientConfig) {
       request<Page<FolderRecord>>(`/folders/${folderId}/children${query(params)}`),
     listMedia: (params: ListMediaParams = {}) => request<Page<MediaRecord>>(`/media${query(params)}`),
     getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`),
-    getThumbnail: (fileId: number, profile: "grid_320" = "grid_320") =>
-      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ profile })}`),
-    getThumbnailBlob: async (fileId: number, profile: "grid_320" = "grid_320") => {
-      return fetchBlob(`/media/${fileId}/thumbnail/blob${query({ profile })}`);
+    getThumbnail: (fileId: number, target: "grid_320" = "grid_320") =>
+      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ target })}`),
+    getThumbnailBlob: async (
+      fileId: number,
+      target: "grid_320" = "grid_320",
+      options: BlobRequestOptions = {}
+    ) => {
+      return fetchBlob(
+        `/media/${fileId}/thumbnail/blob${query({ target, v: options.version })}`,
+        options
+      );
     },
-    getPreviewBlob: (fileId: number) => fetchBlob(`/media/${fileId}/preview`),
+    getPreviewBlob: (fileId: number, options: BlobRequestOptions = {}) =>
+      fetchBlob(`/media/${fileId}/preview${query({ v: options.version })}`, options),
     listTags: () => request<TagListResponse>("/tags"),
     createTag: (body: CreateTagRequest) =>
       request<TagRecord>("/tags", {
@@ -209,7 +226,10 @@ function query(params: QueryParams): string {
   if (params.cursor) search.set("cursor", params.cursor);
   if ("sort" in params && params.sort) search.set("sort", params.sort);
   if ("kind" in params && params.kind) search.set("kind", params.kind);
-  if ("profile" in params && params.profile) search.set("profile", params.profile);
+  if ("target" in params && params.target) search.set("target", params.target);
+  if ("v" in params && params.v !== null && params.v !== undefined) {
+    search.set("v", String(params.v));
+  }
   const value = search.toString();
   return value ? `?${value}` : "";
 }

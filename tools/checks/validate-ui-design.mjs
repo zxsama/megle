@@ -55,6 +55,7 @@ const libraryInspectorPane = readOptional("apps/web/src/features/library/Library
 const pluginsView = read("apps/web/src/features/plugins/PluginsView.tsx");
 const filterMenu = readOptional("apps/web/src/features/library/FilterMenu.tsx");
 const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const mediaResources = read("apps/web/src/core/mediaResources.ts");
 const previewPanel = read("apps/web/src/features/preview/PreviewPanel.tsx");
 const mediaPreview = read("apps/web/src/features/preview/MediaPreview.tsx");
 const centralPreviewStage = readOptional("apps/web/src/features/preview/CentralPreviewStage.tsx");
@@ -65,6 +66,8 @@ const interfaceStyle = read("apps/web/src/features/settings/interfaceStyle.ts");
 const taskPanel = read("apps/web/src/features/tasks/TaskPanel.tsx");
 const contextMenu = read("apps/web/src/features/file-ops/ContextMenu.tsx");
 const desktopBridge = read("apps/web/src/core/desktop.ts");
+const coreClientContract = read("packages/core-client/src/generated-contract.ts");
+const coreClient = read("packages/core-client/src/client.ts");
 const titlebarPointerPlane = readOptional("apps/web/src/app-shell/useTitlebarPointerPlane.ts") ?? "";
 const libraryFilterSources = libraryView + "\n" + (filterMenu ?? "");
 const desktopMainAst = ts.createSourceFile(
@@ -74,6 +77,18 @@ const desktopMainAst = ts.createSourceFile(
   true,
   ts.ScriptKind.TS
 );
+
+for (const value of ["previewPlaceholder", "previewPlaceholderFormat", "servedBy", "db_blob"]) {
+  if (!coreClientContract.includes(value)) {
+    fail(`Core preview pipeline contract must expose ${value}`);
+  }
+}
+if (coreClientContract.includes("cacheKey:")) {
+  fail("Core preview pipeline contract must not expose thumbnail disk cache keys");
+}
+if (!coreClient.includes("target: \"grid_320\"") || coreClient.includes("profile?: \"grid_320\"")) {
+  fail("Core client thumbnail helpers must use target=grid_320 vocabulary");
+}
 
 const nativeMaterial = inspectNativeBrowserWindowOptions(desktopMain);
 if (!nativeMaterial.browserWindowOptionsFound) {
@@ -804,12 +819,44 @@ if (!previewPanel.includes("showPreviewImage") || !libraryView.includes("showPre
   fail("right inspector must hide its preview image while the central preview is open");
 }
 
-if (!previewPanel.includes('source="original"')) {
-  fail("right inspector selected preview must render from original/preview bytes so portrait media is not cropped by grid thumbnails");
+if (previewPanel.includes('source="original"')) {
+  fail("right inspector selected preview must stay on thumbnail source and must not request original media");
 }
 
-if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("getThumbnailBlob")) {
-  fail("MediaPreview must separate central original preview loading from thumbnail preview loading");
+if (!previewPanel.includes('source="thumbnail"')) {
+  fail("right inspector selected preview must render the light grid_320 thumbnail path");
+}
+
+if (!mediaResources.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
+  fail("MediaPreview must separate central original preview loading from shared thumbnail blob loading");
+}
+
+if (!/requestOriginalPreviewBlob/.test(mediaPreview) || !/originalPreviewBlobCache/.test(mediaResources)) {
+  fail("MediaPreview central original loading must use the shared original preview cache");
+}
+
+if (/getPreviewBlob\(mediaRecord\.id,\s*\{[\s\S]{0,120}signal:/.test(mediaResources)) {
+  fail("MediaPreview original-preview cache must not let one AbortSignal cancel shared in-flight reuse");
+}
+
+if (!/mediaContentSignature\(media\)/.test(mediaPreview) || !/source="original"[\s\S]*?versionKey=\{originalVersionKey\}/.test(mediaPreview)) {
+  fail("MediaPreview central original preview must reload on media signature changes");
+}
+
+if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"ready"\s*\?\s*thumbnail\.fileId/.test(mediaPreview)) {
+  fail("MediaPreview must wait for live ready thumbnail metadata before requesting fallback thumbnail blobs");
+}
+
+if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{\s*signal:\s*controller\.signal/.test(mediaPreview)) {
+  fail("MediaPreview central original requests must use AbortController cleanup");
+}
+
+if (/\},\s*\[media,\s*source,\s*versionKey\]\);/.test(mediaPreview)) {
+  fail("MediaPreview central original requests must not reset for unchanged media object identity churn");
+}
+
+if (/useThumbnailFallbackUrl\(\s*thumbnail\?\.state\s*===\s*"ready"/.test(mediaPreview)) {
+  fail("MediaPreview must not fetch thumbnail fallback when thumbnail is already the primary source");
 }
 
 if (
@@ -817,6 +864,34 @@ if (
   !mediaPreview.includes('source = "thumbnail"')
 ) {
   fail("MediaPreview must make thumbnail rendering the default and require explicit original preview mode");
+}
+
+if (!mediaPreview.includes("previewPlaceholderUrl") || !mediaPreview.includes("fallbackThumbnail")) {
+  fail("MediaPreview must support placeholder-first display and thumbnail fallback while original media loads");
+}
+
+if (!/previewPlaceholderDataUrl\(media\)/.test(mediaPreview) || /usePreviewPlaceholderUrl/.test(mediaPreview)) {
+  fail("MediaPreview placeholder-first path must be synchronous on first render");
+}
+
+if (!mediaGrid.includes("previewPlaceholder") || !mediaGrid.includes("previewPlaceholderUrl")) {
+  fail("MediaGrid tiles must render previewPlaceholder immediately before grid_320 loads");
+}
+
+if (!/previewPlaceholderDataUrl\(item\)/.test(mediaGrid) || /usePreviewPlaceholderUrl/.test(mediaGrid)) {
+  fail("MediaGrid placeholder-first path must be synchronous on first render");
+}
+
+if (!mediaGrid.includes("requestThumbnailBlob") || mediaGrid.includes("createCoreClient")) {
+  fail("MediaGrid must use db_blob thumbnail resources instead of ad hoc client/cache-key loading");
+}
+
+if (/thumbnailUpdatedAt=\{thumbnail\?\.updatedAt\s*\?\?\s*null\}/.test(mediaGrid) || !/hasLiveReadyThumbnail/.test(mediaGrid)) {
+  fail("MediaGrid must wait for live ready thumbnail metadata before requesting versioned thumbnail blobs");
+}
+
+if (!/data-preview-placeholder/.test(mediaGrid) || !/data-preview-placeholder/.test(mediaPreview)) {
+  fail("placeholder-first UI must expose data-preview-placeholder markers for smoke validation");
 }
 
 if (!centralPreviewStage) {
@@ -877,8 +952,8 @@ if (!centralPreviewStage) {
     fail("central preview must expose state and commands for the integrated center titlebar");
   }
 
-  if (/MediaPreview[\s\S]{0,120}thumbnail=/.test(centralPreviewStage)) {
-    fail("central preview must not pass thumbnail state into the displayed MediaPreview");
+  if (!/MediaPreview[\s\S]{0,220}source="original"[\s\S]{0,220}thumbnail=\{thumbnail\}/.test(centralPreviewStage)) {
+    fail("central preview must request original media while passing thumbnail only as a loading fallback");
   }
 
   if (!centralPreviewStage.includes("translate(-50%, -50%)")) {
