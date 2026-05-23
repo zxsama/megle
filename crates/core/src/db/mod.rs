@@ -2287,6 +2287,12 @@ impl Database {
             for row in rows {
                 let (file_id, profile, cache_key, width, height, _byte_size, output_format) = row?;
                 if !is_safe_thumbnail_cache_key(&cache_key) {
+                    invalidate_legacy_thumbnail_import_candidate(
+                        &self.connection,
+                        file_id,
+                        &profile,
+                        "unsafe legacy thumbnail cache key",
+                    )?;
                     continue;
                 }
                 let cache_path = cache_root.join(&cache_key);
@@ -2294,6 +2300,12 @@ impl Database {
                     Ok(data) => data,
                     Err(error) => {
                         tracing::debug!(file_id, %error, "legacy thumbnail cache import skipped unreadable file");
+                        invalidate_legacy_thumbnail_import_candidate(
+                            &self.connection,
+                            file_id,
+                            &profile,
+                            "legacy thumbnail cache file unreadable",
+                        )?;
                         continue;
                     }
                 };
@@ -2302,6 +2314,12 @@ impl Database {
                         file_id,
                         "legacy thumbnail cache import skipped non-WebP file"
                     );
+                    invalidate_legacy_thumbnail_import_candidate(
+                        &self.connection,
+                        file_id,
+                        &profile,
+                        "legacy thumbnail cache file invalid",
+                    )?;
                     continue;
                 }
                 let now = unix_timestamp();
@@ -4018,6 +4036,34 @@ fn is_safe_thumbnail_cache_key(cache_key: &str) -> bool {
     is_safe_cache_key(cache_key)
 }
 
+fn invalidate_legacy_thumbnail_import_candidate(
+    connection: &rusqlite::Connection,
+    file_id: i64,
+    profile: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    connection.execute(
+        r#"
+        UPDATE thumbs
+        SET state = 'pending',
+            cache_key = NULL,
+            width = NULL,
+            height = NULL,
+            byte_size = NULL,
+            error = ?3,
+            source_fingerprint = NULL,
+            updated_at = ?4
+        WHERE file_id = ?1 AND profile = ?2
+        "#,
+        (file_id, profile, error, unix_timestamp()),
+    )?;
+    connection.execute(
+        "DELETE FROM thumb_blobs WHERE file_id = ?1 AND profile = ?2",
+        (file_id, profile),
+    )?;
+    Ok(())
+}
+
 fn cleanup_legacy_thumbnail_cache_tree(cache_root: &Path) {
     if let Err(error) = std::fs::remove_dir_all(cache_root) {
         tracing::debug!(
@@ -4636,6 +4682,75 @@ mod tests {
         assert!(!orphan_path.exists());
         assert!(!corrupt_path.exists());
         assert!(!database.default_thumbnail_cache_dir().exists());
+
+        let _ = std::fs::remove_dir_all(db_dir);
+    }
+
+    #[test]
+    fn legacy_thumbnail_cache_import_invalidates_ready_row_when_referenced_file_is_corrupt() {
+        let db_dir = unique_db_temp_dir("legacy-cache-corrupt");
+        std::fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "corrupt.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media kind");
+        database
+            .update_media_dimensions(file_id, 640, 320)
+            .expect("set dimensions");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        let cache_key = "aa/bb/corrupt.webp";
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: Some(cache_key.to_string()),
+                width: Some(640),
+                height: Some(320),
+                byte_size: Some(12),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("seed ready thumbnail");
+        let cache_path = database.default_thumbnail_cache_dir().join(cache_key);
+        std::fs::create_dir_all(cache_path.parent().expect("cache parent"))
+            .expect("create cache dirs");
+        std::fs::write(&cache_path, b"not a webp").expect("write corrupt legacy cache");
+
+        let imported = database
+            .import_legacy_thumbnail_cache()
+            .expect("import legacy cache");
+
+        assert_eq!(imported, 0);
+        assert!(database
+            .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read thumb blob")
+            .is_none());
+        assert!(!database.default_thumbnail_cache_dir().exists());
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_ne!(thumbnail.state, "ready");
 
         let _ = std::fs::remove_dir_all(db_dir);
     }
