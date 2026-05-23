@@ -210,7 +210,7 @@ interface ThumbnailResponse {
   height: number | null;
   byteSize: number | null;
   servedBy: string | null;
-  asset: { cacheKey: string; width: number; height: number; byteSize: number } | null;
+  asset: { width: number; height: number; byteSize: number } | null;
   error: string | null;
 }
 

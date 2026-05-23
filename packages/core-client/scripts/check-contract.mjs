@@ -327,13 +327,13 @@ for (const line of [
 
 const thumbnailAssetBody = interfaceBody("ThumbnailAsset");
 for (const line of [
-  "cacheKey: string;",
   "width: number;",
   "height: number;",
   "byteSize: number;"
 ]) {
   requireLine(thumbnailAssetBody, line, "generated-contract.ts ThumbnailAsset");
 }
+requireNotLine(thumbnailAssetBody, "cacheKey:", "generated-contract.ts ThumbnailAsset");
 
 const taskBody = interfaceBody("TaskRecord");
 for (const line of [

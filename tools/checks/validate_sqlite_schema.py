@@ -18,6 +18,7 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0010_media_fts_contentless_delete.sql",
     ROOT / "crates" / "core" / "migrations" / "0011_plugins_extended.sql",
     ROOT / "crates" / "core" / "migrations" / "0012_preview_pipeline_refactor.sql",
+    ROOT / "crates" / "core" / "migrations" / "0013_preview_served_by.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -140,6 +141,17 @@ def apply_migration(conn: sqlite3.Connection, migration: Path) -> None:
                 "ALTER TABLE media ADD COLUMN preview_placeholder_format TEXT NOT NULL DEFAULT 'image/webp'"
             )
         conn.executescript(migration.read_text(encoding="utf-8"))
+        return
+    if name == "0013_preview_served_by.sql":
+        if not table_has_column(conn, "thumbs", "served_by"):
+            conn.executescript(migration.read_text(encoding="utf-8"))
+        else:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+                VALUES (13, 'preview_served_by', unixepoch())
+                """
+            )
         return
     conn.executescript(migration.read_text(encoding="utf-8"))
 
@@ -276,6 +288,11 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 12 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 13"
+            ).fetchone()
+            if version is None:
+                fail("migration version 13 was not recorded")
 
             media_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(media)").fetchall()
@@ -312,6 +329,7 @@ def main() -> None:
                 "short_side_px",
                 "output_format",
                 "source_fingerprint",
+                "served_by",
                 "error",
                 "updated_at",
             }
@@ -375,18 +393,29 @@ def main() -> None:
                 """
                 INSERT INTO thumbs(
                     file_id, profile, state, cache_key, width, height, byte_size,
-                    short_side_px, output_format, updated_at
+                    short_side_px, output_format, served_by, updated_at
                 )
-                VALUES (?, ?, 'ready', 'aa/bb/key.webp', 427, 320, 4096, 320, ?, 11)
+                VALUES (?, ?, 'ready', NULL, 427, 320, 4096, 320, ?, 'db_blob', 11)
                 """,
                 (file_id, THUMBNAIL_PROFILE, THUMBNAIL_FORMAT),
             )
+            invalid_served_by = conn.execute(
+                """
+                UPDATE OR IGNORE thumbs
+                SET served_by = 'thumbnail-cache'
+                WHERE file_id = ? AND profile = ?
+                """,
+                (file_id, THUMBNAIL_PROFILE),
+            ).rowcount
+            if invalid_served_by != 0:
+                fail("thumbnail served_by must reject disk-cache serving sources")
             for status in THUMBNAIL_STATUSES - {"ready"}:
                 conn.execute(
                     """
                     UPDATE thumbs
                     SET state = ?, cache_key = NULL, width = NULL, height = NULL,
-                        byte_size = NULL, error = CASE WHEN ? = 'failed' THEN 'decode failed' ELSE NULL END
+                        byte_size = NULL, served_by = NULL,
+                        error = CASE WHEN ? = 'failed' THEN 'decode failed' ELSE NULL END
                     WHERE file_id = ? AND profile = ?
                     """,
                     (status, status, file_id, THUMBNAIL_PROFILE),

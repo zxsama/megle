@@ -28,6 +28,7 @@ const thumbnailSourceMigrationSql = read("crates/core/migrations/0005_thumbnail_
 const thumbnailTaskAttemptMigrationSql = read("crates/core/migrations/0006_thumbnail_task_attempt_fingerprint.sql");
 const taskStatusContractMigrationSql = read("crates/core/migrations/0007_task_status_contract.sql");
 const taskAttemptGenerationMigrationSql = read("crates/core/migrations/0008_task_attempt_generation.sql");
+const previewServedByMigrationSql = read("crates/core/migrations/0013_preview_served_by.sql");
 const thumbnailsRs = read("crates/core/src/thumbnails/mod.rs");
 const pluginsRs = read("crates/core/src/plugins/mod.rs");
 const fsopsRs = read("crates/core/src/fsops/mod.rs");
@@ -155,6 +156,9 @@ if (!dbMigrationsRs.includes('include_str!("../../migrations/0010_media_fts_cont
 if (!dbMigrationsRs.includes('include_str!("../../migrations/0011_plugins_extended.sql")')) {
   fail("db plugins extended migration include path changed or missing");
 }
+if (!dbMigrationsRs.includes('include_str!("../../migrations/0013_preview_served_by.sql")')) {
+  fail("db preview served_by migration include path changed or missing");
+}
 if (!dbModRs.includes("pub fn apply_migrations")) {
   fail("Database::apply_migrations is missing");
 }
@@ -237,6 +241,9 @@ for (const value of [
     fail(`OpenAPI thumbnail contract missing ${value}`);
   }
 }
+if (/cacheKey:\n/.test(openApi) || /cache_key:\s*String/.test(routesRs)) {
+  fail("thumbnail public API must not expose disk cache keys");
+}
 for (const value of ["short_side_px", "output_format", "skipped_small", "image/webp"]) {
   if (!migrationSql.includes(value) || !thumbnailMigrationSql.includes(value)) {
     fail(`thumbnail schema migration missing ${value}`);
@@ -254,6 +261,19 @@ for (const value of ["thumbnail_source_fingerprint", "thumbnail_task_attempt_fin
   if (!thumbnailTaskAttemptMigrationSql.includes(value)) {
     fail(`thumbnail task attempt fingerprint migration missing ${value}`);
   }
+}
+for (const value of ["served_by", "db_blob", "version, name, applied_at", "preview_served_by"]) {
+  if (!previewServedByMigrationSql.includes(value)) {
+    fail(`preview served_by migration missing ${value}`);
+  }
+}
+for (const value of ["served_by", "db_blob"]) {
+  if (!dbModRs.includes(value)) {
+    fail(`thumbnail served_by ledger support missing ${value}`);
+  }
+}
+if (/cache_key:\s*Some\(cache_key/.test(tasksRs)) {
+  fail("thumbnail tasks must not persist runtime disk cache keys for DB blob thumbnails");
 }
 for (const value of [
   "DROP TABLE IF EXISTS thumbs_new",

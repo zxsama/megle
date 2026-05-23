@@ -30,6 +30,7 @@ import {
   openPath,
   revealPath
 } from "../core/desktop";
+import { prefetchOriginalPreview } from "../core/mediaResources";
 import { useLibraryData, type LibraryState } from "../core/useLibraryData";
 import { LiquidGlassLayer, useInterfaceStyle } from "../design/liquid-glass";
 import { type ContextMenuItem } from "../features/file-ops/ContextMenu";
@@ -77,6 +78,14 @@ export function App() {
   const canPreviewPrevious = selectedMediaIndex > 0;
   const canPreviewNext =
     selectedMediaIndex >= 0 && selectedMediaIndex < library.media.length - 1;
+
+  useEffect(() => {
+    if (!previewOpen || selectedMediaIndex < 0) return;
+    const previous = library.media[selectedMediaIndex - 1];
+    const next = library.media[selectedMediaIndex + 1];
+    if (previous) prefetchOriginalPreview(previous);
+    if (next) prefetchOriginalPreview(next);
+  }, [library.media, previewOpen, selectedMediaIndex]);
 
   const handleClosePreview = useCallback(() => {
     setPreviewOpen(false);

@@ -55,6 +55,7 @@ const libraryInspectorPane = readOptional("apps/web/src/features/library/Library
 const pluginsView = read("apps/web/src/features/plugins/PluginsView.tsx");
 const filterMenu = readOptional("apps/web/src/features/library/FilterMenu.tsx");
 const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const mediaResources = read("apps/web/src/core/mediaResources.ts");
 const previewPanel = read("apps/web/src/features/preview/PreviewPanel.tsx");
 const mediaPreview = read("apps/web/src/features/preview/MediaPreview.tsx");
 const centralPreviewStage = readOptional("apps/web/src/features/preview/CentralPreviewStage.tsx");
@@ -81,6 +82,9 @@ for (const value of ["previewPlaceholder", "previewPlaceholderFormat", "servedBy
   if (!coreClientContract.includes(value)) {
     fail(`Core preview pipeline contract must expose ${value}`);
   }
+}
+if (coreClientContract.includes("cacheKey:")) {
+  fail("Core preview pipeline contract must not expose thumbnail disk cache keys");
 }
 if (!coreClient.includes("target: \"grid_320\"") || coreClient.includes("profile?: \"grid_320\"")) {
   fail("Core client thumbnail helpers must use target=grid_320 vocabulary");
@@ -737,8 +741,16 @@ if (!previewPanel.includes('source="thumbnail"')) {
   fail("right inspector selected preview must render the light grid_320 thumbnail path");
 }
 
-if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
+if (!mediaResources.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
   fail("MediaPreview must separate central original preview loading from shared thumbnail blob loading");
+}
+
+if (!/requestOriginalPreviewBlob/.test(mediaPreview) || !/originalPreviewBlobCache/.test(mediaResources)) {
+  fail("MediaPreview central original loading must use the shared original preview cache");
+}
+
+if (/getPreviewBlob\(mediaRecord\.id,\s*\{[\s\S]{0,120}signal:/.test(mediaResources)) {
+  fail("MediaPreview original-preview cache must not let one AbortSignal cancel shared in-flight reuse");
 }
 
 if (!/mediaContentSignature\(media\)/.test(mediaPreview) || !/source="original"[\s\S]*?versionKey=\{originalVersionKey\}/.test(mediaPreview)) {
@@ -749,8 +761,12 @@ if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"
   fail("MediaPreview must wait for live ready thumbnail metadata before requesting fallback thumbnail blobs");
 }
 
-if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal,\s*version:\s*versionKey\s*\?\?\s*null\s*\}\)/.test(mediaPreview)) {
+if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{\s*signal:\s*controller\.signal/.test(mediaPreview)) {
   fail("MediaPreview central original requests must use AbortController cleanup");
+}
+
+if (/\},\s*\[media,\s*source,\s*versionKey\]\);/.test(mediaPreview)) {
+  fail("MediaPreview central original requests must not reset for unchanged media object identity churn");
 }
 
 if (/useThumbnailFallbackUrl\(\s*thumbnail\?\.state\s*===\s*"ready"/.test(mediaPreview)) {

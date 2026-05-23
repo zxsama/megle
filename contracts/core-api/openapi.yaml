@@ -1077,6 +1077,8 @@ components:
         thumbnailCacheKey:
           type: string
           nullable: true
+          deprecated: true
+          description: Always null for the DB-blob-backed preview pipeline; not runtime cache truth.
         rating:
           type: integer
           nullable: true
@@ -1095,10 +1097,8 @@ components:
             minimum: 1
     ThumbnailAsset:
       type: object
-      required: [cacheKey, width, height, byteSize]
+      required: [width, height, byteSize]
       properties:
-        cacheKey:
-          type: string
         width:
           type: integer
           minimum: 1

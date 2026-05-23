@@ -1,13 +1,12 @@
 use tokio::sync::mpsc;
 
-use std::fs;
 use std::path::Path;
 
 use crate::db::{Database, TaskScanProgress, ThumbBlobRecord, ThumbnailStateUpsert};
 use crate::scan::{ScanOptions, TaskAttemptGuard};
 use crate::thumbnails::{
-    cache_key_for, generate_image_thumbnail_bytes, generate_video_thumbnail_bytes,
-    ThumbnailDecision, ThumbnailPolicy, GENERATED_FORMAT, GRID_320_PROFILE,
+    generate_image_thumbnail_bytes, generate_video_thumbnail_bytes, ThumbnailDecision,
+    ThumbnailPolicy, GENERATED_FORMAT, GRID_320_PROFILE,
 };
 
 const TASK_PROGRESS_FLUSH_INTERVAL_ITEMS: i64 = 100;
@@ -337,7 +336,7 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
     database: &mut Database,
     task_id: i64,
     attempt_generation: i64,
-    cache_root: &Path,
+    _cache_root: &Path,
     ffmpeg_available: bool,
     before_publish: impl FnOnce(&mut Database),
 ) -> anyhow::Result<()> {
@@ -417,7 +416,6 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
         return Ok(());
     }
 
-    let cache_key = cache_key_for(&source.cache_identity(), GRID_320_PROFILE);
     let source_path = database
         .resolve_file_source_path(file_id)?
         .ok_or_else(|| anyhow::anyhow!("source path not found for file {file_id}"))?;
@@ -442,12 +440,8 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
         }
     };
     before_publish(database);
-    if let Err(error) = database.ensure_task_not_cancelled(task_id) {
-        cleanup_thumbnail_cache_file(cache_root, &cache_key);
-        return Err(error);
-    }
+    database.ensure_task_not_cancelled(task_id)?;
     if !database.task_attempt_is_current(task_id, attempt_generation)? {
-        cleanup_thumbnail_cache_file(cache_root, &cache_key);
         return Err(anyhow::anyhow!(
             "task {task_id} attempt superseded before thumbnail publish"
         ));
@@ -470,7 +464,7 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
                 file_id,
                 profile: GRID_320_PROFILE.to_string(),
                 state: "ready".to_string(),
-                cache_key: Some(cache_key.clone()),
+                cache_key: None,
                 width: Some(generated.width),
                 height: Some(generated.height),
                 byte_size: Some(generated.byte_size),
@@ -483,7 +477,6 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
             attempt_generation,
         )?;
     if !published {
-        cleanup_thumbnail_cache_file(cache_root, &cache_key);
         return Err(anyhow::anyhow!(
             "{THUMBNAIL_SOURCE_CHANGED_ERROR}: {file_id}"
         ));
@@ -497,21 +490,6 @@ fn unix_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn cleanup_thumbnail_cache_file(cache_root: &Path, cache_key: &str) {
-    let path = cache_root.join(cache_key);
-    let _ = fs::remove_file(&path);
-    let mut current = path.parent();
-    while let Some(directory) = current {
-        if directory == cache_root {
-            break;
-        }
-        if fs::remove_dir(directory).is_err() {
-            break;
-        }
-        current = directory.parent();
-    }
 }
 
 #[cfg(test)]
@@ -554,8 +532,8 @@ mod tests {
             .expect("thumbnail exists");
         assert_eq!(thumbnail.state, "ready");
         assert_eq!(thumbnail.output_format, crate::thumbnails::GENERATED_FORMAT);
-        let cache_key = thumbnail.cache_key.expect("cache key");
-        assert!(crate::thumbnails::is_safe_cache_key(&cache_key));
+        assert_eq!(thumbnail.cache_key, None);
+        assert_eq!(thumbnail.served_by.as_deref(), Some("db_blob"));
         // Source is 800x400 (landscape, short side 400). After resizing the
         // short side to 320 the long side becomes 640. Real WebP, not
         // placeholder.
@@ -573,7 +551,6 @@ mod tests {
             .expect("read cache root")
             .next()
             .is_none());
-        assert!(fs::metadata(temp_root.join(&cache_key)).is_err());
 
         fs::remove_dir_all(temp_root).expect("cleanup media root");
         fs::remove_dir_all(cache_root).expect("cleanup cache root");

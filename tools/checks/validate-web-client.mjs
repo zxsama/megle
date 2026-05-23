@@ -38,6 +38,7 @@ const mediaResources = existsSync(path.join(root, mediaResourcesPath))
   ? read(mediaResourcesPath)
   : "";
 const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const app = read("apps/web/src/app/App.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
 const librarySidebar = read("apps/web/src/features/library/LibrarySidebar.tsx");
 const previewPanelPath = "apps/web/src/features/preview/PreviewPanel.tsx";
@@ -305,17 +306,38 @@ if (!previewPanel) {
 if (!/PreviewPanel/.test(libraryView) || !/selectedMedia/.test(previewPanel) || !/thumbnail/.test(previewPanel)) {
   fail("LibraryView must render a PreviewPanel with selected media and thumbnail state");
 }
-if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
+if (!mediaResources.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
   fail("MediaPreview must load central previews from original media while keeping inspector previews on shared thumbnail blobs");
+}
+if (!/requestOriginalPreviewBlob/.test(mediaResources) || !/originalPreviewBlobCache/.test(mediaResources)) {
+  fail("mediaResources must cache original preview blobs for center preview reuse");
+}
+if (!/prefetchOriginalPreview/.test(mediaResources) || !/inFlightOriginalPreviewRequests/.test(mediaResources)) {
+  fail("mediaResources must expose neighbor original preview prefetch with in-flight coalescing");
+}
+if (!/requestOriginalPreviewBlob/.test(mediaPreview) || /getPreviewBlob/.test(mediaPreview)) {
+  fail("MediaPreview must load central original media through the shared original preview resource cache");
 }
 if (!/mediaContentSignature\(media\)/.test(mediaPreview) || !/source="original"[\s\S]*?versionKey=\{originalVersionKey\}/.test(mediaPreview)) {
   fail("MediaPreview original preview must pass a media signature version key");
 }
+if (!/version:\s*mediaContentSignature\(mediaRecord\)/.test(mediaResources)) {
+  fail("mediaResources original preview cache must load Core preview blobs with media signatures");
+}
+if (/getPreviewBlob\(mediaRecord\.id,\s*\{[\s\S]{0,120}signal:/.test(mediaResources)) {
+  fail("mediaResources original preview cache must not let one consumer AbortSignal cancel the shared in-flight fetch");
+}
+if (!/withAbortSignal\(\s*request,\s*options\.signal\s*\)/.test(mediaResources)) {
+  fail("mediaResources original preview cache must apply AbortSignal only to the individual consumer promise");
+}
 if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"ready"\s*\?\s*thumbnail\.fileId/.test(mediaPreview)) {
   fail("MediaPreview must not request thumbnail blobs without live ready metadata and updatedAt");
 }
-if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal,\s*version:\s*versionKey\s*\?\?\s*null\s*\}\)/.test(mediaPreview)) {
-  fail("MediaPreview original-media requests must be aborted when central preview switches");
+if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{\s*signal:\s*controller\.signal/.test(mediaPreview)) {
+  fail("MediaPreview original-media requests must use an abortable shared cache request when central preview switches");
+}
+if (/\},\s*\[media,\s*source,\s*versionKey\]\);/.test(mediaPreview)) {
+  fail("MediaPreview original-media effect must not reset shared-preview loading for unchanged media object identity churn");
 }
 if (/useThumbnailFallbackUrl\(\s*thumbnail\?\.state\s*===\s*"ready"/.test(mediaPreview)) {
   fail("MediaPreview must not start the thumbnail fallback hook for thumbnail-primary rendering");
@@ -366,6 +388,13 @@ if (!/MediaPreview[\s\S]{0,140}thumbnail=\{thumbnail\}/.test(previewPanel)) {
 }
 if (!/MediaPreview[\s\S]{0,180}source="thumbnail"[\s\S]{0,180}thumbnail=\{thumbnail\}/.test(previewPanel)) {
   fail("PreviewPanel must use the light thumbnail preview path, not original media");
+}
+if (
+  !/prefetchOriginalPreview/.test(app) ||
+  !/previewOpen[\s\S]*selectedMediaIndex[\s\S]*library\.media\[selectedMediaIndex - 1\][\s\S]*prefetchOriginalPreview/.test(app) ||
+  !/library\.media\[selectedMediaIndex \+ 1\][\s\S]*prefetchOriginalPreview/.test(app)
+) {
+  fail("App must prefetch previous and next original previews when center preview is open");
 }
 if (!librarySidebar.includes("loadMoreFolderChildren") || !librarySidebar.includes("Load more")) {
   fail("LibrarySidebar must expose a load-more affordance for paginated folder children");

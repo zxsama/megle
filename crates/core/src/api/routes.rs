@@ -288,7 +288,6 @@ struct CodedErrorResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ThumbnailAsset {
-    cache_key: String,
     width: i64,
     height: i64,
     byte_size: i64,
@@ -305,7 +304,7 @@ struct ThumbnailResponse {
     width: Option<i64>,
     height: Option<i64>,
     byte_size: Option<i64>,
-    served_by: Option<&'static str>,
+    served_by: Option<String>,
     asset: Option<ThumbnailAsset>,
     error: Option<String>,
     updated_at: Option<i64>,
@@ -1100,16 +1099,19 @@ fn thumbnail_response(
     let output_format = ready_blob
         .map(|blob| blob.output_format.clone())
         .unwrap_or_else(|| thumbnail.output_format.clone());
-    let served_by = ready_blob.map(|_| "db_blob");
-    let asset = match (thumbnail.cache_key, ready_blob) {
-        (Some(cache_key), Some(blob)) => Some(ThumbnailAsset {
-            cache_key,
-            width: blob.width,
-            height: blob.height,
-            byte_size: blob.byte_size,
-        }),
-        _ => None,
+    let served_by = if ready_blob.is_some() {
+        thumbnail
+            .served_by
+            .clone()
+            .or_else(|| Some("db_blob".to_string()))
+    } else {
+        None
     };
+    let asset = ready_blob.map(|blob| ThumbnailAsset {
+        width: blob.width,
+        height: blob.height,
+        byte_size: blob.byte_size,
+    });
     ThumbnailResponse {
         file_id: thumbnail.file_id,
         target: thumbnail.profile,
@@ -1800,10 +1802,10 @@ mod tests {
         assert_eq!(ready_response.status(), StatusCode::OK);
         let ready = response_json(ready_response).await;
         assert_eq!(ready["state"], "ready");
-        assert_eq!(ready["asset"]["cacheKey"], "aa/bb/key.webp");
         assert_eq!(ready["asset"]["width"], 427);
         assert_eq!(ready["asset"]["height"], 320);
         assert_eq!(ready["asset"]["byteSize"], 4096);
+        assert!(ready["asset"].get("cacheKey").is_none());
         assert_eq!(ready["servedBy"], "db_blob");
 
         let skipped_response = app
@@ -1950,7 +1952,10 @@ mod tests {
         assert_eq!(body["height"], 320);
         assert_eq!(body["byteSize"], 4096);
         assert_eq!(body["servedBy"], "db_blob");
-        assert!(body["asset"].is_null());
+        assert_eq!(body["asset"]["width"], 427);
+        assert_eq!(body["asset"]["height"], 320);
+        assert_eq!(body["asset"]["byteSize"], 4096);
+        assert!(body["asset"].get("cacheKey").is_none());
     }
 
     #[tokio::test]

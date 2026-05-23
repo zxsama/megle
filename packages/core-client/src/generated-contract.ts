@@ -132,7 +132,6 @@ export interface SetFileTagsRequest {
 }
 
 export interface ThumbnailAsset {
-  cacheKey: string;
   width: number;
   height: number;
   byteSize: number;

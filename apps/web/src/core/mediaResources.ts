@@ -6,6 +6,13 @@ type CachedThumbnailEntry = {
   mediaSignature: string;
   thumbnail: ThumbnailResponse;
 };
+type CachedOriginalPreviewEntry = {
+  mediaSignature: string;
+  blob: Blob;
+};
+type OriginalPreviewRequestOptions = {
+  signal?: AbortSignal;
+};
 
 export const GRID_THUMBNAIL_TARGET = "grid_320";
 
@@ -13,6 +20,9 @@ const thumbnailClient = createCoreClient();
 export const thumbnailResourceCache = new Map<number, CachedThumbnailEntry>();
 export const inFlightThumbnailRequests = new Map<string, Promise<ThumbnailResponse>>();
 export const inFlightThumbnailBlobRequests = new Map<string, Promise<Blob>>();
+export const originalPreviewBlobCache = new Map<number, CachedOriginalPreviewEntry>();
+export const inFlightOriginalPreviewRequests = new Map<string, Promise<Blob>>();
+const ORIGINAL_PREVIEW_CACHE_LIMIT = 5;
 
 export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<ThumbnailResponse> {
   const mediaId = mediaRecord.id;
@@ -70,6 +80,56 @@ export async function requestThumbnailBlob(
     });
   inFlightThumbnailBlobRequests.set(requestKey, request);
   return request;
+}
+
+export function requestOriginalPreviewBlob(
+  mediaRecord: MediaRecord,
+  options: OriginalPreviewRequestOptions = {}
+): Promise<Blob> {
+  const mediaSignature = mediaContentSignature(mediaRecord);
+  const cached = originalPreviewBlobCache.get(mediaRecord.id);
+  if (cached) {
+    if (cached.mediaSignature === mediaSignature) {
+      originalPreviewBlobCache.delete(mediaRecord.id);
+      originalPreviewBlobCache.set(mediaRecord.id, cached);
+      return withAbortSignal(Promise.resolve(cached.blob), options.signal);
+    }
+    originalPreviewBlobCache.delete(mediaRecord.id);
+  }
+
+  if (options.signal?.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  const requestKey = originalPreviewRequestKey(mediaRecord);
+  const inFlight = inFlightOriginalPreviewRequests.get(requestKey);
+  if (inFlight) {
+    return withAbortSignal(inFlight, options.signal);
+  }
+
+  const request = thumbnailClient
+    .getPreviewBlob(mediaRecord.id, {
+      version: mediaContentSignature(mediaRecord)
+    })
+    .then((blob) => {
+      originalPreviewBlobCache.set(mediaRecord.id, {
+        mediaSignature,
+        blob
+      });
+      pruneOriginalPreviewCache();
+      return blob;
+    })
+    .finally(() => {
+      inFlightOriginalPreviewRequests.delete(requestKey);
+    });
+  inFlightOriginalPreviewRequests.set(requestKey, request);
+  return withAbortSignal(request, options.signal);
+}
+
+export function prefetchOriginalPreview(mediaRecord: MediaRecord): void {
+  void requestOriginalPreviewBlob(mediaRecord).catch(() => {
+    originalPreviewBlobCache.delete(mediaRecord.id);
+  });
 }
 
 export function readCachedThumbnailStates(mediaRecords: MediaRecord[]): ThumbnailStateByMediaId {
@@ -190,6 +250,37 @@ function normalizeMediaThumbnailState(value: string | null | undefined): Thumbna
 
 function thumbnailRequestKey(mediaRecord: MediaRecord): string {
   return [mediaContentSignature(mediaRecord), GRID_THUMBNAIL_TARGET].join(":");
+}
+
+function originalPreviewRequestKey(mediaRecord: MediaRecord): string {
+  return [mediaContentSignature(mediaRecord), "original"].join(":");
+}
+
+function pruneOriginalPreviewCache(): void {
+  while (originalPreviewBlobCache.size > ORIGINAL_PREVIEW_CACHE_LIMIT) {
+    const firstKey = originalPreviewBlobCache.keys().next().value;
+    if (firstKey === undefined) break;
+    originalPreviewBlobCache.delete(firstKey);
+  }
+}
+
+function withAbortSignal<T>(request: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return request;
+  if (signal.aborted) return Promise.reject(createAbortError());
+
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(createAbortError());
+    signal.addEventListener("abort", abort, { once: true });
+    request.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", abort);
+    });
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
 }
 
 export function mediaContentSignature(mediaRecord: MediaRecord): string {

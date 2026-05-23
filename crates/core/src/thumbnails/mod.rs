@@ -153,6 +153,7 @@ pub fn is_pending_status(state: &str) -> bool {
     matches!(state, "pending" | "queued")
 }
 
+#[cfg(test)]
 pub fn cache_key_for(identity: &CacheIdentity<'_>, profile: &str) -> String {
     let digest = source_fingerprint_for(identity, profile);
     format!("{}/{}/{}.webp", &digest[0..2], &digest[2..4], digest)
@@ -188,6 +189,7 @@ pub fn is_safe_cache_key(cache_key: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
+#[cfg(test)]
 pub fn generate_image_thumbnail(
     cache_root: &Path,
     cache_key: &str,

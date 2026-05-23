@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
-import { createCoreClient } from "@megle/core-client";
-import { getCoreClientConfig } from "../../core/client";
 import {
   mediaContentSignature,
   previewPlaceholderDataUrl,
+  requestOriginalPreviewBlob,
   requestThumbnailBlob
 } from "../../core/mediaResources";
 
@@ -33,8 +32,8 @@ export function MediaPreview({
       <ReadyPreviewMedia
         alt={media.name}
         fallbackUrl={fallbackUrl}
-        fileId={media.id}
         kind={media.kind}
+        media={media}
         onMediaReady={onMediaReady}
         source="original"
         versionKey={originalVersionKey}
@@ -47,8 +46,8 @@ export function MediaPreview({
       <ReadyPreviewMedia
         alt={media.name}
         fallbackUrl={previewPlaceholderUrl}
-        fileId={media.id}
         kind={media.kind}
+        media={media}
         onMediaReady={onMediaReady}
         source="thumbnail"
         versionKey={thumbnail.updatedAt}
@@ -140,16 +139,16 @@ function PreviewFallbackImage({
 function ReadyPreviewMedia({
   alt,
   fallbackUrl,
-  fileId,
   kind,
+  media,
   onMediaReady,
   source,
   versionKey
 }: {
   alt: string;
   fallbackUrl: string | null;
-  fileId: number;
   kind?: string | null;
+  media: MediaRecord;
   onMediaReady?: () => void;
   source: "thumbnail" | "original";
   versionKey?: number | string | null;
@@ -165,11 +164,8 @@ function ReadyPreviewMedia({
 
     const controller = source === "original" ? new AbortController() : null;
     const request = controller
-      ? createCoreClient(getCoreClientConfig()).getPreviewBlob(fileId, {
-          signal: controller.signal,
-          version: versionKey ?? null
-        })
-      : requestThumbnailBlob(fileId, typeof versionKey === "number" ? versionKey : null);
+      ? requestOriginalPreviewBlob(media, { signal: controller.signal })
+      : requestThumbnailBlob(media.id, typeof versionKey === "number" ? versionKey : null);
     request
       .then((blob) => {
         if (revoked) return;
@@ -185,7 +181,7 @@ function ReadyPreviewMedia({
       controller?.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId, source, versionKey]);
+  }, [media.id, source, versionKey]);
 
   if (error) {
     return (
