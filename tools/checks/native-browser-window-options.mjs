@@ -1,5 +1,5 @@
 const REQUIRED_PROPERTIES = [
-  'backgroundMaterial: "none"',
+  'backgroundMaterial: "acrylic"',
   "transparent: true",
   'backgroundColor: "#00000000"',
   "frame: false"
@@ -65,10 +65,12 @@ function inspectBrowserWindowOptionsObject(optionsObject, windowIndex) {
   const transparent = booleanLiteralValue(latest.get("transparent")?.value) === true;
   const transparentBackgroundColor =
     stringLiteralValue(latest.get("backgroundColor")?.value) === "#00000000";
-  const disablesNativeMaterial = false;
+  const disablesNativeMaterial = backgroundMaterialProperties.some(
+    (property) => stringLiteralValue(property.value) === "none"
+  );
 
   const missingRequiredProperties = [];
-  if (backgroundMaterial !== "none") missingRequiredProperties.push(REQUIRED_PROPERTIES[0]);
+  if (backgroundMaterial !== "acrylic") missingRequiredProperties.push(REQUIRED_PROPERTIES[0]);
   if (!transparent) missingRequiredProperties.push(REQUIRED_PROPERTIES[1]);
   if (!transparentBackgroundColor) missingRequiredProperties.push(REQUIRED_PROPERTIES[2]);
   if (!frameFalse) missingRequiredProperties.push(REQUIRED_PROPERTIES[3]);

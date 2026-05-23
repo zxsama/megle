@@ -32,34 +32,64 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
   const dragStateRef = useRef<DragState | null>(null);
   const pointerCaptureRef = useRef<HTMLElement | null>(null);
 
+  function releasePointerCapture(pointerId?: number) {
+    const drag = dragStateRef.current;
+    const captureTarget = pointerCaptureRef.current;
+    if (!drag || !captureTarget) {
+      pointerCaptureRef.current = null;
+      return;
+    }
+    if (pointerId !== undefined && drag.pointerId !== pointerId) {
+      return;
+    }
+    if (captureTarget.hasPointerCapture(drag.pointerId)) {
+      captureTarget.releasePointerCapture(drag.pointerId);
+    }
+    pointerCaptureRef.current = null;
+  }
+
+  function clearDrag(pointerId?: number) {
+    const drag = dragStateRef.current;
+    if (!drag || (pointerId !== undefined && drag.pointerId !== pointerId)) {
+      return;
+    }
+    dragStateRef.current = null;
+    releasePointerCapture(pointerId);
+  }
+
+  function handlePointerPlaneMove(
+    clientX: number,
+    clientY: number,
+    pointerId: number,
+    buttons: number
+  ) {
+    updateTitlebarPointerPlane(rootRef.current, clientX, clientY);
+    const drag = dragStateRef.current;
+    const controls = getWindowControls();
+    if (!drag || drag.pointerId !== pointerId || !controls?.setPosition) {
+      if (drag && (buttons & 1) === 0) {
+        clearDrag(drag.pointerId);
+      }
+      return;
+    }
+    if ((buttons & 1) === 0) {
+      clearDrag(pointerId);
+      return;
+    }
+    void controls.setPosition(
+      drag.startWindowX + (clientX - drag.startClientX),
+      drag.startWindowY + (clientY - drag.startClientY)
+    );
+  }
+
+  function handlePointerPlaneExit(pointerId?: number) {
+    clearDrag(pointerId);
+    hideTitlebarControlPointers(rootRef.current);
+  }
+
   useEffect(() => {
     let animationFrame = 0;
     let latestPointer: { x: number; y: number } | null = null;
-
-    function releasePointerCapture(pointerId?: number) {
-      const drag = dragStateRef.current;
-      const captureTarget = pointerCaptureRef.current;
-      if (!drag || !captureTarget) {
-        pointerCaptureRef.current = null;
-        return;
-      }
-      if (pointerId !== undefined && drag.pointerId !== pointerId) {
-        return;
-      }
-      if (captureTarget.hasPointerCapture(drag.pointerId)) {
-        captureTarget.releasePointerCapture(drag.pointerId);
-      }
-      pointerCaptureRef.current = null;
-    }
-
-    function clearDrag(pointerId?: number) {
-      const drag = dragStateRef.current;
-      if (!drag || (pointerId !== undefined && drag.pointerId !== pointerId)) {
-        return;
-      }
-      dragStateRef.current = null;
-      releasePointerCapture(pointerId);
-    }
 
     function cancelPendingFrame() {
       latestPointer = null;
@@ -80,28 +110,12 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
 
     function handleWindowPointerMove(event: globalThis.PointerEvent) {
       requestPlaneUpdate(event.clientX, event.clientY);
-      const drag = dragStateRef.current;
-      const controls = getWindowControls();
-      if (!drag || drag.pointerId !== event.pointerId || !controls?.setPosition) {
-        if (drag && (event.buttons & 1) === 0) {
-          clearDrag(drag.pointerId);
-        }
-        return;
-      }
-      if ((event.buttons & 1) === 0) {
-        clearDrag(event.pointerId);
-        return;
-      }
-      void controls.setPosition(
-        drag.startWindowX + (event.clientX - drag.startClientX),
-        drag.startWindowY + (event.clientY - drag.startClientY)
-      );
+      handlePointerPlaneMove(event.clientX, event.clientY, event.pointerId, event.buttons);
     }
 
     function handleWindowPointerExit() {
       cancelPendingFrame();
-      clearDrag();
-      hideTitlebarControlPointers(rootRef.current);
+      handlePointerPlaneExit();
     }
 
     function handleWindowPointerUp(event: globalThis.PointerEvent) {
@@ -148,30 +162,63 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     }
 
     const controls = getWindowControls();
-    const bounds = await controls?.getBounds?.();
-    if (!controls?.setPosition || !bounds) {
+    if (!controls?.setPosition) {
       return;
     }
 
-    event.currentTarget.setPointerCapture(event.pointerId);
-    pointerCaptureRef.current = event.currentTarget;
+    event.preventDefault();
+    const captureTarget = event.currentTarget;
+    captureTarget.setPointerCapture(event.pointerId);
+    pointerCaptureRef.current = captureTarget;
+
+    let startWindowX = typeof window.screenX === "number" ? window.screenX : Number.NaN;
+    let startWindowY = typeof window.screenY === "number" ? window.screenY : Number.NaN;
+
+    if (!Number.isFinite(startWindowX) || !Number.isFinite(startWindowY)) {
+      const bounds = await controls.getBounds?.();
+      if (!bounds) {
+        releasePointerCapture(event.pointerId);
+        return;
+      }
+      startWindowX = bounds.x;
+      startWindowY = bounds.y;
+    } else {
+      void controls.getBounds?.().then((bounds) => {
+        if (!bounds) return;
+        const drag = dragStateRef.current;
+        if (drag?.pointerId === event.pointerId) {
+          drag.startWindowX = bounds.x;
+          drag.startWindowY = bounds.y;
+        }
+      });
+    }
+
     dragStateRef.current = {
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startWindowX: bounds.x,
-      startWindowY: bounds.y
+      startWindowX,
+      startWindowY
     };
   }
 
   const titlebarSurfaceProps: Pick<
     HTMLAttributes<HTMLElement>,
-    "onDoubleClick" | "onPointerDown"
+    "onDoubleClick" | "onPointerCancel" | "onPointerDown" | "onPointerMove" | "onPointerUp"
   > & { "data-titlebar-surface": "true" } = {
     "data-titlebar-surface": "true",
     onDoubleClick: handleTitlebarDoubleClick,
     onPointerDown: (event) => {
       void handleTitlebarPointerDown(event);
+    },
+    onPointerMove: (event) => {
+      handlePointerPlaneMove(event.clientX, event.clientY, event.pointerId, event.buttons);
+    },
+    onPointerUp: (event) => {
+      clearDrag(event.pointerId);
+    },
+    onPointerCancel: (event) => {
+      handlePointerPlaneExit(event.pointerId);
     }
   };
 

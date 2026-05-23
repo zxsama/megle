@@ -1954,14 +1954,14 @@ try {
     hardFailures.push("app shell still paints a root rectangle");
   }
   if (
-    nativeMaterial.backgroundMaterial !== "none" ||
+    nativeMaterial.backgroundMaterial !== "acrylic" ||
     !nativeMaterial.frameFalse ||
     !nativeMaterial.transparent ||
     !nativeMaterial.transparentBackgroundColor ||
     nativeMaterial.disablesNativeMaterial ||
     nativeMaterial.unsafeTopLevelSpreads.length > 0
   ) {
-    hardFailures.push("desktop BrowserWindow must use explicit transparent root material with transparent frameless window settings");
+    hardFailures.push("desktop BrowserWindow must use native acrylic with transparent frameless window settings");
   }
   if (
     osBackdropEvidenceEnabled &&
