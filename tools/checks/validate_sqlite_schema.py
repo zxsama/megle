@@ -122,6 +122,9 @@ def apply_migration(conn: sqlite3.Connection, migration: Path) -> None:
     if name == "0009_scan_reconciliation.sql":
         if not table_has_column(conn, "roots", "active_scan_generation"):
             conn.executescript(migration.read_text(encoding="utf-8"))
+        for table in ("folders", "files"):
+            if not table_has_column(conn, table, "scan_seen_at"):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN scan_seen_at INTEGER")
         conn.execute(
             """
             INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
@@ -141,10 +144,50 @@ def apply_migration(conn: sqlite3.Connection, migration: Path) -> None:
     conn.executescript(migration.read_text(encoding="utf-8"))
 
 
+def verify_scan_reconciliation_repair_path() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              applied_at INTEGER NOT NULL
+            );
+            CREATE TABLE roots (
+              id INTEGER PRIMARY KEY,
+              active_scan_generation INTEGER
+            );
+            CREATE TABLE folders (
+              id INTEGER PRIMARY KEY
+            );
+            CREATE TABLE files (
+              id INTEGER PRIMARY KEY
+            );
+            """
+        )
+        apply_migration(
+            conn,
+            ROOT / "crates" / "core" / "migrations" / "0009_scan_reconciliation.sql",
+        )
+        for table in ("folders", "files"):
+            if not table_has_column(conn, table, "scan_seen_at"):
+                fail(f"0009 repair path did not add {table}.scan_seen_at")
+        version = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 9"
+        ).fetchone()
+        if version is None:
+            fail("0009 repair path did not record migration version 9")
+    finally:
+        conn.close()
+
+
 def main() -> None:
     for migration in MIGRATIONS:
         if not migration.exists():
             fail(f"missing migration: {migration}")
+
+    verify_scan_reconciliation_repair_path()
 
     with tempfile.TemporaryDirectory(prefix="megle_schema_") as temp_dir:
         db_path = Path(temp_dir) / "schema.sqlite"

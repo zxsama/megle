@@ -4273,6 +4273,13 @@ mod tests {
         database
             .connection
             .execute(
+                "INSERT INTO files(root_id, folder_id, name, ext, size, mtime) VALUES (1, 1, 'second.jpg', '.jpg', 1000, 11)",
+                [],
+            )
+            .expect("insert second file");
+        database
+            .connection
+            .execute(
                 r#"
                 INSERT INTO thumb_blobs(file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at)
                 VALUES (1, 'grid_320', X'524946460000000057454250', 40, 20, 12, 'image/webp', 1, 1)
@@ -4296,12 +4303,21 @@ mod tests {
             .execute(
                 r#"
                 INSERT OR IGNORE INTO thumb_blobs(file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at)
-                VALUES (1, 'grid_320', X'00', 1, 1, 1, 'image/jpeg', 1, 2)
+                VALUES (2, 'grid_320', X'00', 1, 1, 1, 'image/jpeg', 1, 2)
                 "#,
                 [],
             )
             .expect("invalid format should be ignored");
         assert_eq!(invalid_format, 0);
+        let second_file_blob_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM thumb_blobs WHERE file_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count second file thumb blobs");
+        assert_eq!(second_file_blob_count, 0);
     }
 
     #[test]
