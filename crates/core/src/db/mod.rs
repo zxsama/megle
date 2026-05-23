@@ -147,6 +147,12 @@ pub struct ScanWriteBatchResult {
     pub file_ids: Vec<i64>,
 }
 
+#[derive(Debug)]
+struct FileUpsertResult {
+    id: i64,
+    identity_changed: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderRecord {
@@ -1931,7 +1937,7 @@ impl Database {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let scan_generation = active_scan_generation_in_transaction(&transaction, root_id)?;
-        let file_id = upsert_file_in_transaction(&transaction, file, scan_generation)?;
+        let file_id = upsert_file_in_transaction(&transaction, file, scan_generation)?.id;
         transaction.commit()?;
         Ok(file_id)
     }
@@ -2102,9 +2108,14 @@ impl Database {
         }
 
         for file in batch.files {
-            let file_id = upsert_file_in_transaction(&transaction, file.file, scan_generation)?;
-            upsert_media_kind_in_transaction(&transaction, file_id, &file.media_kind)?;
-            file_ids.push(file_id);
+            let result = upsert_file_in_transaction(&transaction, file.file, scan_generation)?;
+            upsert_media_kind_in_transaction(
+                &transaction,
+                result.id,
+                &file.media_kind,
+                result.identity_changed,
+            )?;
+            file_ids.push(result.id);
         }
 
         transaction.commit()?;
@@ -2144,9 +2155,14 @@ impl Database {
         }
 
         for file in batch.files {
-            let file_id = upsert_file_in_transaction(&transaction, file.file, scan_generation)?;
-            upsert_media_kind_in_transaction(&transaction, file_id, &file.media_kind)?;
-            file_ids.push(file_id);
+            let result = upsert_file_in_transaction(&transaction, file.file, scan_generation)?;
+            upsert_media_kind_in_transaction(
+                &transaction,
+                result.id,
+                &file.media_kind,
+                result.identity_changed,
+            )?;
+            file_ids.push(result.id);
         }
 
         transaction.commit()?;
@@ -3404,13 +3420,29 @@ fn upsert_file_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     file: FileUpsert,
     scan_generation: Option<i64>,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<FileUpsertResult> {
     let root_id = file.root_id;
     let folder_id = file.folder_id;
     let name = file.name.clone();
     let size = file.size;
     let mtime = file.mtime;
     let file_key = file.file_key.clone();
+    let previous_identity: Option<(i64, i64, Option<String>)> = transaction
+        .query_row(
+            "SELECT size, mtime, file_key FROM files WHERE folder_id = ?1 AND name = ?2",
+            (folder_id, &name),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let identity_changed = previous_identity
+        .as_ref()
+        .map(|(previous_size, previous_mtime, previous_file_key)| {
+            *previous_size != size
+                || *previous_mtime != mtime
+                || previous_file_key.as_deref() != file_key.as_deref()
+        })
+        .unwrap_or(true);
+
     transaction.execute(
         r#"
         INSERT INTO files(root_id, folder_id, name, ext, size, mtime, ctime, file_key, status, scan_seen_at)
@@ -3454,33 +3486,38 @@ fn upsert_file_in_transaction(
         },
     )?;
     sync_media_fts_for_file_in_transaction(transaction, id)?;
-    Ok(id)
+    Ok(FileUpsertResult {
+        id,
+        identity_changed,
+    })
 }
 
 fn upsert_media_kind_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     file_id: i64,
     kind: &str,
+    reset_metadata: bool,
 ) -> anyhow::Result<()> {
+    let reset_metadata = i64::from(reset_metadata);
     transaction.execute(
         r#"
         INSERT INTO media(file_id, kind, metadata_status)
         VALUES (?1, ?2, 'pending')
         ON CONFLICT(file_id) DO UPDATE SET
           kind = excluded.kind,
-          width = NULL,
-          height = NULL,
-          duration_ms = NULL,
-          codec = NULL,
-          orientation = NULL,
-          has_alpha = NULL,
-          dominant_color = NULL,
-          phash = NULL,
-          preview_placeholder = NULL,
-          preview_placeholder_format = 'image/webp',
-          metadata_status = 'pending'
+          width = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE width END,
+          height = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE height END,
+          duration_ms = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE duration_ms END,
+          codec = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE codec END,
+          orientation = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE orientation END,
+          has_alpha = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE has_alpha END,
+          dominant_color = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE dominant_color END,
+          phash = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE phash END,
+          preview_placeholder = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN NULL ELSE preview_placeholder END,
+          preview_placeholder_format = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN 'image/webp' ELSE preview_placeholder_format END,
+          metadata_status = CASE WHEN ?3 != 0 OR kind IS NOT excluded.kind THEN 'pending' ELSE metadata_status END
         "#,
-        (file_id, kind),
+        (file_id, kind, reset_metadata),
     )?;
     Ok(())
 }

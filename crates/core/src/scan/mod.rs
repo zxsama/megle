@@ -948,10 +948,86 @@ mod tests {
 
         scan_root(&mut database, &root).expect("scan root");
 
-        let media = database
-            .get_media(1)
-            .expect("get media")
-            .expect("media exists");
+        let media = single_media(&database, root_id);
+        assert!(media.preview_placeholder.is_none());
+        let source = database
+            .get_thumbnail_source(media.id)
+            .expect("get source")
+            .expect("source exists");
+        assert_eq!(source.metadata_status.as_deref(), Some("pending"));
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn scan_root_preserves_metadata_and_placeholder_for_unchanged_files() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("image.jpg"), 800, 400);
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "unchanged-rescan");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("initial scan");
+        let media = single_media(&database, root_id);
+        database
+            .update_media_dimensions(media.id, 800, 400)
+            .expect("seed dimensions");
+        database
+            .update_media_preview_placeholder(media.id, b"cached-preview", "image/webp")
+            .expect("seed placeholder");
+
+        scan_root(&mut database, &root).expect("unchanged rescan");
+
+        let media = single_media(&database, root_id);
+        assert_eq!(media.width, Some(800));
+        assert_eq!(media.height, Some(400));
+        assert_eq!(
+            media.preview_placeholder.as_deref(),
+            Some(&b"cached-preview"[..])
+        );
+        assert_eq!(
+            media.preview_placeholder_format.as_deref(),
+            Some("image/webp")
+        );
+        let source = database
+            .get_thumbnail_source(media.id)
+            .expect("get source")
+            .expect("source exists");
+        assert_eq!(source.metadata_status.as_deref(), Some("ready"));
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn scan_root_resets_metadata_and_placeholder_when_file_identity_changes() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create media root");
+        let image_path = temp_root.join("image.jpg");
+        write_test_image(&image_path, 800, 400);
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "changed-rescan");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("initial scan");
+        let media = single_media(&database, root_id);
+        database
+            .update_media_dimensions(media.id, 800, 400)
+            .expect("seed dimensions");
+        database
+            .update_media_preview_placeholder(media.id, b"cached-preview", "image/webp")
+            .expect("seed placeholder");
+
+        fs::write(&image_path, b"changed image bytes").expect("change file identity");
+        scan_root(&mut database, &root).expect("changed rescan");
+
+        let media = single_media(&database, root_id);
+        assert_eq!(media.width, None);
+        assert_eq!(media.height, None);
         assert!(media.preview_placeholder.is_none());
         let source = database
             .get_thumbnail_source(media.id)
@@ -996,6 +1072,21 @@ mod tests {
         assert_eq!(source.metadata_status.as_deref(), Some("pending"));
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    fn single_media(database: &Database, root_id: i64) -> crate::db::MediaRecord {
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: None,
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list media");
+        assert_eq!(media.items.len(), 1);
+        media.items.into_iter().next().expect("media exists")
     }
 
     fn add_test_root(database: &Database, temp_root: &Path, display_name: &str) -> i64 {
