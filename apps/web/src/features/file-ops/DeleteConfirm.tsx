@@ -76,6 +76,7 @@ export function DeleteConfirm({
         ref={dialogRef}
         role="dialog"
         tone="elevated"
+        variant="clear"
       >
         <header className="dialog-header">
           <h2 className="dialog-title" id="delete-dialog-title">

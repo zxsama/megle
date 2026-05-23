@@ -112,6 +112,7 @@ export function RenameDialog({
         ref={dialogRef}
         role="dialog"
         tone="elevated"
+        variant="clear"
       >
         <header className="dialog-header">
           <h2 id="rename-dialog-title" className="dialog-title">

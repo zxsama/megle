@@ -98,6 +98,7 @@ export function MoveDialog({
         ref={dialogRef}
         role="dialog"
         tone="elevated"
+        variant="clear"
       >
         <header className="dialog-header">
           <h2 id="move-dialog-title" className="dialog-title">
