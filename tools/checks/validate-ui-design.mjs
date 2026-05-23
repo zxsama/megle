@@ -81,13 +81,13 @@ if (!nativeMaterial.browserWindowOptionsFound) {
 }
 
 for (const [condition, value] of [
-  [/backgroundMaterial:\s*"acrylic"/.test(desktopMain), 'backgroundMaterial: "acrylic"'],
+  [/backgroundMaterial:\s*"none"/.test(desktopMain), 'backgroundMaterial: "none"'],
   [nativeMaterial.transparent, "transparent: true"],
   [nativeMaterial.transparentBackgroundColor, 'backgroundColor: "#00000000"'],
   [nativeMaterial.frameFalse, "frame: false"]
 ]) {
   if (!condition) {
-    fail(`desktop window must keep a frameless transparent shell with native acrylic support: missing ${value}`);
+    fail(`desktop window must keep a frameless transparent shell with an explicit transparent root material: missing ${value}`);
   }
 }
 

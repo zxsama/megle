@@ -181,7 +181,7 @@ async function createWindow(): Promise<void> {
     y: placement.y,
     minWidth: 1100,
     minHeight: 720,
-    backgroundMaterial: "acrylic",
+    backgroundMaterial: "none",
     transparent: true,
     backgroundColor: "#00000000",
     show: false,
@@ -199,7 +199,7 @@ async function createWindow(): Promise<void> {
     }
   });
   const window = mainWindow;
-  window.setBackgroundMaterial("acrylic");
+  window.setBackgroundMaterial("none");
   window.setOpacity(0);
   shellReadyVisibleWindowId = null;
   shellReadyRevealPromise = null;

@@ -109,8 +109,10 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     }
 
     function handleWindowPointerMove(event: globalThis.PointerEvent) {
+      if (dragStateRef.current) {
+        return;
+      }
       requestPlaneUpdate(event.clientX, event.clientY);
-      handlePointerPlaneMove(event.clientX, event.clientY, event.pointerId, event.buttons);
     }
 
     function handleWindowPointerExit() {
@@ -170,6 +172,11 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     const captureTarget = event.currentTarget;
     captureTarget.setPointerCapture(event.pointerId);
     pointerCaptureRef.current = captureTarget;
+
+    const wasMaximized = await controls.isMaximized?.();
+    if (wasMaximized) {
+      await controls.maximize?.();
+    }
 
     let startWindowX = typeof window.screenX === "number" ? window.screenX : Number.NaN;
     let startWindowY = typeof window.screenY === "number" ? window.screenY : Number.NaN;

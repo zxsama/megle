@@ -25,9 +25,8 @@ assert.equal(rejected.backgroundMaterialSource, 'backgroundMaterial: "none"');
 assert.equal(rejected.frameFalse, false);
 assert.equal(rejected.transparent, false);
 assert.equal(rejected.transparentBackgroundColor, false);
-assert.equal(rejected.disablesNativeMaterial, true);
+assert.equal(rejected.disablesNativeMaterial, false);
 assert.deepEqual(rejected.missingRequiredProperties, [
-  'backgroundMaterial: "acrylic"',
   "transparent: true",
   'backgroundColor: "#00000000"',
   "frame: false"
@@ -39,15 +38,15 @@ const valid = inspectNativeBrowserWindowOptions(`
     frame: false,
     transparent: true,
     backgroundColor: "#00000000",
-    backgroundMaterial: "acrylic",
+    backgroundMaterial: "none",
     webPreferences: {
-      preload: "backgroundMaterial: \\"acrylic\\""
+      preload: "backgroundMaterial: \\"none\\""
     }
   });
 `);
 
-assert.equal(valid.backgroundMaterial, "acrylic");
-assert.equal(valid.backgroundMaterialSource, 'backgroundMaterial: "acrylic"');
+assert.equal(valid.backgroundMaterial, "none");
+assert.equal(valid.backgroundMaterialSource, 'backgroundMaterial: "none"');
 assert.equal(valid.frameFalse, true);
 assert.equal(valid.transparent, true);
 assert.equal(valid.transparentBackgroundColor, true);
@@ -57,7 +56,7 @@ assert.deepEqual(valid.missingRequiredProperties, []);
 const notFound = inspectNativeBrowserWindowOptions("const value = 1;");
 assert.equal(notFound.browserWindowOptionsFound, false);
 assert.deepEqual(notFound.missingRequiredProperties, [
-  'backgroundMaterial: "acrylic"',
+  'backgroundMaterial: "none"',
   "transparent: true",
   'backgroundColor: "#00000000"',
   "frame: false"
@@ -69,7 +68,7 @@ const topLevelSpread = inspectNativeBrowserWindowOptions(`
     frame: false,
     transparent: true,
     backgroundColor: "#00000000",
-    backgroundMaterial: "acrylic",
+    backgroundMaterial: "none",
     webPreferences: {
       preload: preloadPath
     }
@@ -80,7 +79,7 @@ assert.equal(topLevelSpread.browserWindowOptionsFound, true);
 assert.equal(topLevelSpread.frameFalse, true);
 assert.equal(topLevelSpread.transparent, true);
 assert.equal(topLevelSpread.transparentBackgroundColor, true);
-assert.equal(topLevelSpread.backgroundMaterial, "acrylic");
+assert.equal(topLevelSpread.backgroundMaterial, "none");
 assert.deepEqual(topLevelSpread.unsafeTopLevelSpreads.map((spread) => spread.source), [
   "...windowOptions"
 ]);
@@ -93,18 +92,18 @@ const multipleWindows = inspectNativeBrowserWindowOptions(`
     frame: false,
     transparent: true,
     backgroundColor: "#00000000",
-    backgroundMaterial: "acrylic"
+    backgroundMaterial: "none"
   });
   const utility = new BrowserWindow({
     frame: true,
     transparent: false,
     backgroundColor: "#111111",
-    backgroundMaterial: "acrylic"
+    backgroundMaterial: "none"
   });
 `);
 
 assert.equal(multipleWindows.browserWindowCount, 2);
-assert.equal(multipleWindows.backgroundMaterial, "acrylic");
+assert.equal(multipleWindows.backgroundMaterial, "none");
 assert.equal(multipleWindows.frameFalse, false);
 assert.equal(multipleWindows.transparent, false);
 assert.equal(multipleWindows.transparentBackgroundColor, false);
@@ -120,7 +119,7 @@ const nestedSpread = inspectNativeBrowserWindowOptions(`
     frame: false,
     transparent: true,
     backgroundColor: "#00000000",
-    backgroundMaterial: "acrylic",
+    backgroundMaterial: "none",
     webPreferences: {
       ...webPreferences,
       preload: preloadPath
