@@ -741,6 +741,14 @@ if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestT
   fail("MediaPreview must separate central original preview loading from shared thumbnail blob loading");
 }
 
+if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(mediaPreview)) {
+  fail("MediaPreview central original requests must use AbortController cleanup");
+}
+
+if (/useThumbnailFallbackUrl\(\s*thumbnail\?\.state\s*===\s*"ready"/.test(mediaPreview)) {
+  fail("MediaPreview must not fetch thumbnail fallback when thumbnail is already the primary source");
+}
+
 if (
   !mediaPreview.includes('source?: "thumbnail" | "original"') ||
   !mediaPreview.includes('source = "thumbnail"')

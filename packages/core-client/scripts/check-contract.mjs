@@ -394,11 +394,11 @@ if (!/getThumbnail:\s*\(fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320
   fail("client.ts getThumbnail must request typed thumbnail state with default grid_320 target");
 }
 
-if (!/getThumbnailBlob:\s*async\s*\(fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320"\)\s*=>\s*\{[\s\S]*fetchBlob\(`\/media\/\$\{fileId\}\/thumbnail\/blob\$\{query\(\{\s*target\s*}\)\}`\)/.test(client)) {
+if (!/getThumbnailBlob:\s*async\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*options:\s*BlobRequestOptions\s*=\s*{}\s*\)\s*=>\s*\{[\s\S]*fetchBlob\(`\/media\/\$\{fileId\}\/thumbnail\/blob\$\{query\(\{\s*target\s*}\)\}`,\s*options\)/.test(client)) {
   fail("client.ts getThumbnailBlob must request thumbnail blob with default grid_320 target");
 }
 
-if (!/getPreviewBlob:\s*\(fileId:\s*number\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview`\)/.test(client)) {
+if (!/getPreviewBlob:\s*\(fileId:\s*number,\s*options:\s*BlobRequestOptions\s*=\s*{}\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview`,\s*options\)/.test(client)) {
   fail("client.ts getPreviewBlob must request original media bytes from /media/{fileId}/preview");
 }
 

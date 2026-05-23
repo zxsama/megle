@@ -20,7 +20,8 @@ export function MediaPreview({
 }) {
   const previewPlaceholderUrl = previewPlaceholderDataUrl(media);
   const fallbackThumbnail = useThumbnailFallbackUrl(
-    thumbnail?.state === "ready" ? thumbnail.fileId : null
+    source === "original" && thumbnail?.state === "ready" ? thumbnail.fileId : null,
+    thumbnail?.updatedAt ?? null
   );
   const fallbackUrl = fallbackThumbnail ?? previewPlaceholderUrl;
 
@@ -46,6 +47,7 @@ export function MediaPreview({
         kind={media.kind}
         onMediaReady={onMediaReady}
         source="thumbnail"
+        versionKey={thumbnail.updatedAt}
       />
     );
   }
@@ -80,7 +82,7 @@ export function MediaPreview({
   );
 }
 
-function useThumbnailFallbackUrl(fileId: number | null): string | null {
+function useThumbnailFallbackUrl(fileId: number | null, versionKey: number | null): string | null {
   const [fallbackThumbnail, setFallbackThumbnail] = useState<string | null>(null);
 
   useEffect(() => {
@@ -93,7 +95,7 @@ function useThumbnailFallbackUrl(fileId: number | null): string | null {
     let objectUrl: string | null = null;
     setFallbackThumbnail(null);
 
-    requestThumbnailBlob(fileId)
+    requestThumbnailBlob(fileId, versionKey)
       .then((blob) => {
         if (revoked) return;
         objectUrl = URL.createObjectURL(blob);
@@ -107,7 +109,7 @@ function useThumbnailFallbackUrl(fileId: number | null): string | null {
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId]);
+  }, [fileId, versionKey]);
 
   return fallbackThumbnail;
 }
@@ -134,7 +136,8 @@ function ReadyPreviewMedia({
   fileId,
   kind,
   onMediaReady,
-  source
+  source,
+  versionKey
 }: {
   alt: string;
   fallbackUrl: string | null;
@@ -142,6 +145,7 @@ function ReadyPreviewMedia({
   kind?: string | null;
   onMediaReady?: () => void;
   source: "thumbnail" | "original";
+  versionKey?: number | null;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
@@ -152,9 +156,12 @@ function ReadyPreviewMedia({
     setSrc(null);
     setError(false);
 
-    const client = createCoreClient(getCoreClientConfig());
-    const request =
-      source === "original" ? client.getPreviewBlob(fileId) : requestThumbnailBlob(fileId);
+    const controller = source === "original" ? new AbortController() : null;
+    const request = controller
+      ? createCoreClient(getCoreClientConfig()).getPreviewBlob(fileId, {
+          signal: controller.signal
+        })
+      : requestThumbnailBlob(fileId, versionKey ?? null);
     request
       .then((blob) => {
         if (revoked) return;
@@ -162,14 +169,15 @@ function ReadyPreviewMedia({
         setSrc(objectUrl);
       })
       .catch(() => {
-        if (!revoked) setError(true);
+        if (!revoked && !controller?.signal.aborted) setError(true);
       });
 
     return () => {
       revoked = true;
+      controller?.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId, source]);
+  }, [fileId, source, versionKey]);
 
   if (error) {
     return (

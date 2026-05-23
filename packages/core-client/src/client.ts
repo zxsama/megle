@@ -49,6 +49,10 @@ export class CoreApiError extends Error {
   }
 }
 
+export interface BlobRequestOptions {
+  signal?: AbortSignal;
+}
+
 type QueryParams = Partial<ListMediaParams & ListFolderChildrenParams> & {
   target?: "grid_320";
 };
@@ -75,12 +79,15 @@ export function createCoreClient(config: CoreClientConfig) {
     return body as T;
   }
 
-  async function fetchBlob(path: string): Promise<Blob> {
+  async function fetchBlob(path: string, options: BlobRequestOptions = {}): Promise<Blob> {
     const headers = new Headers();
     if (config.sessionToken) {
       headers.set("x-megle-session", config.sessionToken);
     }
-    const response = await fetch(resolveUrl(config.baseUrl, path), { headers });
+    const response = await fetch(resolveUrl(config.baseUrl, path), {
+      headers,
+      signal: options.signal
+    });
     if (!response.ok) {
       const body = await readResponseBody(response);
       throw new CoreApiError(response.status, body);
@@ -119,10 +126,15 @@ export function createCoreClient(config: CoreClientConfig) {
     getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`),
     getThumbnail: (fileId: number, target: "grid_320" = "grid_320") =>
       request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ target })}`),
-    getThumbnailBlob: async (fileId: number, target: "grid_320" = "grid_320") => {
-      return fetchBlob(`/media/${fileId}/thumbnail/blob${query({ target })}`);
+    getThumbnailBlob: async (
+      fileId: number,
+      target: "grid_320" = "grid_320",
+      options: BlobRequestOptions = {}
+    ) => {
+      return fetchBlob(`/media/${fileId}/thumbnail/blob${query({ target })}`, options);
     },
-    getPreviewBlob: (fileId: number) => fetchBlob(`/media/${fileId}/preview`),
+    getPreviewBlob: (fileId: number, options: BlobRequestOptions = {}) =>
+      fetchBlob(`/media/${fileId}/preview`, options),
     listTags: () => request<TagListResponse>("/tags"),
     createTag: (body: CreateTagRequest) =>
       request<TagRecord>("/tags", {

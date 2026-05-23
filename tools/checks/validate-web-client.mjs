@@ -95,8 +95,11 @@ if (webPackageJson.dependencies?.["@megle/core-client"] !== "*") {
 if (!/getThumbnail:\s*\(fileId:\s*number,\s*target:\s*"grid_320"/.test(coreClient)) {
   fail("core-client getThumbnail must expose the target query vocabulary");
 }
-if (!/getThumbnailBlob:\s*async\s*\(fileId:\s*number,\s*target:\s*"grid_320"/.test(coreClient)) {
+if (!/getThumbnailBlob:\s*async\s*\([\s\S]*?fileId:\s*number,[\s\S]*?target:\s*"grid_320"/.test(coreClient)) {
   fail("core-client getThumbnailBlob must expose the target query vocabulary");
+}
+if (!/interface\s+BlobRequestOptions[\s\S]*?signal\?:\s*AbortSignal/.test(coreClient)) {
+  fail("core-client blob helpers must expose AbortSignal request options");
 }
 if (/thumbnail\$\{query\(\{\s*profile/.test(coreClient) || /thumbnail\/blob\$\{query\(\{\s*profile/.test(coreClient)) {
   fail("core-client thumbnail helpers must not serialize the retired profile query");
@@ -194,6 +197,9 @@ if (!/inFlightThumbnailRequests/.test(mediaResources) || !/thumbnailResourceCach
 if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");
 }
+if (!/explicitMediaThumbnailState/.test(mediaResources) || !/thumbnail\.state\s*===\s*"ready"[\s\S]*?mediaState\s*!==\s*"ready"/.test(mediaResources)) {
+  fail("mediaResources must invalidate cached ready thumbnails when the current media row explicitly regresses state");
+}
 if (/thumbnailCacheKey/.test(mediaResources)) {
   fail("mediaResources must not treat transitional thumbnailCacheKey as runtime truth");
 }
@@ -238,7 +244,7 @@ if (!/previewPlaceholder/.test(mediaGrid) || !/previewPlaceholderUrl/.test(media
 if (!/previewPlaceholderDataUrl\(item\)/.test(mediaGrid) || /usePreviewPlaceholderUrl/.test(mediaGrid)) {
   fail("MediaGrid previewPlaceholder must be derived synchronously during render, not in an effect");
 }
-if (!/requestThumbnailBlob\(fileId\)/.test(mediaGrid) || /createCoreClient/.test(mediaGrid)) {
+if (!/requestThumbnailBlob\(fileId/.test(mediaGrid) || /createCoreClient/.test(mediaGrid)) {
   fail("MediaGrid must load grid_320 bytes through the shared media resource helper");
 }
 if (!previewPanel) {
@@ -249,6 +255,12 @@ if (!/PreviewPanel/.test(libraryView) || !/selectedMedia/.test(previewPanel) || 
 }
 if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
   fail("MediaPreview must load central previews from original media while keeping inspector previews on shared thumbnail blobs");
+}
+if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(mediaPreview)) {
+  fail("MediaPreview original-media requests must be aborted when central preview switches");
+}
+if (/useThumbnailFallbackUrl\(\s*thumbnail\?\.state\s*===\s*"ready"/.test(mediaPreview)) {
+  fail("MediaPreview must not start the thumbnail fallback hook for thumbnail-primary rendering");
 }
 if (!/previewPlaceholderUrl/.test(mediaPreview) || !/fallbackThumbnail/.test(mediaPreview)) {
   fail("MediaPreview must show previewPlaceholder and thumbnail fallback while media bytes load");

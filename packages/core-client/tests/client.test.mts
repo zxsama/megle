@@ -8,6 +8,7 @@ interface RecordedRequest {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal?: AbortSignal | null;
 }
 
 const BASE_URL = "http://127.0.0.1:47321/api";
@@ -28,7 +29,7 @@ function mockFetch(responseBody: unknown, status = 200) {
     if (init?.body) {
       body = init.body instanceof ArrayBuffer ? "" : String(init.body);
     }
-    recorded.push({ url, method, headers, body });
+    recorded.push({ url, method, headers, body, signal: init?.signal ?? null });
     return new Response(JSON.stringify(responseBody), {
       status,
       headers: { "content-type": "application/json" }
@@ -135,6 +136,13 @@ describe("createCoreClient", () => {
     assert.equal(await blob.text(), JSON.stringify("original bytes"));
   });
 
+  test("getPreviewBlob forwards abort signal", async () => {
+    mockFetch("original bytes");
+    const controller = new AbortController();
+    await client().getPreviewBlob(42, { signal: controller.signal });
+    assert.equal(recorded[0].signal, controller.signal);
+  });
+
   test("getThumbnail requests the default grid target", async () => {
     mockFetch({
       fileId: 42,
@@ -160,6 +168,13 @@ describe("createCoreClient", () => {
     await client().getThumbnailBlob(42);
     assert.equal(recorded[0].method, "GET");
     assert.equal(recorded[0].url, `${BASE_URL}/media/42/thumbnail/blob?target=grid_320`);
+  });
+
+  test("getThumbnailBlob forwards abort signal", async () => {
+    mockFetch("thumbnail bytes");
+    const controller = new AbortController();
+    await client().getThumbnailBlob(42, "grid_320", { signal: controller.signal });
+    assert.equal(recorded[0].signal, controller.signal);
   });
 
   test("CoreApiError is thrown on non-2xx with parsed body", async () => {

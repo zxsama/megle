@@ -46,8 +46,11 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   return request;
 }
 
-export async function requestThumbnailBlob(fileId: number): Promise<Blob> {
-  const requestKey = `${fileId}:${GRID_THUMBNAIL_TARGET}`;
+export async function requestThumbnailBlob(
+  fileId: number,
+  versionKey: number | null = null
+): Promise<Blob> {
+  const requestKey = `${fileId}:${GRID_THUMBNAIL_TARGET}:${versionKey ?? "current"}`;
   const inFlight = inFlightThumbnailBlobRequests.get(requestKey);
   if (inFlight) {
     return inFlight;
@@ -96,6 +99,10 @@ export function isFreshThumbnailForMediaRecord(
   if (thumbnail.target !== GRID_THUMBNAIL_TARGET) {
     return false;
   }
+  const mediaState = explicitMediaThumbnailState(mediaRecord.thumbnailState);
+  if (thumbnail.state === "ready" && mediaState !== null && mediaState !== "ready") {
+    return false;
+  }
 
   // Trust the thumbnail response state directly. The /media listing
   // endpoint may omit per-row thumbnailState during paging for
@@ -103,6 +110,21 @@ export function isFreshThumbnailForMediaRecord(
   // Pending/queued states are short-lived and are simply re-requested
   // on the next poll.
   return true;
+}
+
+function explicitMediaThumbnailState(
+  value: string | null | undefined
+): ThumbnailResponse["state"] | null {
+  if (
+    value === "pending" ||
+    value === "queued" ||
+    value === "ready" ||
+    value === "failed" ||
+    value === "skipped_small"
+  ) {
+    return value;
+  }
+  return null;
 }
 
 export function previewPlaceholderDataUrl(mediaRecord: MediaRecord): string | null {

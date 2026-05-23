@@ -313,6 +313,7 @@ function ThumbnailStateView({
         fileId={item.id}
         alt={item.name}
         previewPlaceholderUrl={previewPlaceholderUrl}
+        thumbnailUpdatedAt={thumbnail?.updatedAt ?? null}
       />
     );
   }
@@ -413,11 +414,13 @@ function PlaceholderThumbnail({ alt, src }: { alt: string; src: string }) {
 function ReadyThumbnail({
   fileId,
   alt,
-  previewPlaceholderUrl
+  previewPlaceholderUrl,
+  thumbnailUpdatedAt
 }: {
   fileId: number;
   alt: string;
   previewPlaceholderUrl: string | null;
+  thumbnailUpdatedAt: number | null;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
@@ -428,7 +431,7 @@ function ReadyThumbnail({
     setError(false);
     setSrc(null);
 
-    requestThumbnailBlob(fileId)
+    requestThumbnailBlob(fileId, thumbnailUpdatedAt)
       .then((blob) => {
         if (revoked) return;
         objectUrl = URL.createObjectURL(blob);
@@ -442,7 +445,7 @@ function ReadyThumbnail({
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId]);
+  }, [fileId, thumbnailUpdatedAt]);
 
   if (error) {
     return (
