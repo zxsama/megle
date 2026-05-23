@@ -3,11 +3,11 @@ use tokio::sync::mpsc;
 use std::fs;
 use std::path::Path;
 
-use crate::db::{Database, TaskScanProgress, ThumbnailStateUpsert};
+use crate::db::{Database, TaskScanProgress, ThumbBlobRecord, ThumbnailStateUpsert};
 use crate::scan::{ScanOptions, TaskAttemptGuard};
 use crate::thumbnails::{
-    cache_key_for, generate_image_thumbnail, generate_video_thumbnail, ThumbnailDecision,
-    ThumbnailPolicy, GRID_320_PROFILE,
+    cache_key_for, generate_image_thumbnail_bytes, generate_video_thumbnail_bytes,
+    ThumbnailDecision, ThumbnailPolicy, GENERATED_FORMAT, GRID_320_PROFILE,
 };
 
 const TASK_PROGRESS_FLUSH_INTERVAL_ITEMS: i64 = 100;
@@ -423,12 +423,12 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
         .ok_or_else(|| anyhow::anyhow!("source path not found for file {file_id}"))?;
     let media_kind = source.media_kind.as_deref();
     let generated = match media_kind {
-        Some("image") => generate_image_thumbnail(cache_root, &cache_key, &source_path)?,
+        Some("image") => generate_image_thumbnail_bytes(&source_path)?,
         Some("video") => {
             if !ffmpeg_available {
                 return Err(anyhow::anyhow!(FFMPEG_NOT_AVAILABLE_ERROR));
             }
-            generate_video_thumbnail(cache_root, &cache_key, &source_path)?
+            generate_video_thumbnail_bytes(&source_path)?
         }
         Some(other) => {
             return Err(anyhow::anyhow!(
@@ -452,6 +452,18 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
             "task {task_id} attempt superseded before thumbnail publish"
         ));
     }
+    let now = unix_timestamp();
+    database.upsert_thumb_blob(ThumbBlobRecord {
+        file_id,
+        profile: GRID_320_PROFILE.to_string(),
+        data: generated.data,
+        width: generated.width,
+        height: generated.height,
+        byte_size: generated.byte_size,
+        output_format: GENERATED_FORMAT.to_string(),
+        created_at: now,
+        updated_at: now,
+    })?;
     let published = database
         .upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
             ThumbnailStateUpsert {
@@ -477,6 +489,13 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
     }
     database.mark_task_succeeded_for_attempt(task_id, attempt_generation)?;
     Ok(())
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn cleanup_thumbnail_cache_file(cache_root: &Path, cache_key: &str) {
@@ -543,15 +562,49 @@ mod tests {
         assert_eq!(thumbnail.height, Some(320));
         assert!(thumbnail.byte_size.expect("byte size") > 0);
 
-        let cache_path = cache_root.join(&cache_key);
-        assert!(cache_path.exists());
-        let cache_bytes = fs::read(cache_path).expect("read generated thumbnail bytes");
-        assert_eq!(&cache_bytes[0..4], b"RIFF");
-        assert_eq!(&cache_bytes[8..12], b"WEBP");
+        let blob = database
+            .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read thumb blob")
+            .expect("thumb blob exists");
+        assert_eq!(&blob.data[0..4], b"RIFF");
+        assert_eq!(&blob.data[8..12], b"WEBP");
+        assert!(fs::read_dir(&cache_root)
+            .expect("read cache root")
+            .next()
+            .is_none());
         assert!(fs::metadata(temp_root.join(&cache_key)).is_err());
 
         fs::remove_dir_all(temp_root).expect("cleanup media root");
         fs::remove_dir_all(cache_root).expect("cleanup cache root");
+    }
+
+    #[test]
+    fn thumbnail_task_persists_grid_320_bytes_in_thumb_blobs() {
+        let temp_root = unique_temp_dir("thumb_blob");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("image.jpg"), 800, 400);
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let file_id = seed_media_file(&database, &temp_root, "image.jpg");
+        let request = database
+            .request_thumbnail_task(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("request thumbnail");
+
+        run_task(&mut database, request.task_id.expect("task id"), true);
+
+        let blob = database
+            .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read thumb blob")
+            .expect("thumb blob exists");
+        assert!(blob.data.starts_with(b"RIFF"));
+        assert_eq!(&blob.data[8..12], b"WEBP");
+        assert_eq!(blob.output_format, crate::thumbnails::GENERATED_FORMAT);
+        assert_eq!(blob.width, 640);
+        assert_eq!(blob.height, 320);
+        assert_eq!(blob.byte_size, blob.data.len() as i64);
+
+        fs::remove_dir_all(temp_root).expect("cleanup media root");
     }
 
     #[test]

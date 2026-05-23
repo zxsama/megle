@@ -2176,6 +2176,119 @@ impl Database {
         Ok(true)
     }
 
+    pub fn upsert_thumb_blob(&self, blob: ThumbBlobRecord) -> anyhow::Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO thumb_blobs(
+                file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(file_id, profile) DO UPDATE SET
+                data = excluded.data,
+                width = excluded.width,
+                height = excluded.height,
+                byte_size = excluded.byte_size,
+                output_format = excluded.output_format,
+                updated_at = excluded.updated_at
+            "#,
+            (
+                blob.file_id,
+                &blob.profile,
+                &blob.data,
+                blob.width,
+                blob.height,
+                blob.byte_size,
+                &blob.output_format,
+                blob.created_at,
+                blob.updated_at,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn get_thumb_blob(
+        &self,
+        file_id: i64,
+        profile: &str,
+    ) -> anyhow::Result<Option<ThumbBlobRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at
+            FROM thumb_blobs
+            WHERE file_id = ?1 AND profile = ?2
+            "#,
+        )?;
+        let mut rows = statement.query((file_id, profile))?;
+        Ok(rows.next()?.map(thumb_blob_from_row).transpose()?)
+    }
+
+    pub fn import_legacy_thumbnail_cache(&self) -> anyhow::Result<usize> {
+        let cache_root = self.default_thumbnail_cache_dir();
+        if !cache_root.is_dir() {
+            return Ok(0);
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT file_id, profile, cache_key, width, height, byte_size, output_format
+            FROM thumbs
+            WHERE profile = 'grid_320'
+              AND state = 'ready'
+              AND cache_key IS NOT NULL
+              AND width IS NOT NULL
+              AND height IS NOT NULL
+              AND byte_size IS NOT NULL
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut imported = 0usize;
+        for row in rows {
+            let (file_id, profile, cache_key, width, height, _byte_size, output_format) = row?;
+            if !is_safe_thumbnail_cache_key(&cache_key) {
+                continue;
+            }
+            let cache_path = cache_root.join(&cache_key);
+            let data = match std::fs::read(&cache_path) {
+                Ok(data) => data,
+                Err(error) => {
+                    tracing::debug!(file_id, %error, "legacy thumbnail cache import skipped unreadable file");
+                    continue;
+                }
+            };
+            if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+                tracing::debug!(
+                    file_id,
+                    "legacy thumbnail cache import skipped non-WebP file"
+                );
+                continue;
+            }
+            let now = unix_timestamp();
+            self.upsert_thumb_blob(ThumbBlobRecord {
+                file_id,
+                profile,
+                byte_size: data.len() as i64,
+                data,
+                width,
+                height,
+                output_format,
+                created_at: now,
+                updated_at: now,
+            })?;
+            cleanup_legacy_thumbnail_cache_file(&cache_root, &cache_key);
+            imported += 1;
+        }
+        Ok(imported)
+    }
+
     pub fn mark_root_scanned(&self, root_id: i64) -> anyhow::Result<()> {
         self.connection.execute(
             "UPDATE roots SET last_scan_at = ?1 WHERE id = ?2 AND enabled = 1",
@@ -3820,8 +3933,37 @@ fn thumbnail_from_row(
     })
 }
 
+fn thumb_blob_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThumbBlobRecord> {
+    Ok(ThumbBlobRecord {
+        file_id: row.get(0)?,
+        profile: row.get(1)?,
+        data: row.get(2)?,
+        width: row.get(3)?,
+        height: row.get(4)?,
+        byte_size: row.get(5)?,
+        output_format: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
 fn is_safe_thumbnail_cache_key(cache_key: &str) -> bool {
     is_safe_cache_key(cache_key)
+}
+
+fn cleanup_legacy_thumbnail_cache_file(cache_root: &Path, cache_key: &str) {
+    let path = cache_root.join(cache_key);
+    let _ = std::fs::remove_file(&path);
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory == cache_root {
+            break;
+        }
+        if std::fs::remove_dir(directory).is_err() {
+            break;
+        }
+        current = directory.parent();
+    }
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
@@ -4352,6 +4494,71 @@ mod tests {
             )
             .expect("query version 12");
         assert_eq!(version_12_count, 1);
+    }
+
+    #[test]
+    fn legacy_thumbnail_cache_import_persists_blob_and_removes_file() {
+        let db_dir = unique_db_temp_dir("legacy-cache-import");
+        std::fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "legacy.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: None,
+            })
+            .expect("insert file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert media kind");
+        database
+            .update_media_dimensions(file_id, 640, 320)
+            .expect("set dimensions");
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        let cache_key = "aa/bb/legacy.webp";
+        database
+            .upsert_thumbnail_state(ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: Some(cache_key.to_string()),
+                width: Some(640),
+                height: Some(320),
+                byte_size: Some(12),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("seed ready thumbnail");
+        let cache_path = database.default_thumbnail_cache_dir().join(cache_key);
+        std::fs::create_dir_all(cache_path.parent().expect("cache parent"))
+            .expect("create cache dirs");
+        std::fs::write(&cache_path, b"RIFF\x04\0\0\0WEBP").expect("write legacy cache");
+
+        let imported = database
+            .import_legacy_thumbnail_cache()
+            .expect("import legacy cache");
+
+        assert_eq!(imported, 1);
+        let blob = database
+            .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read thumb blob")
+            .expect("thumb blob exists");
+        assert!(blob.data.starts_with(b"RIFF"));
+        assert!(!cache_path.exists());
+
+        let _ = std::fs::remove_dir_all(db_dir);
     }
 
     fn seed_media_page_fixture(database: &Database) -> (i64, i64) {

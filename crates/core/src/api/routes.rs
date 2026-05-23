@@ -574,7 +574,7 @@ async fn get_thumbnail_blob(
     use axum::response::Response;
     let profile = normalize_profile(query.profile.as_deref())
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
-    let (cache_root, cache_key) = {
+    let blob = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
             .get_thumbnail(file_id, profile)?
@@ -585,19 +585,15 @@ async fn get_thumbnail_blob(
                 thumbnail.state
             )));
         }
-        let cache_key = thumbnail
-            .cache_key
-            .ok_or_else(|| CoreError::not_found("thumbnail cache key missing".to_string()))?;
-        (database.default_thumbnail_cache_dir(), cache_key)
+        database
+            .get_thumb_blob(file_id, profile)?
+            .ok_or_else(|| CoreError::not_found("thumbnail blob missing".to_string()))?
     };
-    let cache_path = cache_root.join(&cache_key);
-    let bytes = tokio::fs::read(&cache_path)
-        .await
-        .map_err(|err| CoreError::not_found(format!("thumbnail cache file missing: {err}")))?;
     Response::builder()
-        .header(CONTENT_TYPE, "image/webp")
+        .header(CONTENT_TYPE, blob.output_format)
         .header(CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .body(axum::body::Body::from(bytes))
+        .header("x-megle-served-by", "thumb_blobs")
+        .body(axum::body::Body::from(blob.data))
         .map_err(|err| CoreError::bad_request(format!("failed to build thumbnail response: {err}")))
 }
 
@@ -1784,6 +1780,72 @@ mod tests {
         assert!(skipped["asset"].is_null());
 
         let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_blob_route_reads_from_thumb_blobs() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: None,
+                width: Some(2),
+                height: Some(1),
+                byte_size: Some(12),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("mark thumbnail ready");
+        let blob_bytes = b"RIFF\x04\0\0\0WEBP".to_vec();
+        database
+            .upsert_thumb_blob(crate::db::ThumbBlobRecord {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                data: blob_bytes.clone(),
+                width: 2,
+                height: 1,
+                byte_size: blob_bytes.len() as i64,
+                output_format: crate::thumbnails::GENERATED_FORMAT.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .expect("seed thumb blob");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{file_id}/thumbnail/blob?profile=grid_320"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail blob");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/webp"
+        );
+        assert_eq!(
+            response.headers().get("x-megle-served-by").unwrap(),
+            "thumb_blobs"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read blob body");
+        assert_eq!(&bytes[..], blob_bytes.as_slice());
     }
 
     #[tokio::test]

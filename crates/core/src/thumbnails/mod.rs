@@ -98,11 +98,12 @@ pub struct CacheIdentity<'a> {
     pub file_key: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedThumbnail {
     pub width: i64,
     pub height: i64,
     pub byte_size: i64,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,7 +196,16 @@ pub fn generate_image_thumbnail(
     if !is_safe_cache_key(cache_key) {
         return Err(anyhow::anyhow!("unsafe thumbnail cache key: {cache_key}"));
     }
+    let generated = generate_image_thumbnail_bytes(source_path)?;
+    let path = cache_root.join(cache_key);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, &generated.data)?;
+    Ok(generated)
+}
 
+pub fn generate_image_thumbnail_bytes(source_path: &Path) -> anyhow::Result<GeneratedThumbnail> {
     let reader = ImageReader::open(source_path)
         .map_err(|error| anyhow::anyhow!("thumbnail decode failed: {error}"))?
         .with_guessed_format()
@@ -221,16 +231,11 @@ pub fn generate_image_thumbnail(
     let encoded = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height()).encode(75.0);
     let bytes: &[u8] = &encoded;
 
-    let path = cache_root.join(cache_key);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, bytes)?;
-
     Ok(GeneratedThumbnail {
         width: target_width as i64,
         height: target_height as i64,
         byte_size: bytes.len() as i64,
+        data: bytes.to_vec(),
     })
 }
 
@@ -363,11 +368,28 @@ pub fn generate_video_thumbnail(
         })?;
 
     let metadata = fs::metadata(&cache_path)?;
+    let data = fs::read(&cache_path)?;
     Ok(GeneratedThumbnail {
         width: dimensions.0 as i64,
         height: dimensions.1 as i64,
         byte_size: metadata.len() as i64,
+        data,
     })
+}
+
+pub fn generate_video_thumbnail_bytes(source_path: &Path) -> anyhow::Result<GeneratedThumbnail> {
+    let temp_root = std::env::temp_dir().join(format!(
+        "megle-video-thumbnail-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let cache_key = "aa/bb/temp.webp";
+    let result = generate_video_thumbnail(&temp_root, cache_key, source_path);
+    let _ = fs::remove_dir_all(&temp_root);
+    result
 }
 
 fn target_dimensions(width: u32, height: u32, short_side_px: u32) -> (u32, u32) {
