@@ -211,7 +211,7 @@ for (const value of ["image", "video", "other"]) {
 
 for (const value of ["grid_320"]) {
   if (!openApi.includes(value) || !routesRs.includes(value) || !thumbnailsRs.includes(value)) {
-    fail(`thumbnail profile value is not aligned: ${value}`);
+    fail(`thumbnail target value is not aligned: ${value}`);
   }
 }
 for (const value of ["pending", "queued", "ready", "failed", "skipped_small"]) {
@@ -219,7 +219,20 @@ for (const value of ["pending", "queued", "ready", "failed", "skipped_small"]) {
     fail(`thumbnail status value is not aligned: ${value}`);
   }
 }
-for (const value of ["image/webp", "shortSidePx", "outputFormat", "ThumbnailResponse"]) {
+for (const value of [
+  "image/webp",
+  "shortSidePx",
+  "outputFormat",
+  "ThumbnailResponse",
+  "previewPlaceholder",
+  "previewPlaceholderFormat",
+  "target",
+  "width",
+  "height",
+  "byteSize",
+  "servedBy",
+  "db_blob"
+]) {
   if (!openApi.includes(value)) {
     fail(`OpenAPI thumbnail contract missing ${value}`);
   }
@@ -439,7 +452,7 @@ if (!mediaOperation.includes('"400"') || !mediaOperation.includes("ErrorResponse
 const thumbnailOperation = operationBlock("/media/{fileId}/thumbnail", "get");
 for (const value of [
   "ThumbnailResponse",
-  "profile",
+  "target",
   '"200"',
   '"202"',
   '"404"',
@@ -465,9 +478,21 @@ for (const [name, action] of [
   }
 }
 const thumbnailBody = functionBody("get_thumbnail");
-for (const value of ["Json<ThumbnailResponse>", "get_thumbnail", "StatusCode::OK", "StatusCode::ACCEPTED"]) {
+for (const value of ["Json<ThumbnailResponse>", "get_thumbnail", "target", "StatusCode::OK", "StatusCode::ACCEPTED"]) {
   if (!thumbnailBody.includes(value)) {
     fail(`GET /api/media/{fileId}/thumbnail implementation missing ${value}`);
+  }
+}
+const thumbnailBlobBody = functionBody("get_thumbnail_blob");
+for (const value of ["get_thumb_blob", "target", "db_blob"]) {
+  if (!thumbnailBlobBody.includes(value)) {
+    fail(`GET /api/media/{fileId}/thumbnail/blob implementation missing ${value}`);
+  }
+}
+const thumbnailBlobOperation = operationBlock("/media/{fileId}/thumbnail/blob", "get");
+for (const value of ["target", "image/webp", "x-megle-served-by", "db_blob"]) {
+  if (!thumbnailBlobOperation.includes(value)) {
+    fail(`OpenAPI GET /media/{fileId}/thumbnail/blob missing ${value}`);
   }
 }
 const previewOperation = operationBlock("/media/{fileId}/preview", "get");

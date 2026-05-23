@@ -1183,10 +1183,14 @@ function clearFolderChildPageKeys(keys: Set<string>, folderId: number): void {
 function failedThumbnailState(mediaId: number, cause: unknown): ThumbnailResponse {
   return {
     fileId: mediaId,
-    profile: "grid_320",
+    target: "grid_320",
     state: "failed",
     shortSidePx: 320,
     outputFormat: "image/webp",
+    width: null,
+    height: null,
+    byteSize: null,
+    servedBy: null,
     asset: null,
     error: errorMessage(cause),
     updatedAt: null

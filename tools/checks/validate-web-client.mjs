@@ -57,6 +57,8 @@ const desktopAdapter = read(desktopAdapterPath);
 const packageJson = readJson("package.json");
 const webPackageJson = readJson("apps/web/package.json");
 const coreClientPackagePath = "packages/core-client/package.json";
+const coreClient = read("packages/core-client/src/client.ts");
+const coreClientContract = read("packages/core-client/src/generated-contract.ts");
 const duplicateCoreContractNames = [
   "Page",
   "RootRecord",
@@ -88,6 +90,21 @@ if (!packageJson.workspaces?.includes("packages/core-client")) {
 
 if (webPackageJson.dependencies?.["@megle/core-client"] !== "*") {
   fail("apps/web must depend on @megle/core-client through the root workspace");
+}
+
+if (!/getThumbnail:\s*\(fileId:\s*number,\s*target:\s*"grid_320"/.test(coreClient)) {
+  fail("core-client getThumbnail must expose the target query vocabulary");
+}
+if (!/getThumbnailBlob:\s*async\s*\(fileId:\s*number,\s*target:\s*"grid_320"/.test(coreClient)) {
+  fail("core-client getThumbnailBlob must expose the target query vocabulary");
+}
+if (/thumbnail\$\{query\(\{\s*profile/.test(coreClient) || /thumbnail\/blob\$\{query\(\{\s*profile/.test(coreClient)) {
+  fail("core-client thumbnail helpers must not serialize the retired profile query");
+}
+for (const value of ["previewPlaceholder", "previewPlaceholderFormat", "servedBy", "db_blob"]) {
+  if (!coreClientContract.includes(value)) {
+    fail(`core-client generated contract missing ${value}`);
+  }
 }
 
 if (!existsSync(path.join(root, desktopAdapterPath))) {

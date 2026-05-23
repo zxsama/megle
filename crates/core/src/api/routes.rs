@@ -176,7 +176,7 @@ struct ListMediaQuery {
 
 #[derive(Debug, Deserialize)]
 struct ThumbnailQuery {
-    profile: Option<String>,
+    target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,10 +297,14 @@ struct ThumbnailAsset {
 #[serde(rename_all = "camelCase")]
 struct ThumbnailResponse {
     file_id: i64,
-    profile: String,
+    target: String,
     state: String,
     short_side_px: i64,
     output_format: String,
+    width: Option<i64>,
+    height: Option<i64>,
+    byte_size: Option<i64>,
+    served_by: Option<&'static str>,
     asset: Option<ThumbnailAsset>,
     error: Option<String>,
     updated_at: Option<i64>,
@@ -526,16 +530,16 @@ async fn get_thumbnail(
     Path(file_id): Path<i64>,
     Query(query): Query<ThumbnailQuery>,
 ) -> ApiResult<(StatusCode, Json<ThumbnailResponse>)> {
-    let profile = normalize_profile(query.profile.as_deref())
-        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
+    let target = normalize_profile(query.target.as_deref())
+        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
     let (thumbnail, queued_task) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
-            .get_thumbnail(file_id, profile)?
+            .get_thumbnail(file_id, target)?
             .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
         if is_pending_status(&thumbnail.state) {
             let request = database
-                .request_thumbnail_task(file_id, profile)
+                .request_thumbnail_task(file_id, target)
                 .map_err(map_thumbnail_request_error)?;
             let queued_task_id = if request.queued {
                 request.task_id
@@ -572,12 +576,12 @@ async fn get_thumbnail_blob(
 ) -> ApiResult<axum::response::Response> {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
     use axum::response::Response;
-    let profile = normalize_profile(query.profile.as_deref())
-        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail profile".to_string()))?;
+    let target = normalize_profile(query.target.as_deref())
+        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
     let blob = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
-            .get_thumbnail(file_id, profile)?
+            .get_thumbnail(file_id, target)?
             .ok_or_else(|| CoreError::not_found("media item not found".to_string()))?;
         if thumbnail.state.as_str() != "ready" {
             return Err(CoreError::bad_request(format!(
@@ -586,7 +590,7 @@ async fn get_thumbnail_blob(
             )));
         }
         database
-            .get_thumb_blob(file_id, profile)?
+            .get_thumb_blob(file_id, target)?
             .ok_or_else(|| CoreError::not_found("thumbnail blob missing".to_string()))?
     };
     Response::builder()
@@ -1082,10 +1086,14 @@ fn thumbnail_response(thumbnail: ThumbnailRecord) -> ThumbnailResponse {
     };
     ThumbnailResponse {
         file_id: thumbnail.file_id,
-        profile: thumbnail.profile,
+        target: thumbnail.profile,
         state: thumbnail.state,
         short_side_px: thumbnail.short_side_px,
         output_format: thumbnail.output_format,
+        width: thumbnail.width,
+        height: thumbnail.height,
+        byte_size: thumbnail.byte_size,
+        served_by: asset.as_ref().map(|_| "db_blob"),
         asset,
         error: thumbnail.error,
         updated_at: thumbnail.updated_at,
@@ -1139,7 +1147,7 @@ fn map_thumbnail_request_error(error: anyhow::Error) -> CoreError {
         return CoreError::not_found(message);
     }
     if message.contains("unsupported thumbnail profile") {
-        return CoreError::bad_request(message);
+        return CoreError::bad_request(message.replace("profile", "target"));
     }
     error.into()
 }
@@ -1522,7 +1530,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1531,7 +1539,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = response_json(response).await;
         assert_eq!(body["fileId"], file_id);
-        assert_eq!(body["profile"], "grid_320");
+        assert_eq!(body["target"], "grid_320");
         assert_eq!(body["state"], "queued");
         assert_eq!(body["shortSidePx"], 320);
         assert_eq!(body["outputFormat"], "image/webp");
@@ -1645,7 +1653,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1664,7 +1672,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1746,7 +1754,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{ready_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{ready_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1766,7 +1774,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{skipped_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{skipped_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1776,7 +1784,7 @@ mod tests {
         assert_eq!(skipped_response.status(), StatusCode::OK);
         let skipped = response_json(skipped_response).await;
         assert_eq!(skipped["state"], "skipped_small");
-        assert_eq!(skipped["profile"], "grid_320");
+        assert_eq!(skipped["target"], "grid_320");
         assert!(skipped["asset"].is_null());
 
         let _ = fs::remove_dir_all(db_dir);
@@ -1825,7 +1833,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{file_id}/thumbnail/blob?profile=grid_320"
+                        "/api/media/{file_id}/thumbnail/blob?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1896,7 +1904,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{queued_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{queued_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1914,7 +1922,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!(
-                        "/api/media/{failed_current_file_id}/thumbnail?profile=grid_320"
+                        "/api/media/{failed_current_file_id}/thumbnail?target=grid_320"
                     ))
                     .body(Body::empty())
                     .expect("build request"),
@@ -1932,9 +1940,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!(
-                        "/api/media/{queued_file_id}/thumbnail?profile=grid"
-                    ))
+                    .uri(format!("/api/media/{queued_file_id}/thumbnail?target=grid"))
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -1946,7 +1952,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/api/media/999999/thumbnail?profile=grid_320")
+                    .uri("/api/media/999999/thumbnail?target=grid_320")
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -2005,7 +2011,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method(Method::GET)
-                        .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                        .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                         .body(Body::empty())
                         .expect("build request"),
                 )
@@ -2535,7 +2541,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/api/media/{file_id}/thumbnail?profile=grid_320"))
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
                     .body(Body::empty())
                     .expect("build request"),
             )

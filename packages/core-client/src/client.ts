@@ -50,7 +50,7 @@ export class CoreApiError extends Error {
 }
 
 type QueryParams = Partial<ListMediaParams & ListFolderChildrenParams> & {
-  profile?: "grid_320";
+  target?: "grid_320";
 };
 
 export function createCoreClient(config: CoreClientConfig) {
@@ -117,10 +117,10 @@ export function createCoreClient(config: CoreClientConfig) {
       request<Page<FolderRecord>>(`/folders/${folderId}/children${query(params)}`),
     listMedia: (params: ListMediaParams = {}) => request<Page<MediaRecord>>(`/media${query(params)}`),
     getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`),
-    getThumbnail: (fileId: number, profile: "grid_320" = "grid_320") =>
-      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ profile })}`),
-    getThumbnailBlob: async (fileId: number, profile: "grid_320" = "grid_320") => {
-      return fetchBlob(`/media/${fileId}/thumbnail/blob${query({ profile })}`);
+    getThumbnail: (fileId: number, target: "grid_320" = "grid_320") =>
+      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ target })}`),
+    getThumbnailBlob: async (fileId: number, target: "grid_320" = "grid_320") => {
+      return fetchBlob(`/media/${fileId}/thumbnail/blob${query({ target })}`);
     },
     getPreviewBlob: (fileId: number) => fetchBlob(`/media/${fileId}/preview`),
     listTags: () => request<TagListResponse>("/tags"),
@@ -209,7 +209,7 @@ function query(params: QueryParams): string {
   if (params.cursor) search.set("cursor", params.cursor);
   if ("sort" in params && params.sort) search.set("sort", params.sort);
   if ("kind" in params && params.kind) search.set("kind", params.kind);
-  if ("profile" in params && params.profile) search.set("profile", params.profile);
+  if ("target" in params && params.target) search.set("target", params.target);
   const value = search.toString();
   return value ? `?${value}` : "";
 }

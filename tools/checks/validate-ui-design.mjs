@@ -65,6 +65,8 @@ const interfaceStyle = read("apps/web/src/features/settings/interfaceStyle.ts");
 const taskPanel = read("apps/web/src/features/tasks/TaskPanel.tsx");
 const contextMenu = read("apps/web/src/features/file-ops/ContextMenu.tsx");
 const desktopBridge = read("apps/web/src/core/desktop.ts");
+const coreClientContract = read("packages/core-client/src/generated-contract.ts");
+const coreClient = read("packages/core-client/src/client.ts");
 const titlebarPointerPlane = readOptional("apps/web/src/app-shell/useTitlebarPointerPlane.ts") ?? "";
 const libraryFilterSources = libraryView + "\n" + (filterMenu ?? "");
 const desktopMainAst = ts.createSourceFile(
@@ -74,6 +76,15 @@ const desktopMainAst = ts.createSourceFile(
   true,
   ts.ScriptKind.TS
 );
+
+for (const value of ["previewPlaceholder", "previewPlaceholderFormat", "servedBy", "db_blob"]) {
+  if (!coreClientContract.includes(value)) {
+    fail(`Core preview pipeline contract must expose ${value}`);
+  }
+}
+if (!coreClient.includes("target: \"grid_320\"") || coreClient.includes("profile?: \"grid_320\"")) {
+  fail("Core client thumbnail helpers must use target=grid_320 vocabulary");
+}
 
 const nativeMaterial = inspectNativeBrowserWindowOptions(desktopMain);
 if (!nativeMaterial.browserWindowOptionsFound) {

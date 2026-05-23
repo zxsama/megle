@@ -146,7 +146,7 @@ paths:
       operationId: getThumbnail
       parameters:
         - $ref: "#/components/parameters/fileId"
-        - $ref: "#/components/parameters/profile"
+        - $ref: "#/components/parameters/target"
       responses:
         "200":
           description: Thumbnail state is ready or terminal.
@@ -161,7 +161,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ThumbnailResponse"
         "400":
-          description: Unsupported thumbnail profile.
+          description: Unsupported thumbnail target.
           content:
             application/json:
               schema:
@@ -177,17 +177,22 @@ paths:
       operationId: getThumbnailBlob
       parameters:
         - $ref: "#/components/parameters/fileId"
-        - $ref: "#/components/parameters/profile"
+        - $ref: "#/components/parameters/target"
       responses:
         "200":
           description: Generated thumbnail bytes (WebP).
+          headers:
+            x-megle-served-by:
+              schema:
+                type: string
+                enum: [db_blob]
           content:
             image/webp:
               schema:
                 type: string
                 format: binary
         "400":
-          description: Thumbnail not ready or unsupported profile.
+          description: Thumbnail not ready or unsupported target.
           content:
             application/json:
               schema:
@@ -834,8 +839,8 @@ components:
       in: query
       schema:
         type: string
-    profile:
-      name: profile
+    target:
+      name: target
       in: query
       schema:
         type: string
@@ -1056,6 +1061,16 @@ components:
         codec:
           type: string
           nullable: true
+        previewPlaceholder:
+          type: array
+          nullable: true
+          items:
+            type: integer
+            minimum: 0
+            maximum: 255
+        previewPlaceholderFormat:
+          type: string
+          nullable: true
         thumbnailState:
           type: string
           nullable: true
@@ -1095,12 +1110,12 @@ components:
           minimum: 1
     ThumbnailResponse:
       type: object
-      required: [fileId, profile, state, shortSidePx, outputFormat, asset, error, updatedAt]
+      required: [fileId, target, state, shortSidePx, outputFormat, width, height, byteSize, servedBy, asset, error, updatedAt]
       properties:
         fileId:
           type: integer
           minimum: 1
-        profile:
+        target:
           type: string
           enum: [grid_320]
         state:
@@ -1113,6 +1128,22 @@ components:
         outputFormat:
           type: string
           enum: [image/webp]
+        width:
+          type: integer
+          nullable: true
+          minimum: 1
+        height:
+          type: integer
+          nullable: true
+          minimum: 1
+        byteSize:
+          type: integer
+          nullable: true
+          minimum: 1
+        servedBy:
+          type: string
+          nullable: true
+          enum: [db_blob]
         asset:
           anyOf:
             - $ref: "#/components/schemas/ThumbnailAsset"

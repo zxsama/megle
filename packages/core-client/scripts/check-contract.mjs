@@ -259,7 +259,8 @@ for (const [name, line] of [
 assertOperationParameters("listFolderChildren", ["folderId", "limit", "cursor"]);
 assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor", "sort", "kind"]);
 assertOperationParameters("getMedia", ["fileId"]);
-assertOperationParameters("getThumbnail", ["fileId", "profile"]);
+assertOperationParameters("getThumbnail", ["fileId", "target"]);
+assertOperationParameters("getThumbnailBlob", ["fileId", "target"]);
 
 for (const method of [
   "listRoots",
@@ -270,6 +271,7 @@ for (const method of [
   "listMedia",
   "getMedia",
   "getThumbnail",
+  "getThumbnailBlob",
   "getPreviewBlob",
   "listTasks",
   "cancelTask",
@@ -301,14 +303,26 @@ for (const method of [
 
 const thumbnailBody = interfaceBody("ThumbnailResponse");
 for (const line of [
-  'profile: "grid_320";',
+  'target: "grid_320";',
   'state: "pending" | "queued" | "ready" | "failed" | "skipped_small";',
   'shortSidePx: number;',
   'outputFormat: "image/webp";',
+  "width: number | null;",
+  "height: number | null;",
+  "byteSize: number | null;",
+  'servedBy: "db_blob" | null;',
   "asset: ThumbnailAsset | null;",
   "error: string | null;"
 ]) {
   requireLine(thumbnailBody, line, "generated-contract.ts ThumbnailResponse");
+}
+
+const mediaBody = interfaceBody("MediaRecord");
+for (const line of [
+  "previewPlaceholder?: number[] | null;",
+  "previewPlaceholderFormat?: string | null;"
+]) {
+  requireLine(mediaBody, line, "generated-contract.ts MediaRecord");
 }
 
 const thumbnailAssetBody = interfaceBody("ThumbnailAsset");
@@ -376,8 +390,12 @@ if (!/listMedia:\s*\(params:\s*ListMediaParams\s*=\s*{}\)\s*=>\s*request<Page<Me
   fail("client.ts listMedia must serialize typed query params");
 }
 
-if (!/getThumbnail:\s*\(fileId:\s*number,\s*profile:\s*"grid_320"\s*=\s*"grid_320"\)\s*=>\s*request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*profile\s*}\)\}`\)/.test(client)) {
-  fail("client.ts getThumbnail must request typed thumbnail state with default grid_320 profile");
+if (!/getThumbnail:\s*\(fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320"\)\s*=>\s*request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*target\s*}\)\}`\)/.test(client)) {
+  fail("client.ts getThumbnail must request typed thumbnail state with default grid_320 target");
+}
+
+if (!/getThumbnailBlob:\s*async\s*\(fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320"\)\s*=>\s*\{[\s\S]*fetchBlob\(`\/media\/\$\{fileId\}\/thumbnail\/blob\$\{query\(\{\s*target\s*}\)\}`\)/.test(client)) {
+  fail("client.ts getThumbnailBlob must request thumbnail blob with default grid_320 target");
 }
 
 if (!/getPreviewBlob:\s*\(fileId:\s*number\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview`\)/.test(client)) {
