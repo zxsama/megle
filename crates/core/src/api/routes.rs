@@ -592,7 +592,7 @@ async fn get_thumbnail_blob(
     Response::builder()
         .header(CONTENT_TYPE, blob.output_format)
         .header(CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .header("x-megle-served-by", "thumb_blobs")
+        .header("x-megle-served-by", "db_blob")
         .body(axum::body::Body::from(blob.data))
         .map_err(|err| CoreError::bad_request(format!("failed to build thumbnail response: {err}")))
 }
@@ -1840,7 +1840,7 @@ mod tests {
         );
         assert_eq!(
             response.headers().get("x-megle-served-by").unwrap(),
-            "thumb_blobs"
+            "db_blob"
         );
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await

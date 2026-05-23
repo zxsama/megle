@@ -2309,10 +2309,10 @@ impl Database {
                         continue;
                     }
                 };
-                if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+                if !is_decodable_webp(&data) {
                     tracing::debug!(
                         file_id,
-                        "legacy thumbnail cache import skipped non-WebP file"
+                        "legacy thumbnail cache import skipped invalid WebP file"
                     );
                     invalidate_legacy_thumbnail_import_candidate(
                         &self.connection,
@@ -4036,6 +4036,13 @@ fn is_safe_thumbnail_cache_key(cache_key: &str) -> bool {
     is_safe_cache_key(cache_key)
 }
 
+fn is_decodable_webp(data: &[u8]) -> bool {
+    data.len() >= 12
+        && &data[0..4] == b"RIFF"
+        && &data[8..12] == b"WEBP"
+        && image::load_from_memory_with_format(data, image::ImageFormat::WebP).is_ok()
+}
+
 fn invalidate_legacy_thumbnail_import_candidate(
     connection: &rusqlite::Connection,
     file_id: i64,
@@ -4652,7 +4659,8 @@ mod tests {
         let cache_path = database.default_thumbnail_cache_dir().join(cache_key);
         std::fs::create_dir_all(cache_path.parent().expect("cache parent"))
             .expect("create cache dirs");
-        std::fs::write(&cache_path, b"RIFF\x04\0\0\0WEBP").expect("write legacy cache");
+        let valid_webp = test_webp_bytes();
+        std::fs::write(&cache_path, &valid_webp).expect("write legacy cache");
         let orphan_path = database
             .default_thumbnail_cache_dir()
             .join("orphan")
@@ -4677,7 +4685,7 @@ mod tests {
             .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("read thumb blob")
             .expect("thumb blob exists");
-        assert!(blob.data.starts_with(b"RIFF"));
+        assert_eq!(blob.data, valid_webp);
         assert!(!cache_path.exists());
         assert!(!orphan_path.exists());
         assert!(!corrupt_path.exists());
@@ -4687,7 +4695,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_thumbnail_cache_import_invalidates_ready_row_when_referenced_file_is_corrupt() {
+    fn legacy_thumbnail_cache_import_invalidates_ready_row_when_referenced_webp_is_undecodable() {
         let db_dir = unique_db_temp_dir("legacy-cache-corrupt");
         std::fs::create_dir_all(&db_dir).expect("create db dir");
         let db_path = db_dir.join("megle.sqlite");
@@ -4734,7 +4742,7 @@ mod tests {
         let cache_path = database.default_thumbnail_cache_dir().join(cache_key);
         std::fs::create_dir_all(cache_path.parent().expect("cache parent"))
             .expect("create cache dirs");
-        std::fs::write(&cache_path, b"not a webp").expect("write corrupt legacy cache");
+        std::fs::write(&cache_path, b"RIFF\x04\0\0\0WEBP").expect("write undecodable legacy cache");
 
         let imported = database
             .import_legacy_thumbnail_cache()
@@ -4805,6 +4813,14 @@ mod tests {
             "megle-db-test-{label}-{}-{suffix}",
             std::process::id()
         ))
+    }
+
+    fn test_webp_bytes() -> Vec<u8> {
+        let rgba = image::RgbaImage::from_pixel(2, 1, image::Rgba([20, 40, 60, 255]));
+        let encoded =
+            webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height()).encode(75.0);
+        let bytes: &[u8] = &encoded;
+        bytes.to_vec()
     }
 
     fn media_names(items: &[MediaRecord]) -> Vec<&str> {
