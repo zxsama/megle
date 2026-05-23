@@ -474,8 +474,7 @@ impl Database {
             self.apply_plugins_extended_migration()?;
         }
         if !self.migration_applied(12)? {
-            self.connection
-                .execute_batch(migrations::PREVIEW_PIPELINE_REFACTOR_MIGRATION)?;
+            self.apply_preview_pipeline_refactor_migration()?;
         }
         self.backfill_media_fts_if_empty()?;
         Ok(())
@@ -609,6 +608,24 @@ impl Database {
             "#,
             [],
         )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn apply_preview_pipeline_refactor_migration(&self) -> anyhow::Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for (column, definition) in [
+            ("preview_placeholder", "preview_placeholder BLOB"),
+            (
+                "preview_placeholder_format",
+                "preview_placeholder_format TEXT NOT NULL DEFAULT 'image/webp'",
+            ),
+        ] {
+            if !table_has_column_in_transaction(&transaction, "media", column)? {
+                transaction.execute_batch(&format!("ALTER TABLE media ADD COLUMN {definition}"))?;
+            }
+        }
+        transaction.execute_batch(migrations::PREVIEW_PIPELINE_REFACTOR_MIGRATION)?;
         transaction.commit()?;
         Ok(())
     }
@@ -4221,6 +4238,104 @@ mod tests {
             .table_has_column("media", "preview_placeholder_format")
             .unwrap());
         assert!(database.table_exists("thumb_blobs").unwrap());
+
+        let index_exists: i64 = database
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'idx_thumb_blobs_profile_updated_at')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query thumb_blobs index");
+        assert_eq!(index_exists, 1);
+
+        database
+            .connection
+            .execute(
+                "INSERT INTO roots(path, display_name, enabled, created_at) VALUES ('D:/Pictures', 'Pictures', 1, 1)",
+                [],
+            )
+            .expect("insert root");
+        database
+            .connection
+            .execute(
+                "INSERT INTO folders(root_id, parent_id, name, path_hash, mtime) VALUES (1, NULL, '', 'root-hash', 1)",
+                [],
+            )
+            .expect("insert folder");
+        database
+            .connection
+            .execute(
+                "INSERT INTO files(root_id, folder_id, name, ext, size, mtime) VALUES (1, 1, 'image.jpg', '.jpg', 1000, 10)",
+                [],
+            )
+            .expect("insert file");
+        database
+            .connection
+            .execute(
+                r#"
+                INSERT INTO thumb_blobs(file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at)
+                VALUES (1, 'grid_320', X'524946460000000057454250', 40, 20, 12, 'image/webp', 1, 1)
+                "#,
+                [],
+            )
+            .expect("insert valid thumb blob");
+        let invalid_profile = database
+            .connection
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO thumb_blobs(file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at)
+                VALUES (1, 'preview', X'00', 1, 1, 1, 'image/webp', 1, 1)
+                "#,
+                [],
+            )
+            .expect("invalid profile should be ignored");
+        assert_eq!(invalid_profile, 0);
+        let invalid_format = database
+            .connection
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO thumb_blobs(file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at)
+                VALUES (1, 'grid_320', X'00', 1, 1, 1, 'image/jpeg', 1, 2)
+                "#,
+                [],
+            )
+            .expect("invalid format should be ignored");
+        assert_eq!(invalid_format, 0);
+    }
+
+    #[test]
+    fn preview_pipeline_migration_recovers_after_partial_apply() {
+        let database = Database::open_in_memory().expect("open database");
+        database
+            .connection
+            .execute_batch(migrations::INITIAL_MIGRATION)
+            .expect("apply initial migration");
+        database
+            .connection
+            .execute("ALTER TABLE media ADD COLUMN preview_placeholder BLOB", [])
+            .expect("simulate partially added placeholder column");
+
+        database
+            .apply_migrations()
+            .expect("apply migrations after partial preview pipeline migration");
+
+        assert!(database
+            .table_has_column("media", "preview_placeholder")
+            .unwrap());
+        assert!(database
+            .table_has_column("media", "preview_placeholder_format")
+            .unwrap());
+        assert!(database.table_exists("thumb_blobs").unwrap());
+        let version_12_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 12",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version 12");
+        assert_eq!(version_12_count, 1);
     }
 
     fn seed_media_page_fixture(database: &Database) -> (i64, i64) {

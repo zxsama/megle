@@ -14,6 +14,8 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0006_thumbnail_task_attempt_fingerprint.sql",
     ROOT / "crates" / "core" / "migrations" / "0007_task_status_contract.sql",
     ROOT / "crates" / "core" / "migrations" / "0008_task_attempt_generation.sql",
+    ROOT / "crates" / "core" / "migrations" / "0009_scan_reconciliation.sql",
+    ROOT / "crates" / "core" / "migrations" / "0010_media_fts_contentless_delete.sql",
     ROOT / "crates" / "core" / "migrations" / "0011_plugins_extended.sql",
     ROOT / "crates" / "core" / "migrations" / "0012_preview_pipeline_refactor.sql",
 ]
@@ -111,6 +113,34 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
+def table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def apply_migration(conn: sqlite3.Connection, migration: Path) -> None:
+    name = migration.name
+    if name == "0009_scan_reconciliation.sql":
+        if not table_has_column(conn, "roots", "active_scan_generation"):
+            conn.executescript(migration.read_text(encoding="utf-8"))
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+            VALUES (9, 'scan_reconciliation', unixepoch())
+            """
+        )
+        return
+    if name == "0012_preview_pipeline_refactor.sql":
+        if not table_has_column(conn, "media", "preview_placeholder"):
+            conn.execute("ALTER TABLE media ADD COLUMN preview_placeholder BLOB")
+        if not table_has_column(conn, "media", "preview_placeholder_format"):
+            conn.execute(
+                "ALTER TABLE media ADD COLUMN preview_placeholder_format TEXT NOT NULL DEFAULT 'image/webp'"
+            )
+        conn.executescript(migration.read_text(encoding="utf-8"))
+        return
+    conn.executescript(migration.read_text(encoding="utf-8"))
+
+
 def main() -> None:
     for migration in MIGRATIONS:
         if not migration.exists():
@@ -121,7 +151,7 @@ def main() -> None:
         conn = sqlite3.connect(db_path)
         try:
             for migration in MIGRATIONS:
-                conn.executescript(migration.read_text(encoding="utf-8"))
+                apply_migration(conn, migration)
             conn.execute("PRAGMA foreign_keys = ON")
 
             tables = {
@@ -183,6 +213,16 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 8 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 9"
+            ).fetchone()
+            if version is None:
+                fail("migration version 9 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 10"
+            ).fetchone()
+            if version is None:
+                fail("migration version 10 was not recorded")
             version = conn.execute(
                 "SELECT version FROM schema_migrations WHERE version = 11"
             ).fetchone()

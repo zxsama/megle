@@ -65,6 +65,8 @@ pub enum ThumbnailStatus {
 pub const GRID_320_PROFILE: &str = "grid_320";
 pub const GRID_320_SHORT_SIDE_PX: i64 = 320;
 pub const GENERATED_FORMAT: &str = "image/webp";
+pub const PREVIEW_PLACEHOLDER_SHORT_SIDE_PX: u32 = 20;
+pub const PREVIEW_PLACEHOLDER_MAX_SIDE_PX: u32 = 64;
 #[allow(dead_code)]
 pub const THUMBNAIL_PROFILE_VALUES: &[&str] = &[GRID_320_PROFILE];
 #[allow(dead_code)]
@@ -101,6 +103,15 @@ pub struct GeneratedThumbnail {
     pub width: i64,
     pub height: i64,
     pub byte_size: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewPlaceholder {
+    pub data: Vec<u8>,
+    pub width: i64,
+    pub height: i64,
+    pub byte_size: i64,
+    pub output_format: &'static str,
 }
 
 impl ThumbnailPolicy {
@@ -223,6 +234,42 @@ pub fn generate_image_thumbnail(
     })
 }
 
+pub fn generate_preview_placeholder(source_path: &Path) -> anyhow::Result<PreviewPlaceholder> {
+    let reader = ImageReader::open(source_path)
+        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?;
+    let decoded = reader
+        .decode()
+        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?;
+
+    let source_width = decoded.width();
+    let source_height = decoded.height();
+    if source_width == 0 || source_height == 0 {
+        return Err(anyhow::anyhow!(
+            "placeholder decode failed: zero-sized source image"
+        ));
+    }
+    let (target_width, target_height) = placeholder_dimensions(
+        source_width,
+        source_height,
+        PREVIEW_PLACEHOLDER_SHORT_SIDE_PX,
+        PREVIEW_PLACEHOLDER_MAX_SIDE_PX,
+    );
+    let resized = decoded.resize_exact(target_width, target_height, FilterType::Triangle);
+    let rgba = resized.to_rgba8();
+    let encoded = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height()).encode(45.0);
+    let bytes: &[u8] = &encoded;
+
+    Ok(PreviewPlaceholder {
+        data: bytes.to_vec(),
+        width: target_width as i64,
+        height: target_height as i64,
+        byte_size: bytes.len() as i64,
+        output_format: GENERATED_FORMAT,
+    })
+}
+
 pub fn generate_video_thumbnail(
     cache_root: &Path,
     cache_key: &str,
@@ -336,6 +383,28 @@ fn target_dimensions(width: u32, height: u32, short_side_px: u32) -> (u32, u32) 
         let target_width = ((width as u64 * target_height as u64) / height.max(1) as u64) as u32;
         (target_width.max(1), target_height)
     }
+}
+
+fn placeholder_dimensions(
+    width: u32,
+    height: u32,
+    short_side_px: u32,
+    max_side_px: u32,
+) -> (u32, u32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let short_side = width.min(height) as f64;
+    let long_side = width.max(height) as f64;
+    let scale = (short_side_px.max(1) as f64 / short_side)
+        .min(max_side_px.max(1) as f64 / long_side)
+        .min(1.0);
+    let target_width = ((width as f64 * scale).round() as u32)
+        .max(1)
+        .min(max_side_px.max(1));
+    let target_height = ((height as f64 * scale).round() as u32)
+        .max(1)
+        .min(max_side_px.max(1));
+    (target_width, target_height)
 }
 
 /// Detects whether `ffmpeg` is on PATH. Result is cached for the lifetime of
@@ -499,6 +568,32 @@ mod tests {
         // Sources already at or under the short side stay unchanged so
         // skipped_small can short-circuit the pipeline before we touch them.
         assert_eq!(target_dimensions(200, 100, 320), (200, 100));
+    }
+
+    #[test]
+    fn generate_preview_placeholder_writes_bounded_real_webp_for_extreme_panorama() {
+        let source_dir = unique_temp_dir();
+        fs::create_dir_all(&source_dir).expect("create source dir");
+        let source_path = source_dir.join("panorama.png");
+        let buffer = image::ImageBuffer::from_fn(1000u32, 1u32, |x, _| {
+            image::Rgb([(x % 255) as u8, 64, 32])
+        });
+        image::DynamicImage::ImageRgb8(buffer)
+            .save(&source_path)
+            .expect("write panorama source");
+
+        let placeholder =
+            generate_preview_placeholder(&source_path).expect("generate preview placeholder");
+
+        assert_eq!(placeholder.output_format, GENERATED_FORMAT);
+        assert_eq!(&placeholder.data[0..4], b"RIFF");
+        assert_eq!(&placeholder.data[8..12], b"WEBP");
+        assert!(placeholder.width <= PREVIEW_PLACEHOLDER_MAX_SIDE_PX as i64);
+        assert!(placeholder.height <= PREVIEW_PLACEHOLDER_MAX_SIDE_PX as i64);
+        assert_eq!(placeholder.byte_size, placeholder.data.len() as i64);
+        assert!(placeholder.byte_size <= 8192);
+
+        fs::remove_dir_all(&source_dir).expect("cleanup source dir");
     }
 
     #[test]

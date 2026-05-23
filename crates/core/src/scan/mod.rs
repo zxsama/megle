@@ -4,17 +4,15 @@ use std::fs::Metadata;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use image::imageops::FilterType;
 use walkdir::WalkDir;
 
 use crate::db::{
     Database, FileUpsert, FolderUpsert, RootRecord, ScanFileUpsert, ScanWriteBatch,
     TaskScanProgress,
 };
-use crate::thumbnails::GENERATED_FORMAT;
+use crate::thumbnails::generate_preview_placeholder;
 
 pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 1_000;
-const PREVIEW_PLACEHOLDER_SHORT_SIDE_PX: u32 = 20;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,8 +360,8 @@ fn probe_image_dimensions(
                     Ok(placeholder) => {
                         if let Err(error) = database.update_media_preview_placeholder(
                             *file_id,
-                            &placeholder,
-                            GENERATED_FORMAT,
+                            &placeholder.data,
+                            placeholder.output_format,
                         ) {
                             tracing::debug!(
                                 file_id = *file_id,
@@ -393,49 +391,6 @@ fn probe_image_dimensions(
         }
     }
     Ok(())
-}
-
-fn generate_preview_placeholder(source_path: &Path) -> anyhow::Result<Vec<u8>> {
-    let reader = image::ImageReader::open(source_path)
-        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?
-        .with_guessed_format()
-        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?;
-    let decoded = reader
-        .decode()
-        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?;
-    let source_width = decoded.width();
-    let source_height = decoded.height();
-    if source_width == 0 || source_height == 0 {
-        return Err(anyhow::anyhow!(
-            "placeholder decode failed: zero-sized source image"
-        ));
-    }
-    let (target_width, target_height) = placeholder_dimensions(
-        source_width,
-        source_height,
-        PREVIEW_PLACEHOLDER_SHORT_SIDE_PX,
-    );
-    let resized = decoded.resize_exact(target_width, target_height, FilterType::Triangle);
-    let rgba = resized.to_rgba8();
-    let encoded = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height()).encode(45.0);
-    let bytes: &[u8] = &encoded;
-    Ok(bytes.to_vec())
-}
-
-fn placeholder_dimensions(width: u32, height: u32, short_side_px: u32) -> (u32, u32) {
-    if width <= height {
-        let target_width = short_side_px;
-        let target_height = ((height as u64 * short_side_px as u64) / width as u64)
-            .max(1)
-            .min(u32::MAX as u64) as u32;
-        (target_width, target_height)
-    } else {
-        let target_height = short_side_px;
-        let target_width = ((width as u64 * short_side_px as u64) / height as u64)
-            .max(1)
-            .min(u32::MAX as u64) as u32;
-        (target_width, target_height)
-    }
 }
 
 fn ensure_root_enabled(database: &Database, root_id: i64) -> anyhow::Result<()> {
@@ -1105,7 +1060,19 @@ mod tests {
             .get_media(1)
             .expect("get media")
             .expect("media exists");
-        assert!(media.preview_placeholder.is_some());
+        let placeholder = media
+            .preview_placeholder
+            .as_deref()
+            .expect("preview placeholder bytes");
+        assert_eq!(&placeholder[0..4], b"RIFF");
+        assert_eq!(&placeholder[8..12], b"WEBP");
+        assert!(placeholder.len() <= 8192);
+        let dimensions = image::load_from_memory(placeholder)
+            .expect("decode preview placeholder")
+            .into_rgba8()
+            .dimensions();
+        assert!(dimensions.0 <= crate::thumbnails::PREVIEW_PLACEHOLDER_MAX_SIDE_PX);
+        assert!(dimensions.1 <= crate::thumbnails::PREVIEW_PLACEHOLDER_MAX_SIDE_PX);
         assert_eq!(
             media.preview_placeholder_format.as_deref(),
             Some("image/webp")

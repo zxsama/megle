@@ -1,7 +1,7 @@
-ALTER TABLE media ADD COLUMN preview_placeholder BLOB;
-ALTER TABLE media ADD COLUMN preview_placeholder_format TEXT NOT NULL DEFAULT 'image/webp';
+-- media preview_placeholder columns are added by the migration runner with
+-- table_info guards because SQLite has no ALTER TABLE ADD COLUMN IF NOT EXISTS.
 
-CREATE TABLE thumb_blobs (
+CREATE TABLE IF NOT EXISTS thumb_blobs (
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   profile TEXT NOT NULL DEFAULT 'grid_320' CHECK(profile = 'grid_320'),
   data BLOB NOT NULL,
