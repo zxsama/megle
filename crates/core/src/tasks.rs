@@ -453,7 +453,7 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
         ));
     }
     let now = unix_timestamp();
-    database.upsert_thumb_blob(ThumbBlobRecord {
+    let blob = ThumbBlobRecord {
         file_id,
         profile: GRID_320_PROFILE.to_string(),
         data: generated.data,
@@ -463,9 +463,9 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
         output_format: GENERATED_FORMAT.to_string(),
         created_at: now,
         updated_at: now,
-    })?;
+    };
     let published = database
-        .upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
+        .publish_thumbnail_blob_and_state_if_source_fingerprint_and_task_attempt_current(
             ThumbnailStateUpsert {
                 file_id,
                 profile: GRID_320_PROFILE.to_string(),
@@ -477,6 +477,7 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
                 error: None,
                 source_fingerprint: Some(source_fingerprint.clone()),
             },
+            blob,
             &source_fingerprint,
             task_id,
             attempt_generation,
@@ -789,6 +790,10 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("collect cache entries");
         assert_eq!(cache_entries.len(), 0);
+        assert!(database
+            .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read thumb blob")
+            .is_none());
 
         fs::remove_dir_all(temp_root).expect("cleanup media root");
         fs::remove_dir_all(cache_root).expect("cleanup cache root");
