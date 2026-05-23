@@ -190,7 +190,7 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     }
 
     const controls = getWindowControls();
-    if (!controls?.setPosition || !controls.getBounds) {
+    if (!controls?.setPosition || !controls.beginDrag) {
       return;
     }
 
@@ -199,35 +199,25 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     captureTarget.setPointerCapture(event.pointerId);
     pointerCaptureRef.current = captureTarget;
 
-    const wasMaximized = (await controls.isMaximized?.()) === true;
-    if (wasMaximized) {
-      await controls.maximize?.();
-      await new Promise((resolve) => window.setTimeout(resolve, 16));
-    }
-
-    const bounds = await controls.getBounds();
+    const titlebarRect = captureTarget.getBoundingClientRect();
+    const bounds = await controls.beginDrag({
+      clientX: event.clientX,
+      screenX: event.screenX,
+      screenY: event.screenY,
+      titlebarOffsetY: event.clientY - titlebarRect.top,
+      viewportWidth: window.innerWidth
+    });
     if (!bounds) {
       releasePointerCapture(event.pointerId);
       return;
-    }
-
-    let startWindowX = bounds.x;
-    let startWindowY = bounds.y;
-
-    if (wasMaximized) {
-      const viewportWidth = Math.max(window.innerWidth, 1);
-      const pointerRatioX = Math.min(1, Math.max(0, event.clientX / viewportWidth));
-      startWindowX = Math.round(event.screenX - bounds.width * pointerRatioX);
-      startWindowY = Math.round(event.screenY - Math.min(event.clientY, 40));
-      await controls.setPosition(startWindowX, startWindowY);
     }
 
     dragStateRef.current = {
       pointerId: event.pointerId,
       startScreenX: event.screenX,
       startScreenY: event.screenY,
-      startWindowX,
-      startWindowY
+      startWindowX: bounds.x,
+      startWindowY: bounds.y
     };
   }
 

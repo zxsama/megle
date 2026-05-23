@@ -9,6 +9,13 @@ export interface DesktopWindowControls {
   maximize: () => Promise<boolean>;
   close: () => Promise<void>;
   isMaximized: () => Promise<boolean>;
+  beginDrag: (payload: {
+    clientX: number;
+    screenX: number;
+    screenY: number;
+    titlebarOffsetY: number;
+    viewportWidth: number;
+  }) => Promise<{ x: number; y: number; width: number; height: number } | null>;
   getBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
   setPosition: (x: number, y: number) => Promise<boolean>;
 }

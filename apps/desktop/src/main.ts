@@ -27,6 +27,7 @@ let mainWindowReadyToShow: Promise<void> | null = null;
 let shellReadyRevealPromise: Promise<boolean> | null = null;
 let shellReadyVisibleWindowId: number | null = null;
 let shellReadyFailureFallbackTimer: NodeJS.Timeout | null = null;
+const WINDOW_CORNER_RADIUS_PX = 28;
 const PERSIST_DEBOUNCE_MS = 500;
 const SHELL_READY_FAILURE_TIMEOUT_MS = 4000;
 
@@ -97,6 +98,34 @@ ipcMain.handle("megle:window-set-position", (_event, x: number, y: number) => {
   mainWindow.setPosition(Math.round(x), Math.round(y));
   return true;
 });
+
+ipcMain.handle(
+  "megle:window-begin-drag",
+  (
+    _event,
+    payload: { clientX: number; screenX: number; screenY: number; titlebarOffsetY: number; viewportWidth: number }
+  ) => {
+    if (!mainWindow) return null;
+
+    if (mainWindow.isMaximized()) {
+      const restored = mainWindow.getNormalBounds();
+      const pointerRatioX = clampNumber(payload.clientX / Math.max(payload.viewportWidth, 1), 0, 1);
+      const targetX = Math.round(payload.screenX - restored.width * pointerRatioX);
+      const targetY = Math.round(payload.screenY - Math.max(0, payload.titlebarOffsetY));
+      mainWindow.unmaximize();
+      mainWindow.setBounds({
+        x: targetX,
+        y: targetY,
+        width: restored.width,
+        height: restored.height
+      });
+      applyWindowShape(mainWindow);
+      return { x: targetX, y: targetY, width: restored.width, height: restored.height };
+    }
+
+    return mainWindow.getBounds();
+  }
+);
 
 ipcMain.handle("megle:shell-reveal-path", (_event, targetPath: string) => {
   if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
@@ -181,7 +210,7 @@ async function createWindow(): Promise<void> {
     y: placement.y,
     minWidth: 1100,
     minHeight: 720,
-    backgroundMaterial: "none",
+    backgroundMaterial: "acrylic",
     transparent: true,
     backgroundColor: "#00000000",
     show: false,
@@ -199,8 +228,9 @@ async function createWindow(): Promise<void> {
     }
   });
   const window = mainWindow;
-  window.setBackgroundMaterial("none");
+  window.setBackgroundMaterial("acrylic");
   window.setOpacity(0);
+  applyWindowShape(window);
   shellReadyVisibleWindowId = null;
   shellReadyRevealPromise = null;
   clearShellReadyFailureFallback();
@@ -230,7 +260,12 @@ async function createWindow(): Promise<void> {
   // PERSIST_DEBOUNCE_MS of window state. The `before-quit` handler still
   // writes synchronously so a clean exit always flushes the latest bounds.
   window.on("move", schedulePersistWindowState);
-  window.on("resize", schedulePersistWindowState);
+  window.on("resize", () => {
+    applyWindowShape(window);
+    schedulePersistWindowState();
+  });
+  window.on("maximize", () => applyWindowShape(window));
+  window.on("unmaximize", () => applyWindowShape(window));
 
   window.on("closed", () => {
     clearShellReadyFailureFallback();
@@ -451,6 +486,46 @@ function schedulePersistWindowState(): void {
     persistDebounceTimer = null;
     void persistWindowState();
   }, PERSIST_DEBOUNCE_MS);
+}
+
+function applyWindowShape(window: BrowserWindow): void {
+  if (process.platform !== "win32" || window.isDestroyed()) {
+    return;
+  }
+
+  const bounds = window.getBounds();
+  if (window.isMaximized()) {
+    window.setShape([{ x: 0, y: 0, width: bounds.width, height: bounds.height }]);
+    return;
+  }
+
+  window.setShape(buildRoundedRectShape(bounds.width, bounds.height, WINDOW_CORNER_RADIUS_PX));
+}
+
+function buildRoundedRectShape(width: number, height: number, radius: number) {
+  const safeRadius = Math.max(0, Math.min(radius, Math.floor(width / 2), Math.floor(height / 2)));
+  if (safeRadius === 0) {
+    return [{ x: 0, y: 0, width, height }];
+  }
+
+  const rects: Array<{ x: number; y: number; width: number; height: number }> = [];
+  for (let y = 0; y < height; y += 1) {
+    let inset = 0;
+    if (y < safeRadius) {
+      const dy = safeRadius - y - 0.5;
+      inset = Math.max(0, Math.ceil(safeRadius - Math.sqrt(safeRadius * safeRadius - dy * dy)));
+    } else if (y >= height - safeRadius) {
+      const mirrored = height - y - 1;
+      const dy = safeRadius - mirrored - 0.5;
+      inset = Math.max(0, Math.ceil(safeRadius - Math.sqrt(safeRadius * safeRadius - dy * dy)));
+    }
+    rects.push({ x: inset, y, width: Math.max(0, width - inset * 2), height: 1 });
+  }
+  return rects.filter((rect) => rect.width > 0);
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 async function persistWindowState(): Promise<void> {
