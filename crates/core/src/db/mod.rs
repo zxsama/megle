@@ -1962,7 +1962,7 @@ impl Database {
     }
 
     /// Records image header dimensions and marks media metadata `ready`.
-    /// Used by the scanner after a header-only probe of width/height. Leaves
+    /// Used by metadata/preview work outside the root scan ingest path. Leaves
     /// pixel-level metadata (duration_ms, codec) untouched so a later metadata
     /// task can still fill those in.
     pub fn update_media_dimensions(
@@ -1984,6 +1984,7 @@ impl Database {
         Ok(updated != 0)
     }
 
+    #[allow(dead_code)]
     pub fn update_media_preview_placeholder(
         &self,
         file_id: i64,

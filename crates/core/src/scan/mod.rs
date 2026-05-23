@@ -10,7 +10,6 @@ use crate::db::{
     Database, FileUpsert, FolderUpsert, RootRecord, ScanFileUpsert, ScanWriteBatch,
     TaskScanProgress,
 };
-use crate::thumbnails::generate_preview_placeholder;
 
 pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 10;
 
@@ -118,7 +117,6 @@ pub fn scan_root_with_options(
     let mut folder_ids = HashMap::new();
     folder_ids.insert(root_path.clone(), root_folder_id);
     let mut pending_files = Vec::new();
-    let mut pending_file_paths: Vec<Option<PathBuf>> = Vec::new();
     let write_batch_size = options.write_batch_size.max(1);
 
     let mut summary = ScanSummary {
@@ -190,14 +188,6 @@ pub fn scan_root_with_options(
             },
             media_kind: kind.to_string(),
         });
-        // Track the source path alongside the queued upsert so the post-flush
-        // dimension probe can map file_ids back to absolute paths. Only image
-        // entries carry a path; videos go through ffmpeg later.
-        pending_file_paths.push(if kind == "image" {
-            Some(path.to_path_buf())
-        } else {
-            None
-        });
         summary.media_files_seen += 1;
         emit_progress(&mut options, items_seen, &summary);
         check_scan_cancelled(&mut options)?;
@@ -209,7 +199,6 @@ pub fn scan_root_with_options(
                 scan_generation,
                 &mut options,
                 &mut pending_files,
-                &mut pending_file_paths,
             )?;
         }
     }
@@ -220,7 +209,6 @@ pub fn scan_root_with_options(
         scan_generation,
         &mut options,
         &mut pending_files,
-        &mut pending_file_paths,
     )?;
     check_scan_cancelled(&mut options)?;
     ensure_root_enabled(database, root.id)?;
@@ -280,18 +268,15 @@ fn flush_scan_files(
     scan_generation: i64,
     options: &mut ScanOptions<'_>,
     pending_files: &mut Vec<ScanFileUpsert>,
-    pending_file_paths: &mut Vec<Option<PathBuf>>,
 ) -> anyhow::Result<()> {
     if pending_files.is_empty() {
-        pending_file_paths.clear();
         return Ok(());
     }
 
     observe_scan_batch(options, 0, pending_files.len());
     check_scan_cancelled(options)?;
     ensure_root_enabled(database, root_id)?;
-    let paths = std::mem::take(pending_file_paths);
-    let result = commit_scan_batch_with_optional_task_guard(
+    commit_scan_batch_with_optional_task_guard(
         database,
         ScanWriteBatch {
             folders: Vec::new(),
@@ -300,96 +285,6 @@ fn flush_scan_files(
         },
         options,
     )?;
-    probe_image_dimensions(database, options, &result.file_ids, &paths)?;
-    Ok(())
-}
-
-/// Best-effort header-only width/height probe for image files written in the
-/// most recent scan batch. Failures are demoted to a debug log so a single
-/// unreadable file never aborts the scan; metadata stays `pending` and a
-/// later metadata task can retry.
-///
-/// The probe is cancellation-aware: we check for cancellation between files
-/// (and at a coarser cadence between every 100 entries) so a request issued
-/// while a multi-million-file root is mid-batch is honored without waiting
-/// for the next WalkDir boundary.
-fn probe_image_dimensions(
-    database: &Database,
-    options: &mut ScanOptions<'_>,
-    file_ids: &[i64],
-    paths: &[Option<PathBuf>],
-) -> anyhow::Result<()> {
-    if file_ids.len() != paths.len() {
-        // Defensive: if the parallel vectors ever drift we'd rather skip the
-        // probe than misattribute dimensions. The scan still succeeds.
-        tracing::warn!(
-            file_ids = file_ids.len(),
-            paths = paths.len(),
-            "scan dimension probe arrays out of sync; skipping"
-        );
-        return Ok(());
-    }
-    // Cancellation cap: at most this many probes between cancellation
-    // checks. The check is also performed before every probe entry so a
-    // tight cancellation window still gets honored within ~1 file.
-    const PROBE_CANCEL_CHECK_INTERVAL: usize = 100;
-
-    for (index, (file_id, path)) in file_ids.iter().zip(paths.iter()).enumerate() {
-        check_scan_cancelled(options)?;
-        if index > 0 && index % PROBE_CANCEL_CHECK_INTERVAL == 0 {
-            // Redundant on the surface, but kept explicit so a future
-            // edit that loosens the per-iteration check above still has a
-            // batch-grained safety net the issue called out.
-            check_scan_cancelled(options)?;
-        }
-        let Some(path) = path.as_deref() else {
-            continue;
-        };
-        match image::ImageReader::open(path)
-            .and_then(|reader| reader.with_guessed_format())
-            .map_err(anyhow::Error::from)
-            .and_then(|reader| reader.into_dimensions().map_err(anyhow::Error::from))
-        {
-            Ok((width, height)) => {
-                if let Err(error) =
-                    database.update_media_dimensions(*file_id, width as i64, height as i64)
-                {
-                    tracing::debug!(file_id = *file_id, %error, "failed to record probed dimensions");
-                }
-                match generate_preview_placeholder(path) {
-                    Ok(placeholder) => {
-                        if let Err(error) = database.update_media_preview_placeholder(
-                            *file_id,
-                            &placeholder.data,
-                            placeholder.output_format,
-                        ) {
-                            tracing::debug!(
-                                file_id = *file_id,
-                                %error,
-                                "failed to record preview placeholder"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        tracing::debug!(
-                            file_id = *file_id,
-                            path = %path.display(),
-                            %error,
-                            "preview placeholder generation failed"
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    file_id = *file_id,
-                    path = %path.display(),
-                    %error,
-                    "image dimension probe failed; metadata stays pending"
-                );
-            }
-        }
-    }
     Ok(())
 }
 
@@ -994,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_root_probes_image_dimensions_and_marks_metadata_ready() {
+    fn scan_root_leaves_image_dimensions_pending_for_later_metadata_work() {
         let temp_root = unique_temp_dir();
         fs::create_dir_all(&temp_root).expect("create root dir");
         let image_path = temp_root.join("photo.png");
@@ -1007,7 +902,7 @@ mod tests {
 
         let mut database = Database::open_in_memory().expect("open database");
         database.apply_migrations().expect("apply migrations");
-        let root_id = add_test_root(&database, &temp_root, "scan-dimension-probe-test");
+        let root_id = add_test_root(&database, &temp_root, "scan-metadata-pending-test");
         let root = test_root(&database, root_id);
 
         scan_root(&mut database, &root).expect("scan root");
@@ -1025,72 +920,52 @@ mod tests {
         assert_eq!(media.items.len(), 1);
         let entry = &media.items[0];
         assert_eq!(entry.name, "photo.png");
-        assert_eq!(entry.width, Some(800));
-        assert_eq!(entry.height, Some(600));
+        assert_eq!(entry.width, None);
+        assert_eq!(entry.height, None);
 
-        // Inspect the source record so we cover the metadata_status side
-        // of the probe. The thumbnail pipeline relies on this to pick
-        // skipped_small vs generatable.
         let source = database
             .get_thumbnail_source(entry.id)
             .expect("get source")
             .expect("source exists");
-        assert_eq!(source.metadata_status.as_deref(), Some("ready"));
+        assert_eq!(source.metadata_status.as_deref(), Some("pending"));
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
 
     #[test]
-    fn scan_root_writes_preview_placeholder_for_images() {
+    fn scan_root_does_not_generate_preview_placeholder_inline() {
         let temp_root = unique_temp_dir();
         fs::create_dir_all(&temp_root).expect("create media root");
         write_test_image(&temp_root.join("image.jpg"), 800, 400);
 
         let mut database = Database::open_in_memory().expect("open database");
         database.apply_migrations().expect("apply migrations");
-        let root_id = database
-            .add_root(NewRoot {
-                path: temp_root.display().to_string(),
-                display_name: "preview-placeholder".to_string(),
-            })
-            .expect("add root");
+        let root_id = add_test_root(&database, &temp_root, "disclosure-scan");
         let root = database
             .get_root(root_id)
             .expect("get root")
             .expect("root exists");
 
-        crate::scan::scan_root(&mut database, &root).expect("scan root");
+        scan_root(&mut database, &root).expect("scan root");
 
         let media = database
             .get_media(1)
             .expect("get media")
             .expect("media exists");
-        let placeholder = media
-            .preview_placeholder
-            .as_deref()
-            .expect("preview placeholder bytes");
-        assert_eq!(&placeholder[0..4], b"RIFF");
-        assert_eq!(&placeholder[8..12], b"WEBP");
-        assert!(placeholder.len() <= 8192);
-        let dimensions = image::load_from_memory(placeholder)
-            .expect("decode preview placeholder")
-            .into_rgba8()
-            .dimensions();
-        assert!(dimensions.0 <= crate::thumbnails::PREVIEW_PLACEHOLDER_MAX_SIDE_PX);
-        assert!(dimensions.1 <= crate::thumbnails::PREVIEW_PLACEHOLDER_MAX_SIDE_PX);
-        assert_eq!(
-            media.preview_placeholder_format.as_deref(),
-            Some("image/webp")
-        );
+        assert!(media.preview_placeholder.is_none());
+        let source = database
+            .get_thumbnail_source(media.id)
+            .expect("get source")
+            .expect("source exists");
+        assert_eq!(source.metadata_status.as_deref(), Some("pending"));
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }
 
     #[test]
-    fn scan_root_leaves_metadata_pending_when_image_dimensions_probe_fails() {
+    fn scan_root_keeps_broken_image_metadata_pending() {
         let temp_root = unique_temp_dir();
         fs::create_dir_all(&temp_root).expect("create root dir");
-        // Empty `.png` is not decodable; the probe must not fail the scan.
         fs::write(temp_root.join("broken.png"), b"").expect("write broken png");
 
         let mut database = Database::open_in_memory().expect("open database");
@@ -1121,61 +996,6 @@ mod tests {
         assert_eq!(source.metadata_status.as_deref(), Some("pending"));
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
-    }
-
-    #[test]
-    fn probe_image_dimensions_honors_cancellation_inside_the_loop() {
-        // Direct unit-level coverage for the dimension-probe cancellation
-        // hotfix. Without the cancel check inside the loop, an in-flight
-        // probe over a freshly committed batch would not see a cancellation
-        // request until the next WalkDir boundary; with a 1M-file root that
-        // is far too coarse. Asserting the probe itself errors on cancel
-        // pins the intended behavior at the function boundary.
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        let database = Database::open_in_memory().expect("open database");
-        database.apply_migrations().expect("apply migrations");
-
-        // The first call returns Ok so the loop reaches the second
-        // iteration; the second call signals cancellation. This pins the
-        // requirement that the cancel check fires on every iteration, not
-        // only on entry.
-        let calls = Rc::new(Cell::new(0u32));
-        let calls_for_cb = Rc::clone(&calls);
-        let mut callback = move || -> anyhow::Result<()> {
-            let next = calls_for_cb.get() + 1;
-            calls_for_cb.set(next);
-            if next >= 2 {
-                return Err(anyhow::anyhow!("task cancelled: probe-test"));
-            }
-            Ok(())
-        };
-        let mut options = ScanOptions {
-            write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
-            progress_callback: None,
-            cancellation_callback: Some(&mut callback),
-            task_attempt_guard: None,
-            #[cfg(test)]
-            batch_observer: None,
-        };
-
-        // Two synthetic file ids with no associated paths. The probe will
-        // hit the cancel check at the top of every iteration; on the
-        // second iteration the callback returns Err.
-        let file_ids = vec![1_i64, 2_i64];
-        let paths: Vec<Option<PathBuf>> = vec![None, None];
-        let error = probe_image_dimensions(&database, &mut options, &file_ids, &paths)
-            .expect_err("cancellation must surface as Err from the probe loop");
-        assert!(
-            error.to_string().contains("cancelled"),
-            "expected cancellation error, got: {error}"
-        );
-        assert_eq!(
-            calls.get(),
-            2,
-            "cancellation must be checked on every probe iteration"
-        );
     }
 
     fn add_test_root(database: &Database, temp_root: &Path, display_name: &str) -> i64 {
