@@ -51,10 +51,12 @@ export class CoreApiError extends Error {
 
 export interface BlobRequestOptions {
   signal?: AbortSignal;
+  version?: number | null;
 }
 
 type QueryParams = Partial<ListMediaParams & ListFolderChildrenParams> & {
   target?: "grid_320";
+  v?: number | null;
 };
 
 export function createCoreClient(config: CoreClientConfig) {
@@ -131,7 +133,10 @@ export function createCoreClient(config: CoreClientConfig) {
       target: "grid_320" = "grid_320",
       options: BlobRequestOptions = {}
     ) => {
-      return fetchBlob(`/media/${fileId}/thumbnail/blob${query({ target })}`, options);
+      return fetchBlob(
+        `/media/${fileId}/thumbnail/blob${query({ target, v: options.version })}`,
+        options
+      );
     },
     getPreviewBlob: (fileId: number, options: BlobRequestOptions = {}) =>
       fetchBlob(`/media/${fileId}/preview`, options),
@@ -222,6 +227,7 @@ function query(params: QueryParams): string {
   if ("sort" in params && params.sort) search.set("sort", params.sort);
   if ("kind" in params && params.kind) search.set("kind", params.kind);
   if ("target" in params && params.target) search.set("target", params.target);
+  if ("v" in params && typeof params.v === "number") search.set("v", String(params.v));
   const value = search.toString();
   return value ? `?${value}` : "";
 }

@@ -177,6 +177,12 @@ describe("createCoreClient", () => {
     assert.equal(recorded[0].signal, controller.signal);
   });
 
+  test("getThumbnailBlob attaches version cache buster", async () => {
+    mockFetch("thumbnail bytes");
+    await client().getThumbnailBlob(42, "grid_320", { version: 1234 });
+    assert.equal(recorded[0].url, `${BASE_URL}/media/42/thumbnail/blob?target=grid_320&v=1234`);
+  });
+
   test("CoreApiError is thrown on non-2xx with parsed body", async () => {
     mockFetch({ error: "nope", code: "plugin_not_found" }, 404);
     await assert.rejects(() => client().getPlugin("missing"), (error: Error) => {

@@ -15,7 +15,7 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   const requestKey = thumbnailRequestKey(mediaRecord);
   const cached = thumbnailResourceCache.get(mediaId);
   if (cached) {
-    if (isFreshThumbnailForMediaRecord(mediaRecord, cached)) {
+    if (isFreshCachedThumbnailForMediaRecord(mediaRecord, cached)) {
       if (cached.state !== "pending" && cached.state !== "queued") {
         return cached;
       }
@@ -32,7 +32,7 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   const request = thumbnailClient
     .getThumbnail(mediaId, GRID_THUMBNAIL_TARGET)
     .then((thumbnail) => {
-      if (isFreshThumbnailForMediaRecord(mediaRecord, thumbnail)) {
+      if (isLiveThumbnailResponseForMediaRecord(mediaRecord, thumbnail)) {
         thumbnailResourceCache.set(mediaId, thumbnail);
       } else {
         thumbnailResourceCache.delete(mediaId);
@@ -57,7 +57,7 @@ export async function requestThumbnailBlob(
   }
 
   const request = thumbnailClient
-    .getThumbnailBlob(fileId, GRID_THUMBNAIL_TARGET)
+    .getThumbnailBlob(fileId, GRID_THUMBNAIL_TARGET, { version: versionKey })
     .finally(() => {
       inFlightThumbnailBlobRequests.delete(requestKey);
     });
@@ -72,7 +72,7 @@ export function readCachedThumbnailStates(mediaRecords: MediaRecord[]): Thumbnai
     if (!thumbnail) {
       continue;
     }
-    if (isFreshThumbnailForMediaRecord(mediaRecord, thumbnail)) {
+    if (isFreshCachedThumbnailForMediaRecord(mediaRecord, thumbnail)) {
       states[mediaRecord.id] = thumbnail;
     } else {
       thumbnailResourceCache.delete(mediaRecord.id);
@@ -93,6 +93,13 @@ export function isFreshThumbnailForMediaRecord(
   mediaRecord: MediaRecord,
   thumbnail: ThumbnailResponse
 ): boolean {
+  return isFreshCachedThumbnailForMediaRecord(mediaRecord, thumbnail);
+}
+
+export function isFreshCachedThumbnailForMediaRecord(
+  mediaRecord: MediaRecord,
+  thumbnail: ThumbnailResponse
+): boolean {
   if (thumbnail.fileId !== mediaRecord.id) {
     return false;
   }
@@ -110,6 +117,13 @@ export function isFreshThumbnailForMediaRecord(
   // Pending/queued states are short-lived and are simply re-requested
   // on the next poll.
   return true;
+}
+
+export function isLiveThumbnailResponseForMediaRecord(
+  mediaRecord: MediaRecord,
+  thumbnail: ThumbnailResponse
+): boolean {
+  return thumbnail.fileId === mediaRecord.id && thumbnail.target === GRID_THUMBNAIL_TARGET;
 }
 
 function explicitMediaThumbnailState(

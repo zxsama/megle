@@ -101,6 +101,12 @@ if (!/getThumbnailBlob:\s*async\s*\([\s\S]*?fileId:\s*number,[\s\S]*?target:\s*"
 if (!/interface\s+BlobRequestOptions[\s\S]*?signal\?:\s*AbortSignal/.test(coreClient)) {
   fail("core-client blob helpers must expose AbortSignal request options");
 }
+if (!/interface\s+BlobRequestOptions[\s\S]*?version\?:\s*number\s*\|\s*null/.test(coreClient)) {
+  fail("core-client thumbnail blob helper must expose a version cache-buster option");
+}
+if (!/getThumbnailBlob[\s\S]*?query\(\{\s*target,\s*v:\s*options\.version/.test(coreClient)) {
+  fail("core-client getThumbnailBlob must put the version cache-buster in the HTTP request URL");
+}
 if (/thumbnail\$\{query\(\{\s*profile/.test(coreClient) || /thumbnail\/blob\$\{query\(\{\s*profile/.test(coreClient)) {
   fail("core-client thumbnail helpers must not serialize the retired profile query");
 }
@@ -199,6 +205,12 @@ if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.tes
 }
 if (!/explicitMediaThumbnailState/.test(mediaResources) || !/thumbnail\.state\s*===\s*"ready"[\s\S]*?mediaState\s*!==\s*"ready"/.test(mediaResources)) {
   fail("mediaResources must invalidate cached ready thumbnails when the current media row explicitly regresses state");
+}
+if (!/isFreshCachedThumbnailForMediaRecord/.test(mediaResources) || !/isLiveThumbnailResponseForMediaRecord/.test(mediaResources)) {
+  fail("mediaResources must separate cached thumbnail freshness from live response acceptance");
+}
+if (!/isLiveThumbnailResponseForMediaRecord\(mediaRecord,\s*thumbnail\)[\s\S]*?thumbnailResourceCache\.set/.test(mediaResources)) {
+  fail("mediaResources must accept a fresh live ready thumbnail response even when the media row still says pending");
 }
 if (/thumbnailCacheKey/.test(mediaResources)) {
   fail("mediaResources must not treat transitional thumbnailCacheKey as runtime truth");

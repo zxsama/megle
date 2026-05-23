@@ -17,6 +17,7 @@ import { createCoreClient } from "./client";
 import { readDesktopDiagnostics, type DesktopDiagnostics } from "./desktop";
 import {
   isFreshThumbnailForMediaRecord,
+  isLiveThumbnailResponseForMediaRecord,
   readCachedThumbnailStates,
   requestThumbnailState,
   shouldRequestThumbnailState
@@ -233,7 +234,7 @@ export function useLibraryData(): LibraryState {
         .then((thumbnail) => {
           setThumbnailStatesByMediaId((current) => {
             const currentMediaRecord = mediaByIdRef.current.get(mediaRecord.id);
-            if (!currentMediaRecord || !isFreshThumbnailForMediaRecord(currentMediaRecord, thumbnail)) {
+            if (!currentMediaRecord || !isLiveThumbnailResponseForMediaRecord(currentMediaRecord, thumbnail)) {
               return removeThumbnailState(current, mediaRecord.id);
             }
 
