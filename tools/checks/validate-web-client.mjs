@@ -202,12 +202,21 @@ if (!/inFlightThumbnailRequests/.test(mediaResources) || !/thumbnailResourceCach
 }
 if (
   !/type\s+CachedThumbnailEntry/.test(mediaResources) ||
-  !/mediaContentSignature\(mediaRecord\)/.test(mediaResources) ||
+  !/export\s+function\s+mediaContentSignature/.test(mediaResources) ||
   !/mediaRecord\.mtime/.test(mediaResources) ||
   !/mediaRecord\.size/.test(mediaResources) ||
   !/entry\.mediaSignature\s*!==\s*mediaContentSignature\(mediaRecord\)/.test(mediaResources)
 ) {
   fail("mediaResources cached thumbnails must be tied to a media content signature");
+}
+if (
+  !/thumbnailStateSignaturesByMediaIdRef/.test(useLibraryData) ||
+  !/mediaContentSignature\(mediaRecord\)/.test(useLibraryData) ||
+  !/requestedMediaSignature/.test(useLibraryData) ||
+  !/currentMediaSignature\s*!==\s*requestedMediaSignature/.test(useLibraryData) ||
+  !/filterFreshThumbnailStates\([\s\S]*?thumbnailStateSignaturesByMediaIdRef\.current/.test(useLibraryData)
+) {
+  fail("useLibraryData must carry media signatures through React thumbnail state");
 }
 if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");

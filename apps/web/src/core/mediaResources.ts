@@ -192,7 +192,7 @@ function thumbnailRequestKey(mediaRecord: MediaRecord): string {
   return [mediaContentSignature(mediaRecord), GRID_THUMBNAIL_TARGET].join(":");
 }
 
-function mediaContentSignature(mediaRecord: MediaRecord): string {
+export function mediaContentSignature(mediaRecord: MediaRecord): string {
   return [
     mediaRecord.id,
     mediaRecord.mtime,
