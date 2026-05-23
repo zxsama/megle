@@ -741,6 +741,10 @@ if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestT
   fail("MediaPreview must separate central original preview loading from shared thumbnail blob loading");
 }
 
+if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"ready"\s*\?\s*thumbnail\.fileId/.test(mediaPreview)) {
+  fail("MediaPreview must wait for live ready thumbnail metadata before requesting fallback thumbnail blobs");
+}
+
 if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(mediaPreview)) {
   fail("MediaPreview central original requests must use AbortController cleanup");
 }
@@ -774,6 +778,14 @@ if (!/previewPlaceholderDataUrl\(item\)/.test(mediaGrid) || /usePreviewPlacehold
 
 if (!mediaGrid.includes("requestThumbnailBlob") || mediaGrid.includes("createCoreClient")) {
   fail("MediaGrid must use db_blob thumbnail resources instead of ad hoc client/cache-key loading");
+}
+
+if (/thumbnailUpdatedAt=\{thumbnail\?\.updatedAt\s*\?\?\s*null\}/.test(mediaGrid) || !/hasLiveReadyThumbnail/.test(mediaGrid)) {
+  fail("MediaGrid must wait for live ready thumbnail metadata before requesting versioned thumbnail blobs");
+}
+
+if (!/data-preview-placeholder/.test(mediaGrid) || !/data-preview-placeholder/.test(mediaPreview)) {
+  fail("placeholder-first UI must expose data-preview-placeholder markers for smoke validation");
 }
 
 if (!centralPreviewStage) {

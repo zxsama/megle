@@ -203,8 +203,8 @@ if (!/inFlightThumbnailRequests/.test(mediaResources) || !/thumbnailResourceCach
 if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");
 }
-if (!/explicitMediaThumbnailState/.test(mediaResources) || !/thumbnail\.state\s*===\s*"ready"[\s\S]*?mediaState\s*!==\s*"ready"/.test(mediaResources)) {
-  fail("mediaResources must invalidate cached ready thumbnails when the current media row explicitly regresses state");
+if (!/explicitMediaThumbnailState/.test(mediaResources) || !/isTerminalThumbnailState/.test(mediaResources) || !/mediaState\s*!==\s*thumbnail\.state/.test(mediaResources)) {
+  fail("mediaResources must invalidate cached terminal thumbnails when the current media row explicitly disagrees");
 }
 if (!/isFreshCachedThumbnailForMediaRecord/.test(mediaResources) || !/isLiveThumbnailResponseForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must separate cached thumbnail freshness from live response acceptance");
@@ -259,6 +259,12 @@ if (!/previewPlaceholderDataUrl\(item\)/.test(mediaGrid) || /usePreviewPlacehold
 if (!/requestThumbnailBlob\(fileId/.test(mediaGrid) || /createCoreClient/.test(mediaGrid)) {
   fail("MediaGrid must load grid_320 bytes through the shared media resource helper");
 }
+if (/thumbnailUpdatedAt=\{thumbnail\?\.updatedAt\s*\?\?\s*null\}/.test(mediaGrid) || !/hasLiveReadyThumbnail/.test(mediaGrid)) {
+  fail("MediaGrid must not request thumbnail blobs from media-row ready state without a live updatedAt");
+}
+if (!/data-preview-placeholder/.test(mediaGrid) || !/data-preview-placeholder/.test(mediaPreview)) {
+  fail("Grid and preview placeholder rendering must include data-preview-placeholder markers for smoke tests");
+}
 if (!previewPanel) {
   fail("PreviewPanel must provide a selected media preview foundation");
 }
@@ -267,6 +273,9 @@ if (!/PreviewPanel/.test(libraryView) || !/selectedMedia/.test(previewPanel) || 
 }
 if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
   fail("MediaPreview must load central previews from original media while keeping inspector previews on shared thumbnail blobs");
+}
+if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"ready"\s*\?\s*thumbnail\.fileId/.test(mediaPreview)) {
+  fail("MediaPreview must not request thumbnail blobs without live ready metadata and updatedAt");
 }
 if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(mediaPreview)) {
   fail("MediaPreview original-media requests must be aborted when central preview switches");

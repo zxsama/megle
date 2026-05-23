@@ -107,7 +107,11 @@ export function isFreshCachedThumbnailForMediaRecord(
     return false;
   }
   const mediaState = explicitMediaThumbnailState(mediaRecord.thumbnailState);
-  if (thumbnail.state === "ready" && mediaState !== null && mediaState !== "ready") {
+  if (
+    isTerminalThumbnailState(thumbnail.state) &&
+    mediaState !== null &&
+    mediaState !== thumbnail.state
+  ) {
     return false;
   }
 
@@ -139,6 +143,10 @@ function explicitMediaThumbnailState(
     return value;
   }
   return null;
+}
+
+function isTerminalThumbnailState(value: ThumbnailResponse["state"]): boolean {
+  return value === "ready" || value === "failed" || value === "skipped_small";
 }
 
 export function previewPlaceholderDataUrl(mediaRecord: MediaRecord): string | null {

@@ -306,16 +306,21 @@ function ThumbnailStateView({
 }) {
   const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
   const previewPlaceholderUrl = previewPlaceholderDataUrl(item);
+  const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
 
-  if (state === "ready") {
+  if (hasLiveReadyThumbnail) {
     return (
       <ReadyThumbnail
         fileId={item.id}
         alt={item.name}
         previewPlaceholderUrl={previewPlaceholderUrl}
-        thumbnailUpdatedAt={thumbnail?.updatedAt ?? null}
+        thumbnailUpdatedAt={thumbnail.updatedAt}
       />
     );
+  }
+
+  if (state === "ready" && previewPlaceholderUrl) {
+    return <PlaceholderThumbnail alt={item.name} src={previewPlaceholderUrl} />;
   }
 
   if (state === "failed") {
@@ -405,7 +410,7 @@ function chunk<T>(items: T[], size: number): T[][] {
 
 function PlaceholderThumbnail({ alt, src }: { alt: string; src: string }) {
   return (
-    <div className="tile-thumb tile-thumb-placeholder">
+    <div className="tile-thumb tile-thumb-placeholder" data-preview-placeholder="grid">
       <img alt={alt} className="tile-thumb-image" loading="lazy" src={src} />
     </div>
   );

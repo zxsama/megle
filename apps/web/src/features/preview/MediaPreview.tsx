@@ -19,8 +19,9 @@ export function MediaPreview({
   thumbnail?: ThumbnailResponse;
 }) {
   const previewPlaceholderUrl = previewPlaceholderDataUrl(media);
+  const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
   const fallbackThumbnail = useThumbnailFallbackUrl(
-    source === "original" && thumbnail?.state === "ready" ? thumbnail.fileId : null,
+    source === "original" && hasLiveReadyThumbnail ? thumbnail.fileId : null,
     thumbnail?.updatedAt ?? null
   );
   const fallbackUrl = fallbackThumbnail ?? previewPlaceholderUrl;
@@ -38,7 +39,7 @@ export function MediaPreview({
     );
   }
 
-  if (thumbnail?.state === "ready") {
+  if (hasLiveReadyThumbnail) {
     return (
       <ReadyPreviewMedia
         alt={media.name}
@@ -124,7 +125,10 @@ function PreviewFallbackImage({
   state: "pending" | "skipped";
 }) {
   return (
-    <div className={`preview-placeholder ${state} preview-placeholder-image`}>
+    <div
+      className={`preview-placeholder ${state} preview-placeholder-image`}
+      data-preview-placeholder="preview"
+    >
       <img alt={alt} className="preview-image preview-fallback-image" src={src} />
     </div>
   );
