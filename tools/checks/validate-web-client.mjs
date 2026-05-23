@@ -200,6 +200,15 @@ if (!/createCoreClient\(\)[\s\S]*?getThumbnail\(/.test(mediaResources)) {
 if (!/inFlightThumbnailRequests/.test(mediaResources) || !/thumbnailResourceCache/.test(mediaResources)) {
   fail("mediaResources must coalesce in-flight thumbnail requests and cache state by media id");
 }
+if (
+  !/type\s+CachedThumbnailEntry/.test(mediaResources) ||
+  !/mediaContentSignature\(mediaRecord\)/.test(mediaResources) ||
+  !/mediaRecord\.mtime/.test(mediaResources) ||
+  !/mediaRecord\.size/.test(mediaResources) ||
+  !/entry\.mediaSignature\s*!==\s*mediaContentSignature\(mediaRecord\)/.test(mediaResources)
+) {
+  fail("mediaResources cached thumbnails must be tied to a media content signature");
+}
 if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");
 }

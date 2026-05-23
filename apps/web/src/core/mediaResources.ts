@@ -2,11 +2,15 @@ import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { createCoreClient } from "./client";
 
 export type ThumbnailStateByMediaId = Record<number, ThumbnailResponse>;
+type CachedThumbnailEntry = {
+  mediaSignature: string;
+  thumbnail: ThumbnailResponse;
+};
 
 export const GRID_THUMBNAIL_TARGET = "grid_320";
 
 const thumbnailClient = createCoreClient();
-export const thumbnailResourceCache = new Map<number, ThumbnailResponse>();
+export const thumbnailResourceCache = new Map<number, CachedThumbnailEntry>();
 export const inFlightThumbnailRequests = new Map<string, Promise<ThumbnailResponse>>();
 export const inFlightThumbnailBlobRequests = new Map<string, Promise<Blob>>();
 
@@ -16,8 +20,8 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   const cached = thumbnailResourceCache.get(mediaId);
   if (cached) {
     if (isFreshCachedThumbnailForMediaRecord(mediaRecord, cached)) {
-      if (cached.state !== "pending" && cached.state !== "queued") {
-        return cached;
+      if (cached.thumbnail.state !== "pending" && cached.thumbnail.state !== "queued") {
+        return cached.thumbnail;
       }
     } else {
       thumbnailResourceCache.delete(mediaId);
@@ -33,7 +37,10 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
     .getThumbnail(mediaId, GRID_THUMBNAIL_TARGET)
     .then((thumbnail) => {
       if (isLiveThumbnailResponseForMediaRecord(mediaRecord, thumbnail)) {
-        thumbnailResourceCache.set(mediaId, thumbnail);
+        thumbnailResourceCache.set(mediaId, {
+          mediaSignature: mediaContentSignature(mediaRecord),
+          thumbnail
+        });
       } else {
         thumbnailResourceCache.delete(mediaId);
       }
@@ -68,12 +75,12 @@ export async function requestThumbnailBlob(
 export function readCachedThumbnailStates(mediaRecords: MediaRecord[]): ThumbnailStateByMediaId {
   const states: ThumbnailStateByMediaId = {};
   for (const mediaRecord of mediaRecords) {
-    const thumbnail = thumbnailResourceCache.get(mediaRecord.id);
-    if (!thumbnail) {
+    const entry = thumbnailResourceCache.get(mediaRecord.id);
+    if (!entry) {
       continue;
     }
-    if (isFreshCachedThumbnailForMediaRecord(mediaRecord, thumbnail)) {
-      states[mediaRecord.id] = thumbnail;
+    if (isFreshCachedThumbnailForMediaRecord(mediaRecord, entry)) {
+      states[mediaRecord.id] = entry.thumbnail;
     } else {
       thumbnailResourceCache.delete(mediaRecord.id);
     }
@@ -93,10 +100,20 @@ export function isFreshThumbnailForMediaRecord(
   mediaRecord: MediaRecord,
   thumbnail: ThumbnailResponse
 ): boolean {
-  return isFreshCachedThumbnailForMediaRecord(mediaRecord, thumbnail);
+  return isFreshThumbnailResponseForMediaRecord(mediaRecord, thumbnail);
 }
 
 export function isFreshCachedThumbnailForMediaRecord(
+  mediaRecord: MediaRecord,
+  entry: CachedThumbnailEntry
+): boolean {
+  if (entry.mediaSignature !== mediaContentSignature(mediaRecord)) {
+    return false;
+  }
+  return isFreshThumbnailResponseForMediaRecord(mediaRecord, entry.thumbnail);
+}
+
+function isFreshThumbnailResponseForMediaRecord(
   mediaRecord: MediaRecord,
   thumbnail: ThumbnailResponse
 ): boolean {
@@ -172,10 +189,15 @@ function normalizeMediaThumbnailState(value: string | null | undefined): Thumbna
 }
 
 function thumbnailRequestKey(mediaRecord: MediaRecord): string {
+  return [mediaContentSignature(mediaRecord), GRID_THUMBNAIL_TARGET].join(":");
+}
+
+function mediaContentSignature(mediaRecord: MediaRecord): string {
   return [
     mediaRecord.id,
-    normalizeMediaThumbnailState(mediaRecord.thumbnailState),
-    GRID_THUMBNAIL_TARGET
+    mediaRecord.mtime,
+    mediaRecord.size,
+    normalizeMediaThumbnailState(mediaRecord.thumbnailState)
   ].join(":");
 }
 
