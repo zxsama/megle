@@ -115,7 +115,7 @@ async function pollTask(taskId: number, label: string, timeoutMs = 60_000): Prom
 async function pollThumbnail(fileId: number, timeoutMs = 30_000): Promise<ThumbnailResponse> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const response = await fetchJson<ThumbnailResponse>(`/media/${fileId}/thumbnail?profile=grid_320`);
+    const response = await fetchJson<ThumbnailResponse>(`/media/${fileId}/thumbnail?target=grid_320`);
     if (response.state === "ready" || response.state === "failed" || response.state === "skipped_small") {
       return response;
     }
