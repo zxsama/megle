@@ -194,8 +194,11 @@ if (!/inFlightThumbnailRequests/.test(mediaResources) || !/thumbnailResourceCach
 if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");
 }
-if (!/thumbnailResourceCache\.delete/.test(mediaResources) || !/thumbnailCacheKey/.test(mediaResources)) {
-  fail("mediaResources must drop stale cached terminal thumbnails when the media record has no matching ready cache key");
+if (/thumbnailCacheKey/.test(mediaResources)) {
+  fail("mediaResources must not treat transitional thumbnailCacheKey as runtime truth");
+}
+if (!/thumbnailResourceCache\.delete/.test(mediaResources) || !/thumbnail\.target\s*!==\s*GRID_THUMBNAIL_TARGET/.test(mediaResources)) {
+  fail("mediaResources must drop stale cached thumbnails that do not match target=grid_320");
 }
 if (!/readCachedThumbnailStates\(\s*mediaRecords:\s*MediaRecord\[\]\s*\)/.test(mediaResources)) {
   fail("mediaResources must read cached thumbnail state through media records, not bare media ids");
@@ -229,20 +232,32 @@ for (const state of ["pending", "queued", "ready", "failed", "skipped_small"]) {
 if (!/thumbnailStatesByMediaId\[item\.id\]/.test(mediaGrid)) {
   fail("MediaGrid tiles must receive thumbnail state from the resource map by media id");
 }
+if (!/previewPlaceholder/.test(mediaGrid) || !/previewPlaceholderUrl/.test(mediaGrid)) {
+  fail("MediaGrid must render MediaRecord.previewPlaceholder before grid_320 bytes are ready");
+}
+if (!/requestThumbnailBlob\(fileId\)/.test(mediaGrid) || /createCoreClient/.test(mediaGrid)) {
+  fail("MediaGrid must load grid_320 bytes through the shared media resource helper");
+}
 if (!previewPanel) {
   fail("PreviewPanel must provide a selected media preview foundation");
 }
 if (!/PreviewPanel/.test(libraryView) || !/selectedMedia/.test(previewPanel) || !/thumbnail/.test(previewPanel)) {
   fail("LibraryView must render a PreviewPanel with selected media and thumbnail state");
 }
-if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("getThumbnailBlob")) {
-  fail("MediaPreview must load central previews from original media while keeping inspector previews on thumbnails");
+if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
+  fail("MediaPreview must load central previews from original media while keeping inspector previews on shared thumbnail blobs");
+}
+if (!/previewPlaceholderUrl/.test(mediaPreview) || !/fallbackThumbnail/.test(mediaPreview)) {
+  fail("MediaPreview must show previewPlaceholder and thumbnail fallback while media bytes load");
 }
 if (!mediaPreview.includes('source = "thumbnail"') || !mediaPreview.includes('source === "original"')) {
   fail("MediaPreview must require explicit original-source mode for central preview rendering");
 }
 if (!centralPreviewStage.includes('source="original"')) {
   fail("CentralPreviewStage must request original media bytes through MediaPreview");
+}
+if (!/thumbnail=\{thumbnail\}/.test(centralPreviewStage)) {
+  fail("CentralPreviewStage must pass thumbnail state only as fallback while original media loads");
 }
 if (!centralPreviewStage.includes("shouldSkipPreviewPan")) {
   fail("CentralPreviewStage must guard interactive media/control targets before starting preview pan");
@@ -270,11 +285,11 @@ if (
 ) {
   fail("CentralPreviewStage must skip interactive preview pan targets before preventDefault and pointer capture");
 }
-if (/MediaPreview[\s\S]{0,120}thumbnail=/.test(centralPreviewStage)) {
-  fail("CentralPreviewStage must not pass thumbnail state into the displayed MediaPreview");
-}
 if (!/MediaPreview[\s\S]{0,140}thumbnail=\{thumbnail\}/.test(previewPanel)) {
   fail("PreviewPanel must keep using thumbnail state for the right inspector preview");
+}
+if (!/MediaPreview[\s\S]{0,180}source="thumbnail"[\s\S]{0,180}thumbnail=\{thumbnail\}/.test(previewPanel)) {
+  fail("PreviewPanel must use the light thumbnail preview path, not original media");
 }
 if (!librarySidebar.includes("loadMoreFolderChildren") || !librarySidebar.includes("Load more")) {
   fail("LibrarySidebar must expose a load-more affordance for paginated folder children");
@@ -314,8 +329,8 @@ for (const filePath of walk(webSrc)) {
   ) {
     fail(`desktop preload bridge access must stay in ${desktopAdapterPath}: ${relative}`);
   }
-  if (contents.includes("thumbnailCacheKey") && !relative.startsWith("apps/web/src/core/")) {
-    fail(`UI must not consume thumbnailCacheKey directly: ${relative}`);
+  if (contents.includes("thumbnailCacheKey")) {
+    fail(`web must not consume retired thumbnailCacheKey runtime truth: ${relative}`);
   }
 
   for (const name of duplicateCoreContractNames) {

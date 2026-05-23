@@ -3,9 +3,12 @@ import { createCoreClient } from "./client";
 
 export type ThumbnailStateByMediaId = Record<number, ThumbnailResponse>;
 
+export const GRID_THUMBNAIL_TARGET = "grid_320";
+
 const thumbnailClient = createCoreClient();
 export const thumbnailResourceCache = new Map<number, ThumbnailResponse>();
 export const inFlightThumbnailRequests = new Map<string, Promise<ThumbnailResponse>>();
+export const inFlightThumbnailBlobRequests = new Map<string, Promise<Blob>>();
 
 export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<ThumbnailResponse> {
   const mediaId = mediaRecord.id;
@@ -27,7 +30,7 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   }
 
   const request = thumbnailClient
-    .getThumbnail(mediaId)
+    .getThumbnail(mediaId, GRID_THUMBNAIL_TARGET)
     .then((thumbnail) => {
       if (isFreshThumbnailForMediaRecord(mediaRecord, thumbnail)) {
         thumbnailResourceCache.set(mediaId, thumbnail);
@@ -40,6 +43,22 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
       inFlightThumbnailRequests.delete(requestKey);
     });
   inFlightThumbnailRequests.set(requestKey, request);
+  return request;
+}
+
+export async function requestThumbnailBlob(fileId: number): Promise<Blob> {
+  const requestKey = `${fileId}:${GRID_THUMBNAIL_TARGET}`;
+  const inFlight = inFlightThumbnailBlobRequests.get(requestKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = thumbnailClient
+    .getThumbnailBlob(fileId, GRID_THUMBNAIL_TARGET)
+    .finally(() => {
+      inFlightThumbnailBlobRequests.delete(requestKey);
+    });
+  inFlightThumbnailBlobRequests.set(requestKey, request);
   return request;
 }
 
@@ -64,9 +83,6 @@ export function shouldRequestThumbnailState(mediaRecord: MediaRecord): boolean {
   if (mediaState === "failed" || mediaState === "skipped_small") {
     return false;
   }
-  if (mediaState === "ready") {
-    return Boolean(mediaRecord.thumbnailCacheKey);
-  }
   return true;
 }
 
@@ -77,13 +93,26 @@ export function isFreshThumbnailForMediaRecord(
   if (thumbnail.fileId !== mediaRecord.id) {
     return false;
   }
+  if (thumbnail.target !== GRID_THUMBNAIL_TARGET) {
+    return false;
+  }
 
   // Trust the thumbnail response state directly. The /media listing
-  // endpoint omits per-row thumbnailState/thumbnailCacheKey for
+  // endpoint may omit per-row thumbnailState during paging for
   // performance, so we cannot cross-validate against the media row.
   // Pending/queued states are short-lived and are simply re-requested
   // on the next poll.
   return true;
+}
+
+export function previewPlaceholderBlob(mediaRecord: MediaRecord): Blob | null {
+  const bytes = mediaRecord.previewPlaceholder;
+  if (!bytes || bytes.length === 0) {
+    return null;
+  }
+  return new Blob([new Uint8Array(bytes)], {
+    type: mediaRecord.previewPlaceholderFormat ?? "image/webp"
+  });
 }
 
 function normalizeMediaThumbnailState(value: string | null | undefined): ThumbnailResponse["state"] {
@@ -103,6 +132,6 @@ function thumbnailRequestKey(mediaRecord: MediaRecord): string {
   return [
     mediaRecord.id,
     normalizeMediaThumbnailState(mediaRecord.thumbnailState),
-    mediaRecord.thumbnailCacheKey ?? ""
+    GRID_THUMBNAIL_TARGET
   ].join(":");
 }

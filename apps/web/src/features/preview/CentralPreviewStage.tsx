@@ -7,7 +7,7 @@ import {
   type MouseEvent,
   type PointerEvent
 } from "react";
-import type { MediaRecord } from "@megle/core-client";
+import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import {
   matchShortcut,
   useShortcutBindings
@@ -16,6 +16,7 @@ import { MediaPreview } from "./MediaPreview";
 
 interface CentralPreviewStageProps {
   selectedMedia: MediaRecord;
+  thumbnail?: ThumbnailResponse;
   onClosePreview: () => void;
   onPreviewPrevious: () => void;
   onPreviewNext: () => void;
@@ -29,6 +30,7 @@ type PreviewViewMode = "fit-long-edge" | "actual";
 
 export function CentralPreviewStage({
   selectedMedia,
+  thumbnail,
   onClosePreview,
   onPreviewPrevious,
   onPreviewNext,
@@ -327,7 +329,12 @@ export function CentralPreviewStage({
           className="central-preview-transform"
           style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale}) translate(-50%, -50%)` }}
         >
-          <MediaPreview media={selectedMedia} onMediaReady={handleMediaReady} source="original" />
+          <MediaPreview
+            media={selectedMedia}
+            onMediaReady={handleMediaReady}
+            source="original"
+            thumbnail={thumbnail}
+          />
         </div>
       </div>
     </section>

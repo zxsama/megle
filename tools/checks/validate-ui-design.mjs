@@ -729,12 +729,16 @@ if (!previewPanel.includes("showPreviewImage") || !libraryView.includes("showPre
   fail("right inspector must hide its preview image while the central preview is open");
 }
 
-if (!previewPanel.includes('source="original"')) {
-  fail("right inspector selected preview must render from original/preview bytes so portrait media is not cropped by grid thumbnails");
+if (previewPanel.includes('source="original"')) {
+  fail("right inspector selected preview must stay on thumbnail source and must not request original media");
 }
 
-if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("getThumbnailBlob")) {
-  fail("MediaPreview must separate central original preview loading from thumbnail preview loading");
+if (!previewPanel.includes('source="thumbnail"')) {
+  fail("right inspector selected preview must render the light grid_320 thumbnail path");
+}
+
+if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
+  fail("MediaPreview must separate central original preview loading from shared thumbnail blob loading");
 }
 
 if (
@@ -742,6 +746,18 @@ if (
   !mediaPreview.includes('source = "thumbnail"')
 ) {
   fail("MediaPreview must make thumbnail rendering the default and require explicit original preview mode");
+}
+
+if (!mediaPreview.includes("previewPlaceholderUrl") || !mediaPreview.includes("fallbackThumbnail")) {
+  fail("MediaPreview must support placeholder-first display and thumbnail fallback while original media loads");
+}
+
+if (!mediaGrid.includes("previewPlaceholder") || !mediaGrid.includes("previewPlaceholderUrl")) {
+  fail("MediaGrid tiles must render previewPlaceholder immediately before grid_320 loads");
+}
+
+if (!mediaGrid.includes("requestThumbnailBlob") || mediaGrid.includes("createCoreClient")) {
+  fail("MediaGrid must use db_blob thumbnail resources instead of ad hoc client/cache-key loading");
 }
 
 if (!centralPreviewStage) {
@@ -802,8 +818,8 @@ if (!centralPreviewStage) {
     fail("central preview must expose state and commands for the integrated center titlebar");
   }
 
-  if (/MediaPreview[\s\S]{0,120}thumbnail=/.test(centralPreviewStage)) {
-    fail("central preview must not pass thumbnail state into the displayed MediaPreview");
+  if (!/MediaPreview[\s\S]{0,220}source="original"[\s\S]{0,220}thumbnail=\{thumbnail\}/.test(centralPreviewStage)) {
+    fail("central preview must request original media while passing thumbnail only as a loading fallback");
   }
 
   if (!centralPreviewStage.includes("translate(-50%, -50%)")) {
