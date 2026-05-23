@@ -22,8 +22,8 @@ const TITLEBAR_NO_DRAG_SELECTOR = [
 
 interface DragState {
   pointerId: number;
-  startClientX: number;
-  startClientY: number;
+  startScreenX: number;
+  startScreenY: number;
   startWindowX: number;
   startWindowY: number;
 }
@@ -31,6 +31,8 @@ interface DragState {
 export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) {
   const dragStateRef = useRef<DragState | null>(null);
   const pointerCaptureRef = useRef<HTMLElement | null>(null);
+  const dragFrameRef = useRef<number>(0);
+  const pendingDragPositionRef = useRef<{ x: number; y: number } | null>(null);
 
   function releasePointerCapture(pointerId?: number) {
     const drag = dragStateRef.current;
@@ -54,6 +56,11 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
       return;
     }
     dragStateRef.current = null;
+    pendingDragPositionRef.current = null;
+    if (dragFrameRef.current) {
+      window.cancelAnimationFrame(dragFrameRef.current);
+      dragFrameRef.current = 0;
+    }
     releasePointerCapture(pointerId);
   }
 
@@ -61,7 +68,9 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     clientX: number,
     clientY: number,
     pointerId: number,
-    buttons: number
+    buttons: number,
+    screenX: number,
+    screenY: number
   ) {
     updateTitlebarPointerPlane(rootRef.current, clientX, clientY);
     const drag = dragStateRef.current;
@@ -76,10 +85,19 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
       clearDrag(pointerId);
       return;
     }
-    void controls.setPosition(
-      drag.startWindowX + (clientX - drag.startClientX),
-      drag.startWindowY + (clientY - drag.startClientY)
-    );
+    pendingDragPositionRef.current = {
+      x: drag.startWindowX + (screenX - drag.startScreenX),
+      y: drag.startWindowY + (screenY - drag.startScreenY)
+    };
+    if (dragFrameRef.current) {
+      return;
+    }
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = 0;
+      const pending = pendingDragPositionRef.current;
+      if (!pending) return;
+      void controls.setPosition(pending.x, pending.y);
+    });
   }
 
   function handlePointerPlaneExit(pointerId?: number) {
@@ -110,6 +128,14 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
 
     function handleWindowPointerMove(event: globalThis.PointerEvent) {
       if (dragStateRef.current) {
+        handlePointerPlaneMove(
+          event.clientX,
+          event.clientY,
+          event.pointerId,
+          event.buttons,
+          event.screenX,
+          event.screenY
+        );
         return;
       }
       requestPlaneUpdate(event.clientX, event.clientY);
@@ -164,7 +190,7 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     }
 
     const controls = getWindowControls();
-    if (!controls?.setPosition) {
+    if (!controls?.setPosition || !controls.getBounds) {
       return;
     }
 
@@ -173,37 +199,33 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     captureTarget.setPointerCapture(event.pointerId);
     pointerCaptureRef.current = captureTarget;
 
-    const wasMaximized = await controls.isMaximized?.();
+    const wasMaximized = (await controls.isMaximized?.()) === true;
     if (wasMaximized) {
       await controls.maximize?.();
+      await new Promise((resolve) => window.setTimeout(resolve, 16));
     }
 
-    let startWindowX = typeof window.screenX === "number" ? window.screenX : Number.NaN;
-    let startWindowY = typeof window.screenY === "number" ? window.screenY : Number.NaN;
+    const bounds = await controls.getBounds();
+    if (!bounds) {
+      releasePointerCapture(event.pointerId);
+      return;
+    }
 
-    if (!Number.isFinite(startWindowX) || !Number.isFinite(startWindowY)) {
-      const bounds = await controls.getBounds?.();
-      if (!bounds) {
-        releasePointerCapture(event.pointerId);
-        return;
-      }
-      startWindowX = bounds.x;
-      startWindowY = bounds.y;
-    } else {
-      void controls.getBounds?.().then((bounds) => {
-        if (!bounds) return;
-        const drag = dragStateRef.current;
-        if (drag?.pointerId === event.pointerId) {
-          drag.startWindowX = bounds.x;
-          drag.startWindowY = bounds.y;
-        }
-      });
+    let startWindowX = bounds.x;
+    let startWindowY = bounds.y;
+
+    if (wasMaximized) {
+      const viewportWidth = Math.max(window.innerWidth, 1);
+      const pointerRatioX = Math.min(1, Math.max(0, event.clientX / viewportWidth));
+      startWindowX = Math.round(event.screenX - bounds.width * pointerRatioX);
+      startWindowY = Math.round(event.screenY - Math.min(event.clientY, 40));
+      await controls.setPosition(startWindowX, startWindowY);
     }
 
     dragStateRef.current = {
       pointerId: event.pointerId,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
+      startScreenX: event.screenX,
+      startScreenY: event.screenY,
       startWindowX,
       startWindowY
     };
@@ -219,7 +241,14 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
       void handleTitlebarPointerDown(event);
     },
     onPointerMove: (event) => {
-      handlePointerPlaneMove(event.clientX, event.clientY, event.pointerId, event.buttons);
+      handlePointerPlaneMove(
+        event.clientX,
+        event.clientY,
+        event.pointerId,
+        event.buttons,
+        event.screenX,
+        event.screenY
+      );
     },
     onPointerUp: (event) => {
       clearDrag(event.pointerId);
