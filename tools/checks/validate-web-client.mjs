@@ -235,6 +235,9 @@ if (!/thumbnailStatesByMediaId\[item\.id\]/.test(mediaGrid)) {
 if (!/previewPlaceholder/.test(mediaGrid) || !/previewPlaceholderUrl/.test(mediaGrid)) {
   fail("MediaGrid must render MediaRecord.previewPlaceholder before grid_320 bytes are ready");
 }
+if (!/previewPlaceholderDataUrl\(item\)/.test(mediaGrid) || /usePreviewPlaceholderUrl/.test(mediaGrid)) {
+  fail("MediaGrid previewPlaceholder must be derived synchronously during render, not in an effect");
+}
 if (!/requestThumbnailBlob\(fileId\)/.test(mediaGrid) || /createCoreClient/.test(mediaGrid)) {
   fail("MediaGrid must load grid_320 bytes through the shared media resource helper");
 }
@@ -249,6 +252,9 @@ if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestT
 }
 if (!/previewPlaceholderUrl/.test(mediaPreview) || !/fallbackThumbnail/.test(mediaPreview)) {
   fail("MediaPreview must show previewPlaceholder and thumbnail fallback while media bytes load");
+}
+if (!/previewPlaceholderDataUrl\(media\)/.test(mediaPreview) || /usePreviewPlaceholderUrl/.test(mediaPreview)) {
+  fail("MediaPreview previewPlaceholder must be available on first render without an effect");
 }
 if (!mediaPreview.includes('source = "thumbnail"') || !mediaPreview.includes('source === "original"')) {
   fail("MediaPreview must require explicit original-source mode for central preview rendering");

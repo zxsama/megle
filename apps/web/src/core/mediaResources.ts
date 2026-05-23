@@ -105,14 +105,13 @@ export function isFreshThumbnailForMediaRecord(
   return true;
 }
 
-export function previewPlaceholderBlob(mediaRecord: MediaRecord): Blob | null {
+export function previewPlaceholderDataUrl(mediaRecord: MediaRecord): string | null {
   const bytes = mediaRecord.previewPlaceholder;
   if (!bytes || bytes.length === 0) {
     return null;
   }
-  return new Blob([new Uint8Array(bytes)], {
-    type: mediaRecord.previewPlaceholderFormat ?? "image/webp"
-  });
+  const mediaType = mediaRecord.previewPlaceholderFormat ?? "image/webp";
+  return `data:${mediaType};base64,${bytesToBase64(bytes)}`;
 }
 
 function normalizeMediaThumbnailState(value: string | null | undefined): ThumbnailResponse["state"] {
@@ -134,4 +133,13 @@ function thumbnailRequestKey(mediaRecord: MediaRecord): string {
     normalizeMediaThumbnailState(mediaRecord.thumbnailState),
     GRID_THUMBNAIL_TARGET
   ].join(":");
+}
+
+function bytesToBase64(bytes: number[]): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    const chunk = bytes.slice(offset, offset + 8192);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }

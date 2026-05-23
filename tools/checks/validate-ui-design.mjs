@@ -752,8 +752,16 @@ if (!mediaPreview.includes("previewPlaceholderUrl") || !mediaPreview.includes("f
   fail("MediaPreview must support placeholder-first display and thumbnail fallback while original media loads");
 }
 
+if (!/previewPlaceholderDataUrl\(media\)/.test(mediaPreview) || /usePreviewPlaceholderUrl/.test(mediaPreview)) {
+  fail("MediaPreview placeholder-first path must be synchronous on first render");
+}
+
 if (!mediaGrid.includes("previewPlaceholder") || !mediaGrid.includes("previewPlaceholderUrl")) {
   fail("MediaGrid tiles must render previewPlaceholder immediately before grid_320 loads");
+}
+
+if (!/previewPlaceholderDataUrl\(item\)/.test(mediaGrid) || /usePreviewPlaceholderUrl/.test(mediaGrid)) {
+  fail("MediaGrid placeholder-first path must be synchronous on first render");
 }
 
 if (!mediaGrid.includes("requestThumbnailBlob") || mediaGrid.includes("createCoreClient")) {

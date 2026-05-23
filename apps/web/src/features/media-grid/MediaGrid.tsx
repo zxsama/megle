@@ -3,7 +3,7 @@ import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import {
-  previewPlaceholderBlob,
+  previewPlaceholderDataUrl,
   requestThumbnailBlob
 } from "../../core/mediaResources";
 import { workbenchLayout } from "../../design/tokens";
@@ -305,7 +305,7 @@ function ThumbnailStateView({
   thumbnail?: ThumbnailResponse;
 }) {
   const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
-  const previewPlaceholderUrl = usePreviewPlaceholderUrl(item);
+  const previewPlaceholderUrl = previewPlaceholderDataUrl(item);
 
   if (state === "ready") {
     return (
@@ -400,27 +400,6 @@ function chunk<T>(items: T[], size: number): T[][] {
     rows.push(items.slice(index, index + size));
   }
   return rows;
-}
-
-
-function usePreviewPlaceholderUrl(item: MediaRecord): string | null {
-  const [previewPlaceholderUrl, setPreviewPlaceholderUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    const blob = previewPlaceholderBlob(item);
-    if (!blob) {
-      setPreviewPlaceholderUrl(null);
-      return undefined;
-    }
-
-    const objectUrl = URL.createObjectURL(blob);
-    setPreviewPlaceholderUrl(objectUrl);
-    return () => {
-      URL.revokeObjectURL(objectUrl);
-    };
-  }, [item.id, item.previewPlaceholder, item.previewPlaceholderFormat]);
-
-  return previewPlaceholderUrl;
 }
 
 function PlaceholderThumbnail({ alt, src }: { alt: string; src: string }) {

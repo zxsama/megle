@@ -3,7 +3,7 @@ import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { createCoreClient } from "@megle/core-client";
 import { getCoreClientConfig } from "../../core/client";
 import {
-  previewPlaceholderBlob,
+  previewPlaceholderDataUrl,
   requestThumbnailBlob
 } from "../../core/mediaResources";
 
@@ -18,7 +18,7 @@ export function MediaPreview({
   source?: "thumbnail" | "original";
   thumbnail?: ThumbnailResponse;
 }) {
-  const previewPlaceholderUrl = usePreviewPlaceholderUrl(media);
+  const previewPlaceholderUrl = previewPlaceholderDataUrl(media);
   const fallbackThumbnail = useThumbnailFallbackUrl(
     thumbnail?.state === "ready" ? thumbnail.fileId : null
   );
@@ -78,26 +78,6 @@ export function MediaPreview({
       <span>{thumbnail?.state ?? media.thumbnailState ?? "pending"}</span>
     </div>
   );
-}
-
-function usePreviewPlaceholderUrl(media: MediaRecord): string | null {
-  const [previewPlaceholderUrl, setPreviewPlaceholderUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    const blob = previewPlaceholderBlob(media);
-    if (!blob) {
-      setPreviewPlaceholderUrl(null);
-      return undefined;
-    }
-
-    const objectUrl = URL.createObjectURL(blob);
-    setPreviewPlaceholderUrl(objectUrl);
-    return () => {
-      URL.revokeObjectURL(objectUrl);
-    };
-  }, [media.id, media.previewPlaceholder, media.previewPlaceholderFormat]);
-
-  return previewPlaceholderUrl;
 }
 
 function useThumbnailFallbackUrl(fileId: number | null): string | null {
