@@ -52,6 +52,9 @@ for (const value of [
   "startCoreProcess",
   "waitForCoreHealth",
   "createCoreSession",
+  "AUTO_CORE_STARTUP_MAX_ATTEMPTS",
+  "shouldRetryAutoCoreStartup",
+  "handleDesktopStartupFailure",
   "additionalArguments",
   "--megle-core-url=",
   "--megle-session-token=",
@@ -164,6 +167,15 @@ if (!ensureCoreReadyBody) {
 if (!startCoreSessionBody) {
   fail("desktop main must isolate Core startup in startCoreSession");
 } else {
+  if (!startCoreSessionBody.includes("shouldRetryAutoCoreStartup()")) {
+    fail("desktop main must retry only auto-selected internal Core startup failures");
+  }
+  if (!startCoreSessionBody.includes("AUTO_CORE_STARTUP_MAX_ATTEMPTS")) {
+    fail("desktop main must bound auto Core startup retries");
+  }
+  if (!startCoreSessionBody.includes("[megle] Core startup attempt")) {
+    fail("desktop main must log Core startup retry/failure attempts clearly");
+  }
   if (startCoreSessionBody.includes("coreSession = await createCoreSession")) {
     fail("desktop main must not cache coreSession before Core health succeeds");
   }
@@ -187,6 +199,30 @@ if (!startCoreSessionBody) {
   }
   if (!startCoreSessionBody.includes("pendingCoreProcess = null")) {
     fail("desktop main must clear pending Core process after startup settles");
+  }
+}
+const shouldRetryBody = functionBody(main, "function shouldRetryAutoCoreStartup(): boolean");
+if (!shouldRetryBody) {
+  fail("desktop main must expose a helper for auto Core startup retry eligibility");
+} else {
+  for (const value of ["MEGLE_CORE_EXTERNAL", "MEGLE_CORE_ADDR", "MEGLE_CORE_URL"]) {
+    if (!shouldRetryBody.includes(value)) {
+      fail(`auto Core startup retry eligibility must preserve explicit/external setting: ${value}`);
+    }
+  }
+}
+if (!main.includes(".catch(handleDesktopStartupFailure)")) {
+  fail("desktop main must catch app startup failures instead of leaving unhandled rejections");
+}
+const startupFailureBody = functionBody(main, "function handleDesktopStartupFailure(error: unknown): void");
+if (!startupFailureBody) {
+  fail("desktop main must centralize startup failure handling");
+} else {
+  if (!startupFailureBody.includes("console.error")) {
+    fail("desktop startup failure handler must log the failure clearly");
+  }
+  if (!startupFailureBody.includes("app.exit(1)")) {
+    fail("desktop startup failure handler must exit predictably with a non-zero status");
   }
 }
 const beforeQuitBody = functionBody(main, 'app.on("before-quit", (event) =>');

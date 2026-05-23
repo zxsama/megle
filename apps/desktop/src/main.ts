@@ -34,6 +34,7 @@ let windowStatePersistenceEnabled = false;
 const WINDOW_COMPOSITION_BOOTSTRAP_MARGIN_PX = 96;
 const PERSIST_DEBOUNCE_MS = 500;
 const SHELL_READY_FAILURE_TIMEOUT_MS = 4000;
+const AUTO_CORE_STARTUP_MAX_ATTEMPTS = 3;
 const WINDOW_COMPOSITION_REFRESH_DELAYS_MS = [34, 140, 420] as const;
 
 interface WindowState {
@@ -355,25 +356,53 @@ async function ensureCoreReady(): Promise<CoreSession> {
 }
 
 async function startCoreSession(): Promise<CoreSession> {
-  let pendingProcess: CoreProcessHandle | null = null;
+  const maxAttempts = shouldRetryAutoCoreStartup() ? AUTO_CORE_STARTUP_MAX_ATTEMPTS : 1;
 
-  try {
-    const session = await createCoreSession();
-    pendingProcess = startCoreProcess(session);
-    pendingCoreProcess = pendingProcess;
-    await waitForCoreHealth(session.baseUrl, session.sessionToken);
-    coreProcess = pendingProcess;
-    pendingCoreProcess = null;
-    coreSession = session;
-    return session;
-  } catch (error) {
-    pendingProcess?.stop();
-    pendingCoreProcess = null;
-    coreReadyPromise = null;
-    coreProcess = null;
-    coreSession = null;
-    throw error;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let pendingProcess: CoreProcessHandle | null = null;
+
+    try {
+      const session = await createCoreSession();
+      pendingProcess = startCoreProcess(session);
+      pendingCoreProcess = pendingProcess;
+      await waitForCoreHealth(session.baseUrl, session.sessionToken);
+      coreProcess = pendingProcess;
+      pendingCoreProcess = null;
+      coreSession = session;
+      if (attempt > 1) {
+        console.log(`[megle] Core startup recovered on attempt ${attempt}/${maxAttempts}`);
+      }
+      return session;
+    } catch (error) {
+      pendingProcess?.stop();
+      pendingCoreProcess = null;
+      coreProcess = null;
+      coreSession = null;
+
+      if (attempt < maxAttempts) {
+        console.warn(
+          `[megle] Core startup attempt ${attempt}/${maxAttempts} failed; retrying with a fresh session/port:`,
+          error
+        );
+        continue;
+      }
+
+      coreReadyPromise = null;
+      console.error(`[megle] Core startup attempt ${attempt}/${maxAttempts} failed; no retries remain:`, error);
+      throw error;
+    }
   }
+
+  coreReadyPromise = null;
+  throw new Error("Core startup retry loop exited without a session");
+}
+
+function shouldRetryAutoCoreStartup(): boolean {
+  return (
+    process.env.MEGLE_CORE_EXTERNAL !== "1" &&
+    !process.env.MEGLE_CORE_ADDR?.trim() &&
+    !process.env.MEGLE_CORE_URL?.trim()
+  );
 }
 
 function isVisualHarnessEnabled(): boolean {
@@ -756,11 +785,25 @@ function resolvePluginsDir(dbPath: string): string {
   return path.join(".", "plugins");
 }
 
-app.whenReady().then(async () => {
-  const session = await ensureCoreReady();
-  await maybeAutoAddRoot(session);
-  await createWindow();
-});
+app
+  .whenReady()
+  .then(async () => {
+    const session = await ensureCoreReady();
+    await maybeAutoAddRoot(session);
+    await createWindow();
+  })
+  .catch(handleDesktopStartupFailure);
+
+function handleDesktopStartupFailure(error: unknown): void {
+  console.error("[megle] desktop startup failed:", error);
+  pendingCoreProcess?.stop();
+  pendingCoreProcess = null;
+  coreProcess?.stop();
+  coreProcess = null;
+  coreReadyPromise = null;
+  coreSession = null;
+  app.exit(1);
+}
 
 async function maybeAutoAddRoot(session: CoreSession): Promise<void> {
   const target = process.env.MEGLE_AUTO_ADD_ROOT?.trim();
