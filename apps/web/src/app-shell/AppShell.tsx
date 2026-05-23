@@ -8,7 +8,8 @@ interface AppShellProps {
   titlebarCenter: ReactNode;
   titlebarRight: ReactNode;
   sidebar: ReactNode;
-  workspace: ReactNode;
+  centerPane: ReactNode;
+  rightPane: ReactNode;
   overlays: ReactNode;
 }
 
@@ -18,7 +19,8 @@ export function AppShell({
   titlebarCenter,
   titlebarRight,
   sidebar,
-  workspace,
+  centerPane,
+  rightPane,
   overlays
 }: AppShellProps) {
   const shellRef = useRef<HTMLElement | null>(null);
@@ -28,39 +30,61 @@ export function AppShell({
     <main ref={shellRef} className="app-shell" data-layout={layout}>
       <LiquidGlassSurface
         as="section"
-        className="shell-titlebar shell-titlebar-left shell-drag"
-        aria-label="Primary navigation"
+        className="workbench-column workbench-column-left"
+        aria-label="Primary navigation shell"
         backgroundGlow
         interactive
-        {...titlebarSurfaceProps}
         tone="chrome"
       >
-        {titlebarLeft}
+        <header
+          className="shell-titlebar shell-titlebar-left shell-drag"
+          aria-label="Primary navigation"
+          {...titlebarSurfaceProps}
+        >
+          {titlebarLeft}
+        </header>
+        <section className="workbench-column-body workbench-column-body-left">
+          {sidebar}
+        </section>
       </LiquidGlassSurface>
       <LiquidGlassSurface
         as="section"
-        className="shell-titlebar shell-titlebar-center shell-drag"
-        aria-label="Workspace toolbar"
+        className="workbench-column workbench-column-center"
+        aria-label="Center workbench shell"
         backgroundGlow
         interactive
-        {...titlebarSurfaceProps}
         tone="chrome"
       >
-        {titlebarCenter}
+        <header
+          className="shell-titlebar shell-titlebar-center shell-drag"
+          aria-label="Workspace toolbar"
+          {...titlebarSurfaceProps}
+        >
+          {titlebarCenter}
+        </header>
+        <section className="workbench-column-body workbench-column-body-center">
+          {centerPane}
+        </section>
       </LiquidGlassSurface>
       <LiquidGlassSurface
         as="section"
-        className="shell-titlebar shell-titlebar-right shell-drag"
-        aria-label="Window actions"
+        className="workbench-column workbench-column-right"
+        aria-label="Inspector shell"
         backgroundGlow
         interactive
-        {...titlebarSurfaceProps}
         tone="chrome"
       >
-        {titlebarRight}
+        <header
+          className="shell-titlebar shell-titlebar-right shell-drag"
+          aria-label="Window actions"
+          {...titlebarSurfaceProps}
+        >
+          {titlebarRight}
+        </header>
+        <section className="workbench-column-body workbench-column-body-right">
+          {rightPane}
+        </section>
       </LiquidGlassSurface>
-      {sidebar}
-      <section className="app-workspace-slot">{workspace}</section>
       {overlays}
     </main>
   );

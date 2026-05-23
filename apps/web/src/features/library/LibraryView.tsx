@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
-import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
 import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
@@ -38,6 +38,35 @@ export function LibraryView({
   onPreviewViewStateChange,
   previewOpen
 }: LibraryViewProps) {
+  return (
+    <>
+      <LibraryCenterPane
+        library={library}
+        onClosePreview={onClosePreview}
+        onMediaContextMenu={onMediaContextMenu}
+        onOpenPreview={onOpenPreview}
+        onPreviewCommandChange={onPreviewCommandChange}
+        onPreviewNext={onPreviewNext}
+        onPreviewPrevious={onPreviewPrevious}
+        onPreviewViewStateChange={onPreviewViewStateChange}
+        previewOpen={previewOpen}
+      />
+      <LibraryInspectorPane library={library} previewOpen={previewOpen} />
+    </>
+  );
+}
+
+export function LibraryCenterPane({
+  library,
+  onClosePreview,
+  onMediaContextMenu,
+  onOpenPreview,
+  onPreviewCommandChange,
+  onPreviewNext,
+  onPreviewPrevious,
+  onPreviewViewStateChange,
+  previewOpen
+}: LibraryViewProps) {
   const selectedRoot = library.roots.find((root) => root.id === library.selectedRootId) ?? null;
   const selectedMedia = library.selectedMedia;
   const previewMedia = previewOpen && selectedMedia ? selectedMedia : null;
@@ -54,11 +83,9 @@ export function LibraryView({
 
   return (
     <section className="workspace" aria-label="Library workbench">
-      <LiquidGlassSurface
-        as="section"
+      <section
         className={previewMedia ? "grid-surface grid-surface-preview" : "grid-surface"}
         aria-label="Media workspace"
-        tone="chrome"
       >
         {library.error ? <div className="error-strip">{library.error}</div> : null}
         <div className="library-grid-content">
@@ -89,31 +116,37 @@ export function LibraryView({
             )
           )}
         </div>
-      </LiquidGlassSurface>
-
-      <PreviewPanel
-        selectedMedia={selectedMedia}
-        showPreviewImage={!previewOpen}
-        thumbnail={selectedMedia ? library.thumbnailStatesByMediaId[selectedMedia.id] : undefined}
-        onOpenPreview={
-          selectedMedia && !previewOpen ? () => handleOpenPreview(selectedMedia.id) : undefined
-        }
-      >
-        {selectedMedia ? (
-          <InspectorMetadata
-            fileId={selectedMedia.id}
-            metadata={library.selectedMetadata}
-            tags={library.tags}
-            tagsById={library.tagsById}
-            saving={library.metadataSaving}
-            onUpdate={library.updateMetadata}
-            onAddTag={library.addFileTag}
-            onRemoveTag={library.removeFileTag}
-            onCreateTag={library.createTag}
-          />
-        ) : null}
-      </PreviewPanel>
+      </section>
     </section>
+  );
+}
+
+export function LibraryInspectorPane({
+  library,
+  previewOpen
+}: Pick<LibraryViewProps, "library" | "previewOpen">) {
+  const selectedMedia = library.selectedMedia;
+
+  return (
+    <PreviewPanel
+      selectedMedia={selectedMedia}
+      showPreviewImage={!previewOpen}
+      thumbnail={selectedMedia ? library.thumbnailStatesByMediaId[selectedMedia.id] : undefined}
+    >
+      {selectedMedia ? (
+        <InspectorMetadata
+          fileId={selectedMedia.id}
+          metadata={library.selectedMetadata}
+          tags={library.tags}
+          tagsById={library.tagsById}
+          saving={library.metadataSaving}
+          onUpdate={library.updateMetadata}
+          onAddTag={library.addFileTag}
+          onRemoveTag={library.removeFileTag}
+          onCreateTag={library.createTag}
+        />
+      ) : null}
+    </PreviewPanel>
   );
 }
 

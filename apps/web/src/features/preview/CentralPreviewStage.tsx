@@ -73,7 +73,7 @@ export function CentralPreviewStage({
       const nextScale = fitLongEdgeScale();
       if (nextScale !== null) {
         setScale(nextScale);
-        setPan(clampPanToStage({ x: 0, y: 0 }, nextScale));
+        setPan({ x: 0, y: 0 });
         return;
       }
       attempts += 1;
@@ -126,10 +126,10 @@ export function CentralPreviewStage({
           x: (local.x - current.x) / scale,
           y: (local.y - current.y) / scale
         };
-        return clampPanToStage({
+        return {
           x: local.x - imagePoint.x * clampedScale,
           y: local.y - imagePoint.y * clampedScale
-        }, clampedScale);
+        };
       });
       setScale(clampedScale);
       setViewMode(nextMode);
@@ -245,22 +245,6 @@ export function CentralPreviewStage({
     return { naturalWidth, naturalHeight, stageRect };
   }
 
-  function clampPanToStage(nextPan: { x: number; y: number }, nextScale: number) {
-    const stage = stageRef.current;
-    const metrics = stage ? previewMetrics(stage) : null;
-    if (!metrics) {
-      return nextPan;
-    }
-    const scaledWidth = metrics.naturalWidth * nextScale;
-    const scaledHeight = metrics.naturalHeight * nextScale;
-    const maxX = Math.max(0, (scaledWidth - metrics.stageRect.width) / 2);
-    const maxY = Math.max(0, (scaledHeight - metrics.stageRect.height) / 2);
-    return {
-      x: maxX === 0 ? 0 : clamp(nextPan.x, -maxX, maxX),
-      y: maxY === 0 ? 0 : clamp(nextPan.y, -maxY, maxY)
-    };
-  }
-
   function stageCenterPoint() {
     const stage = stageRef.current;
     if (!stage) return null;
@@ -290,7 +274,7 @@ export function CentralPreviewStage({
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-    setPan((current) => clampPanToStage({ x: current.x + dx, y: current.y + dy }, scale));
+    setPan((current) => ({ x: current.x + dx, y: current.y + dy }));
   }
 
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
@@ -359,10 +343,6 @@ function clampScale(value: number) {
 
 function clampFitScale(value: number) {
   return Math.min(MAX_PREVIEW_SCALE, Math.max(0, value));
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
 }
 
 const PREVIEW_PAN_SKIP_SELECTOR = [

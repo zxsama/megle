@@ -38,7 +38,10 @@ import {
   type FileOpsController
 } from "../features/file-ops/useFileOps";
 import { LibrarySidebar } from "../features/library/LibrarySidebar";
-import { LibraryView } from "../features/library/LibraryView";
+import {
+  LibraryCenterPane,
+  LibraryInspectorPane
+} from "../features/library/LibraryView";
 import { OnboardingHero } from "../features/onboarding/OnboardingHero";
 import { PluginsView } from "../features/plugins/PluginsView";
 import { SettingsView } from "../features/settings/SettingsView";
@@ -380,7 +383,7 @@ export function App() {
     );
   }
 
-  function renderWorkspace() {
+  function renderCenterPane() {
     if (activeView === "library") {
       return library.roots.length === 0 && !library.loading ? (
         <OnboardingHero
@@ -389,7 +392,7 @@ export function App() {
           onAddRoot={(path) => library.addRoot(path)}
         />
       ) : (
-        <LibraryView
+        <LibraryCenterPane
           library={library}
           onClosePreview={handleClosePreview}
           onMediaContextMenu={handleMediaContextMenu}
@@ -408,6 +411,18 @@ export function App() {
     }
 
     return <SettingsView interfaceStyle={interfaceStyle} library={library} />;
+  }
+
+  function renderRightPane() {
+    if (activeView === "library") {
+      return <LibraryInspectorPane library={library} previewOpen={previewOpen} />;
+    }
+
+    return (
+      <aside className="inspector-panel shell-empty-pane" aria-label="Inspector">
+        <div className="empty-panel">No selection</div>
+      </aside>
+    );
   }
 
   function renderOverlays() {
@@ -432,6 +447,7 @@ export function App() {
   return (
     <LiquidGlassLayer>
       <AppShell
+        layout={activeView === "library" ? "library" : "simple"}
         titlebarLeft={<ShellPrimaryNav activeView={activeView} onSelectView={setActiveView} />}
         titlebarCenter={renderCenterTitlebar()}
         titlebarRight={
@@ -445,7 +461,8 @@ export function App() {
           />
         }
         sidebar={renderSidebar()}
-        workspace={renderWorkspace()}
+        centerPane={renderCenterPane()}
+        rightPane={renderRightPane()}
         overlays={renderOverlays()}
       />
     </LiquidGlassLayer>

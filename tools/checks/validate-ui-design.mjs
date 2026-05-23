@@ -50,6 +50,8 @@ const moveDialog = read("apps/web/src/features/file-ops/MoveDialog.tsx");
 const deleteConfirm = read("apps/web/src/features/file-ops/DeleteConfirm.tsx");
 const onboardingHero = read("apps/web/src/features/onboarding/OnboardingHero.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
+const libraryCenterPane = readOptional("apps/web/src/features/library/LibraryCenterPane.tsx") ?? "";
+const libraryInspectorPane = readOptional("apps/web/src/features/library/LibraryInspectorPane.tsx") ?? "";
 const pluginsView = read("apps/web/src/features/plugins/PluginsView.tsx");
 const filterMenu = readOptional("apps/web/src/features/library/FilterMenu.tsx");
 const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
@@ -417,20 +419,73 @@ if (
 }
 
 if (
-  !/grid-template-areas:\s*"titlebar-left titlebar-center titlebar-right"\s*"sidebar workspace workspace"/.test(baseAppShellBlock) ||
+  !/grid-template-areas:\s*"workbench-left workbench-center workbench-right"/.test(baseAppShellBlock) ||
   !/grid-template-columns:\s*var\(--shell-left-width\)\s+minmax\(0,\s*1fr\)\s+var\(--shell-right-width\)/.test(baseAppShellBlock) ||
-  !/grid-template-rows:\s*var\(--shell-titlebar-height\)\s+minmax\(0,\s*1fr\)/.test(baseAppShellBlock)
+  !/grid-template-rows:\s*minmax\(0,\s*1fr\)/.test(baseAppShellBlock)
 ) {
-  fail("app shell must define integrated three-column titlebar grid");
+  fail("app shell must define three continuous structural workbench columns");
 }
 
 for (const value of [
   "titlebarLeft",
   "titlebarCenter",
-  "titlebarRight"
+  "titlebarRight",
+  "centerPane",
+  "rightPane"
 ]) {
   if (!appShell.includes(value)) {
-    fail(`integrated titlebar AppShell render contract missing ${value}`);
+    fail(`continuous workbench AppShell render contract missing ${value}`);
+  }
+}
+
+if (appShell.includes("app-workspace-slot") || app.includes("workspace={renderWorkspace()")) {
+  fail("AppShell must not glue titlebars to a single workspace slot; centerPane and rightPane must be composed explicitly");
+}
+
+const continuousShellCompositionSource = [
+  app,
+  appShell,
+  libraryCenterPane,
+  libraryInspectorPane,
+  stylesForChecks
+].join("\n");
+
+for (const value of [
+  "centerPane",
+  "rightPane",
+  "workbench-column",
+  "workbench-column-body",
+  "workbench-column-left",
+  "workbench-column-center",
+  "workbench-column-right"
+]) {
+  if (!continuousShellCompositionSource.includes(value)) {
+    fail(`continuous shell composition missing ${value}`);
+  }
+}
+
+for (const forbidden of [
+  "margin-top: calc(var(--shell-titlebar-height) * -1)",
+  "padding-top: calc(var(--shell-titlebar-height) + 16px)"
+]) {
+  if (stylesForChecks.includes(forbidden)) {
+    fail(`continuous shell composition must remove seam-hiding layout hack ${forbidden}`);
+  }
+}
+
+for (const selector of [
+  ".workbench-column",
+  ".workbench-column-left",
+  ".workbench-column-center",
+  ".workbench-column-right",
+  ".shell-titlebar",
+  ".library-sidebar",
+  ".grid-surface",
+  ".inspector-panel"
+]) {
+  const structuralBlocks = cssBlocksForSelector(stylesForChecks, selector);
+  if (structuralBlocks.some((block) => /linear-gradient\(\s*145deg|linear-gradient\(\s*135deg/.test(block))) {
+    fail(`structural shell surface ${selector} must not use a decorative diagonal gradient`);
   }
 }
 
@@ -445,15 +500,15 @@ for (const value of [
 }
 
 for (const [selector, gridArea] of [
-  [".shell-titlebar-left", "titlebar-left"],
-  [".shell-titlebar-center", "titlebar-center"],
-  [".shell-titlebar-right", "titlebar-right"]
+  [".workbench-column-left", "workbench-left"],
+  [".workbench-column-center", "workbench-center"],
+  [".workbench-column-right", "workbench-right"]
 ]) {
   const blocks = cssBlocksForSelector(stylesForChecks, selector);
   if (blocks.length === 0) {
-    fail(`integrated titlebar selector missing ${selector}`);
+    fail(`continuous workbench selector missing ${selector}`);
   } else if (!blocks.some((block) => latestDeclarationValue(block, "grid-area") === gridArea)) {
-    fail(`integrated titlebar selector ${selector} must map to grid-area ${gridArea}`);
+    fail(`continuous workbench selector ${selector} must map to grid-area ${gridArea}`);
   }
 }
 
@@ -525,16 +580,19 @@ if (!narrowShell) {
   if (
     !narrowAppShellBlocks.some(
       (block) =>
-        /grid-template-areas:\s*"titlebar-left titlebar-center titlebar-right"\s*"workspace workspace workspace"/.test(block) &&
+        /grid-template-areas:\s*"workbench-left workbench-center workbench-right"/.test(block) &&
         /grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/.test(block)
     )
   ) {
-    fail("narrow viewport shell must preserve integrated titlebar columns above a full-width workspace");
+    fail("narrow viewport shell must preserve the structural workbench columns");
   }
 
-  const narrowSidebarBlocks = cssBlocksForSelector(narrowShell, ".library-sidebar");
-  if (!narrowSidebarBlocks.some((block) => /display:\s*none/.test(block))) {
-    fail("narrow viewport shell must hide the persistent library sidebar");
+  const narrowSideBodyBlocks = [
+    ...cssBlocksForSelector(narrowShell, ".workbench-column-body-left"),
+    ...cssBlocksForSelector(narrowShell, ".workbench-column-body-right")
+  ];
+  if (!narrowSideBodyBlocks.some((block) => /display:\s*none/.test(block))) {
+    fail("narrow viewport shell must hide persistent side column bodies while preserving titlebar controls");
   }
 
   const narrowWorkspaceBlocks = cssBlocksForSelector(narrowShell, ".workspace");
@@ -542,10 +600,10 @@ if (!narrowShell) {
     !narrowWorkspaceBlocks.some(
       (block) =>
         /grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(block) &&
-        /grid-template-rows:\s*auto\s+(?:auto\s+)?minmax\(0,\s*1fr\)/.test(block)
+        /grid-template-rows:\s*minmax\(0,\s*1fr\)/.test(block)
     )
   ) {
-    fail("narrow viewport workspace must own full width without inspector/sidebar columns");
+    fail("narrow viewport workspace must stay a single center content pane");
   }
 
   const narrowCenterTitlebarBlocks = cssBlocksForSelector(narrowShell, ".shell-titlebar-center");
@@ -1512,64 +1570,73 @@ if (
 }
 
 if (libraryView.includes("<LiquidGlassSurface") && libraryView.includes("grid-surface")) {
-  fail("center content column must not be wrapped in a structural LiquidGlass surface; keep the content stage separate from glass chrome");
+  fail("LibraryView center content stage must stay plain; the AppShell structural center column owns the LiquidGlass surface");
 }
 
-for (const [selector, property, label] of [
-  [".shell-titlebar-left", "border-bottom-color", "left titlebar lower edge"],
-  [".library-sidebar", "border-top-color", "left sidebar upper edge"],
-  [".shell-titlebar-center", "border-bottom-color", "center titlebar lower edge"],
-  [".shell-titlebar-right", "border-bottom-color", "right titlebar lower edge"],
-  [".inspector-panel", "border-top-color", "right inspector upper edge"]
+const workbenchColumnBlocks = cssBlocksForExactSelector(stylesForChecks, ".workbench-column");
+if (
+  !workbenchColumnBlocks.some(
+    (block) =>
+      /grid-template-rows:\s*var\(--shell-titlebar-height\)\s+minmax\(0,\s*1fr\)/.test(block) &&
+      /overflow:\s*hidden/.test(block)
+  )
+) {
+  fail("structural workbench columns must own the titlebar/body join with a single titlebar + body grid");
+}
+
+for (const selector of [
+  ".workbench-column-left",
+  ".workbench-column-center",
+  ".workbench-column-right"
 ]) {
   if (
     !cssBlocksForSelector(stylesForChecks, selector).some((block) =>
-      new RegExp(`${escapeRegExp(property)}\\s*:\\s*transparent`).test(block)
+      /--glass-fill:\s*var\(--glass-(?:side|center)-fill\)/.test(block) &&
+      /--glass-blur-current:\s*var\(--glass-(?:side|center)-blur\)/.test(block)
     )
   ) {
-    fail(`left, center, and right titlebar/content material regions must be visually fused: missing ${label} suppression`);
+    fail(`structural shell surface ${selector} must own a local Liquid Glass material`);
   }
 }
 
-if (!gridSurfaceBlocks.some((block) => /border-top:\s*0/.test(block))) {
-  fail("left, center, and right titlebar/content material regions must be visually fused: missing center content upper edge suppression");
+const shellTitlebarBlocks = cssBlocksForExactSelector(stylesForChecks, ".shell-titlebar");
+if (
+  !shellTitlebarBlocks.some(
+    (block) =>
+      /border:\s*0/.test(block) &&
+      /box-shadow:\s*none/.test(block) &&
+      /background:\s*transparent/.test(block)
+  )
+) {
+  fail("titlebar rows must be plain content inside the structural workbench columns, not separate glass surfaces");
 }
 
 const gridSurfaceAfterBlocks = cssBlocksForExactSelector(stylesForChecks, ".grid-surface::after");
-if (
-  !gridSurfaceAfterBlocks.some(
-    (block) =>
-      latestDeclarationValue(block, "display") === "none"
-  )
-) {
+if (gridSurfaceAfterBlocks.some((block) => latestDeclarationValue(block, "display") !== "none")) {
   fail("center content stage must not draw pseudo-borders around the preview area");
 }
 
-const centerTitlebarBlocks = cssBlocksForSelector(stylesForChecks, ".shell-titlebar-center");
-if (
-  !centerTitlebarBlocks.some(
-    (block) =>
-      /border-bottom-color:\s*transparent/.test(block) &&
-      /box-shadow:\s*none/.test(block)
-  )
-) {
-  fail("center titlebar/content join must suppress the titlebar lower edge and shadow");
-}
-
-if (
-  centerTitlebarBlocks.some(
-    (block) =>
-      hasVisibleBorderDeclaration(block, "border-bottom") ||
-      hasVisibleBorderDeclaration(block, "border-bottom-color")
-  ) ||
-  gridSurfaceBlocks.some(
-    (block) =>
-      hasVisibleBorderDeclaration(block, "border-top") ||
-      hasVisibleBorderDeclaration(block, "border-top-color") ||
-      hasNonNoneDeclaration(block, "box-shadow")
-  )
-) {
-  fail("center titlebar and center content must not each draw an internal seam or double border at their join");
+for (const selector of [".shell-titlebar", ".library-sidebar", ".grid-surface", ".inspector-panel"]) {
+  const blocks = cssBlocksForSelector(stylesForChecks, selector);
+  if (
+    blocks.some(
+      (block) =>
+        block.includes("var(--shell-titlebar-height)") &&
+        (/margin-top\s*:/.test(block) || /padding-top\s*:/.test(block))
+    )
+  ) {
+    fail(`structural shell surface ${selector} must not use titlebar-height offset hacks`);
+  }
+  if (
+    blocks.some(
+      (block) =>
+        /border-(?:top|bottom)-(?:color|width)\s*:/.test(block) ||
+        hasVisibleBorderDeclaration(block, "border-top") ||
+        hasVisibleBorderDeclaration(block, "border-bottom")
+    )
+  ) {
+    fail(`structural shell surface ${selector} must not rely on artificial border suppression at the titlebar/body join`);
+  }
 }
 
 const flatLibraryToolbarBlocks = cssBlocksForSelector(stylesForChecks, ".toolbar.toolbar-library");
@@ -1602,8 +1669,15 @@ if (
 }
 
 const inspectorBlocks = cssBlocksForSelector(stylesForChecks, ".inspector-panel");
-if (!inspectorBlocks.some((block) => /grid-row:\s*1\s*\/\s*-1/.test(block))) {
-  fail("right inspector panel must extend top-to-bottom in the workspace column");
+if (
+  !inspectorBlocks.some(
+    (block) =>
+      /height:\s*100%/.test(block) &&
+      /overflow:\s*auto/.test(block) &&
+      /background:\s*transparent/.test(block)
+  )
+) {
+  fail("right inspector panel must fill the right structural column body without becoming a separate titlebar-glued grid pane");
 }
 
 const previewStageBlocks = cssBlocksForSelector(stylesForChecks, ".preview-stage");
