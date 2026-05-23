@@ -12,7 +12,7 @@ use crate::db::{
 };
 use crate::thumbnails::generate_preview_placeholder;
 
-pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 1_000;
+pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 10;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +482,11 @@ mod tests {
 
     use super::*;
     use crate::db::{Database, MediaPageQuery, NewRoot};
+
+    #[test]
+    fn scan_options_default_uses_small_write_batch() {
+        assert_eq!(ScanOptions::default().write_batch_size, 10);
+    }
 
     #[test]
     fn scan_root_indexes_media_files_and_skips_non_media() {
