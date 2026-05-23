@@ -398,7 +398,7 @@ if (!/getThumbnailBlob:\s*async\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\
   fail("client.ts getThumbnailBlob must request thumbnail blob with default grid_320 target");
 }
 
-if (!/interface\s+BlobRequestOptions[\s\S]*?version\?:\s*number\s*\|\s*null/.test(client)) {
+if (!/interface\s+BlobRequestOptions[\s\S]*?version\?:\s*number\s*\|\s*string\s*\|\s*null/.test(client)) {
   fail("client.ts blob helpers must expose an optional version cache-buster");
 }
 
@@ -406,7 +406,7 @@ if (!/getThumbnailBlob[\s\S]*?query\(\{\s*target,\s*v:\s*options\.version/.test(
   fail("client.ts getThumbnailBlob must serialize version cache-buster as v");
 }
 
-if (!/getPreviewBlob:\s*\(fileId:\s*number,\s*options:\s*BlobRequestOptions\s*=\s*{}\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview`,\s*options\)/.test(client)) {
+if (!/getPreviewBlob:\s*\(fileId:\s*number,\s*options:\s*BlobRequestOptions\s*=\s*{}\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview\$\{query\(\{\s*v:\s*options\.version\s*}\)\}`,\s*options\)/.test(client)) {
   fail("client.ts getPreviewBlob must request original media bytes from /media/{fileId}/preview");
 }
 

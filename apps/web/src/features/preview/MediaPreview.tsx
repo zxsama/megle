@@ -3,6 +3,7 @@ import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { createCoreClient } from "@megle/core-client";
 import { getCoreClientConfig } from "../../core/client";
 import {
+  mediaContentSignature,
   previewPlaceholderDataUrl,
   requestThumbnailBlob
 } from "../../core/mediaResources";
@@ -19,6 +20,7 @@ export function MediaPreview({
   thumbnail?: ThumbnailResponse;
 }) {
   const previewPlaceholderUrl = previewPlaceholderDataUrl(media);
+  const originalVersionKey = mediaContentSignature(media);
   const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
   const fallbackThumbnail = useThumbnailFallbackUrl(
     source === "original" && hasLiveReadyThumbnail ? thumbnail.fileId : null,
@@ -35,6 +37,7 @@ export function MediaPreview({
         kind={media.kind}
         onMediaReady={onMediaReady}
         source="original"
+        versionKey={originalVersionKey}
       />
     );
   }
@@ -149,7 +152,7 @@ function ReadyPreviewMedia({
   kind?: string | null;
   onMediaReady?: () => void;
   source: "thumbnail" | "original";
-  versionKey?: number | null;
+  versionKey?: number | string | null;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
@@ -163,9 +166,10 @@ function ReadyPreviewMedia({
     const controller = source === "original" ? new AbortController() : null;
     const request = controller
       ? createCoreClient(getCoreClientConfig()).getPreviewBlob(fileId, {
-          signal: controller.signal
+          signal: controller.signal,
+          version: versionKey ?? null
         })
-      : requestThumbnailBlob(fileId, versionKey ?? null);
+      : requestThumbnailBlob(fileId, typeof versionKey === "number" ? versionKey : null);
     request
       .then((blob) => {
         if (revoked) return;

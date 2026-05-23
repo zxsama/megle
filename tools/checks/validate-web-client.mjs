@@ -101,11 +101,14 @@ if (!/getThumbnailBlob:\s*async\s*\([\s\S]*?fileId:\s*number,[\s\S]*?target:\s*"
 if (!/interface\s+BlobRequestOptions[\s\S]*?signal\?:\s*AbortSignal/.test(coreClient)) {
   fail("core-client blob helpers must expose AbortSignal request options");
 }
-if (!/interface\s+BlobRequestOptions[\s\S]*?version\?:\s*number\s*\|\s*null/.test(coreClient)) {
+if (!/interface\s+BlobRequestOptions[\s\S]*?version\?:\s*number\s*\|\s*string\s*\|\s*null/.test(coreClient)) {
   fail("core-client thumbnail blob helper must expose a version cache-buster option");
 }
 if (!/getThumbnailBlob[\s\S]*?query\(\{\s*target,\s*v:\s*options\.version/.test(coreClient)) {
   fail("core-client getThumbnailBlob must put the version cache-buster in the HTTP request URL");
+}
+if (!/getPreviewBlob[\s\S]*?query\(\{\s*v:\s*options\.version/.test(coreClient)) {
+  fail("core-client getPreviewBlob must put the version cache-buster in the HTTP request URL");
 }
 if (/thumbnail\$\{query\(\{\s*profile/.test(coreClient) || /thumbnail\/blob\$\{query\(\{\s*profile/.test(coreClient)) {
   fail("core-client thumbnail helpers must not serialize the retired profile query");
@@ -305,10 +308,13 @@ if (!/PreviewPanel/.test(libraryView) || !/selectedMedia/.test(previewPanel) || 
 if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
   fail("MediaPreview must load central previews from original media while keeping inspector previews on shared thumbnail blobs");
 }
+if (!/mediaContentSignature\(media\)/.test(mediaPreview) || !/source="original"[\s\S]*?versionKey=\{originalVersionKey\}/.test(mediaPreview)) {
+  fail("MediaPreview original preview must pass a media signature version key");
+}
 if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"ready"\s*\?\s*thumbnail\.fileId/.test(mediaPreview)) {
   fail("MediaPreview must not request thumbnail blobs without live ready metadata and updatedAt");
 }
-if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(mediaPreview)) {
+if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal,\s*version:\s*versionKey\s*\?\?\s*null\s*\}\)/.test(mediaPreview)) {
   fail("MediaPreview original-media requests must be aborted when central preview switches");
 }
 if (/useThumbnailFallbackUrl\(\s*thumbnail\?\.state\s*===\s*"ready"/.test(mediaPreview)) {

@@ -143,6 +143,12 @@ describe("createCoreClient", () => {
     assert.equal(recorded[0].signal, controller.signal);
   });
 
+  test("getPreviewBlob attaches version cache buster", async () => {
+    mockFetch("original bytes");
+    await client().getPreviewBlob(42, { version: "42:1000:2048:ready" });
+    assert.equal(recorded[0].url, `${BASE_URL}/media/42/preview?v=42%3A1000%3A2048%3Aready`);
+  });
+
   test("getThumbnail requests the default grid target", async () => {
     mockFetch({
       fileId: 42,

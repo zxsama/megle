@@ -741,11 +741,15 @@ if (!mediaPreview.includes("getPreviewBlob") || !mediaPreview.includes("requestT
   fail("MediaPreview must separate central original preview loading from shared thumbnail blob loading");
 }
 
+if (!/mediaContentSignature\(media\)/.test(mediaPreview) || !/source="original"[\s\S]*?versionKey=\{originalVersionKey\}/.test(mediaPreview)) {
+  fail("MediaPreview central original preview must reload on media signature changes");
+}
+
 if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"ready"\s*\?\s*thumbnail\.fileId/.test(mediaPreview)) {
   fail("MediaPreview must wait for live ready thumbnail metadata before requesting fallback thumbnail blobs");
 }
 
-if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(mediaPreview)) {
+if (!/AbortController/.test(mediaPreview) || !/getPreviewBlob\(fileId,\s*\{\s*signal:\s*controller\.signal,\s*version:\s*versionKey\s*\?\?\s*null\s*\}\)/.test(mediaPreview)) {
   fail("MediaPreview central original requests must use AbortController cleanup");
 }
 
