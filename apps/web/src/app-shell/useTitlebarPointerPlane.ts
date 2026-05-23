@@ -22,10 +22,8 @@ const TITLEBAR_NO_DRAG_SELECTOR = [
 
 interface DragState {
   pointerId: number;
-  startScreenX: number;
-  startScreenY: number;
-  startWindowX: number;
-  startWindowY: number;
+  pointerOffsetX: number;
+  pointerOffsetY: number;
 }
 
 export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) {
@@ -86,8 +84,8 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
       return;
     }
     pendingDragPositionRef.current = {
-      x: drag.startWindowX + (screenX - drag.startScreenX),
-      y: drag.startWindowY + (screenY - drag.startScreenY)
+      x: Math.round(screenX - drag.pointerOffsetX),
+      y: Math.round(screenY - drag.pointerOffsetY)
     };
     if (dragFrameRef.current) {
       return;
@@ -214,10 +212,8 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
 
     dragStateRef.current = {
       pointerId: event.pointerId,
-      startScreenX: event.screenX,
-      startScreenY: event.screenY,
-      startWindowX: bounds.x,
-      startWindowY: bounds.y
+      pointerOffsetX: Math.max(0, event.screenX - bounds.x),
+      pointerOffsetY: Math.max(0, event.screenY - bounds.y)
     };
   }
 

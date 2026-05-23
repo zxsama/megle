@@ -526,11 +526,11 @@ body {
   border-radius: inherit;
   overflow: hidden;
   background:
-    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.08), transparent 24%),
-    radial-gradient(circle at 86% 18%, rgba(151, 219, 226, 0.12), transparent 22%),
-    radial-gradient(circle at 24% 82%, rgba(239, 141, 127, 0.09), transparent 20%),
-    radial-gradient(circle at 72% 78%, rgba(143, 211, 162, 0.08), transparent 20%),
-    linear-gradient(180deg, rgba(11, 16, 20, 0.92), rgba(8, 12, 16, 0.88));
+    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.035), transparent 26%),
+    radial-gradient(circle at 86% 18%, rgba(151, 219, 226, 0.05), transparent 24%),
+    radial-gradient(circle at 24% 82%, rgba(239, 141, 127, 0.04), transparent 22%),
+    radial-gradient(circle at 72% 78%, rgba(143, 211, 162, 0.035), transparent 22%),
+    linear-gradient(180deg, rgba(11, 16, 20, 0.22), rgba(8, 12, 16, 0.18));
 }
 
 .workbench-column {
