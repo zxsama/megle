@@ -11,6 +11,7 @@
   --glass-control: rgba(246, 252, 255, 0.085);
   --glass-elevated: transparent;
   --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-window-stroke: rgba(255, 255, 255, 0.22);
   --glass-border-strong: rgba(151, 219, 226, 0.42);
   --glass-side-blur: 26px;
   --glass-side-fill: rgba(8, 12, 16, 0.38);
@@ -48,8 +49,11 @@
   --glass-pointer-illumination-opacity: 0.12;
   --glass-border-highlight-size: 92px;
   --glass-border-highlight-opacity: 0.28;
+  --glass-dither-opacity: 0.055;
+  --glass-backdrop-gradient-opacity: 0.75;
+  --glass-dither-texture: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128' viewBox='0 0 128 128'%3E%3Cfilter id='megle-blue-noise-dither' x='0' y='0' width='1' height='1' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='turbulence' baseFrequency='0.95' numOctaves='1' stitchTiles='stitch' seed='41' result='noise'/%3E%3CfeColorMatrix in='noise' type='saturate' values='0' result='mono'/%3E%3CfeConvolveMatrix in='mono' order='3' kernelMatrix='-1 -1 -1 -1 8 -1 -1 -1 -1' divisor='8' bias='0.5' preserveAlpha='true' result='highpass'/%3E%3CfeComponentTransfer in='highpass'%3E%3CfeFuncR type='discrete' tableValues='0.18 0.34 0.5 0.66 0.82'/%3E%3CfeFuncG type='discrete' tableValues='0.18 0.34 0.5 0.66 0.82'/%3E%3CfeFuncB type='discrete' tableValues='0.18 0.34 0.5 0.66 0.82'/%3E%3CfeFuncA type='table' tableValues='0 0.62'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='128' height='128' filter='url(%23megle-blue-noise-dither)' opacity='0.48'/%3E%3C/svg%3E");
   --glass-clear-dim: rgba(2, 5, 8, 0.52);
-  --radius-window: 28px;
+  --radius-window: 12px;
   --radius-overlay: 22px;
   --radius-panel: 18px;
   --radius-surface: 14px;
@@ -129,7 +133,7 @@ body {
   border-radius: var(--radius-panel);
 }
 
-.liquid-glass > :not(.liquid-glass-backdrop):not(.liquid-glass-lens):not(.liquid-glass-dim):not(.liquid-glass-edge) {
+.liquid-glass > :not(.liquid-glass-backdrop):not(.liquid-glass-lens):not(.liquid-glass-dither):not(.liquid-glass-dim):not(.liquid-glass-edge) {
   position: relative;
   z-index: 2;
 }
@@ -167,6 +171,7 @@ body {
 
 .liquid-glass-backdrop,
 .liquid-glass-lens,
+.liquid-glass-dither,
 .liquid-glass-dim,
 .liquid-glass-edge {
   position: absolute;
@@ -187,9 +192,6 @@ body {
   -webkit-backdrop-filter: blur(var(--glass-blur-current)) saturate(var(--glass-saturation));
   backdrop-filter: blur(var(--glass-blur-current)) saturate(var(--glass-saturation));
   filter: url("#megle-liquid-glass-refraction");
-  box-shadow:
-    inset 0 1px 0 var(--glass-edge-light),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .liquid-glass-lens {
@@ -207,6 +209,15 @@ body {
   transition:
     opacity 150ms ease,
     transform 150ms ease;
+}
+
+.liquid-glass-dither {
+  z-index: 2;
+  background-image: var(--glass-dither-texture);
+  background-size: 128px 128px;
+  filter: none;
+  mix-blend-mode: soft-light;
+  opacity: var(--glass-dither-opacity);
 }
 
 .liquid-glass::before,
@@ -236,6 +247,7 @@ body {
   border: 1px solid var(--glass-border-current);
   box-shadow:
     inset 0 1px 0 var(--glass-inner-light),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
     inset 0 0 28px rgba(255, 255, 255, 0.045);
 }
 
@@ -307,10 +319,26 @@ body {
 
 [data-interactive-pointer-target="true"]::before {
   z-index: -1;
+  opacity: calc(var(--interactive-pointer-opacity, 0) * var(--glass-background-glow-brightness));
   background:
+    var(--glass-dither-texture),
     radial-gradient(
       circle var(--glass-pointer-glow-size) at var(--interactive-pointer-x, 50%) var(--interactive-pointer-y, 50%),
-      rgba(255, 255, 255, calc(var(--interactive-pointer-opacity, 0) * var(--glass-background-glow-brightness) * var(--glass-pointer-fill-opacity))),
+      rgba(255, 255, 255, var(--glass-pointer-fill-opacity)),
+      transparent 100%
+    );
+  background-blend-mode: soft-light, normal;
+  background-size: 128px 128px, auto;
+  -webkit-mask-image:
+    radial-gradient(
+      circle var(--glass-pointer-glow-size) at var(--interactive-pointer-x, 50%) var(--interactive-pointer-y, 50%),
+      #000,
+      transparent 100%
+    );
+  mask-image:
+    radial-gradient(
+      circle var(--glass-pointer-glow-size) at var(--interactive-pointer-x, 50%) var(--interactive-pointer-y, 50%),
+      #000,
       transparent 100%
     );
 }
@@ -504,19 +532,56 @@ body {
   color: #f4f7f9;
   overflow: hidden;
   clip-path: inset(0 round var(--radius-window));
+  isolation: isolate;
 }
 
-.app-shell::before {
+.window-edge-frame,
+.window-edge-frame::before,
+.window-edge-frame::after {
   position: absolute;
-  inset: 0;
   content: "";
   pointer-events: none;
 }
 
-.app-shell::before {
-  z-index: 30;
-  border: 1px solid var(--glass-border);
+.window-edge-frame {
+  --glass-pointer-x: 50%;
+  --glass-pointer-y: 50%;
+  --glass-pointer-opacity: 0;
+  inset: 1px;
+  z-index: 80;
+  border-radius: calc(var(--radius-window) - 1px);
+}
+
+.window-edge-frame::before,
+.window-edge-frame::after {
+  inset: 0;
   border-radius: inherit;
+  padding: 1px;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.window-edge-frame::before {
+  background: var(--glass-window-stroke);
+  opacity: 0.72;
+}
+
+.window-edge-frame::after {
+  background:
+    radial-gradient(
+      circle var(--glass-border-highlight-size) at var(--glass-pointer-x, 50%) var(--glass-pointer-y, 50%),
+      rgba(222, 251, 255, 1),
+      rgba(151, 219, 226, 0.34) 38%,
+      transparent 70%
+    );
+  opacity: calc(var(--glass-pointer-opacity, 0) * var(--glass-border-highlight-opacity) * var(--glass-edge-highlight-brightness));
+  transition: opacity 110ms ease;
 }
 
 .shell-backdrop-canvas {
@@ -526,11 +591,23 @@ body {
   border-radius: inherit;
   overflow: hidden;
   background:
-    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.035), transparent 26%),
-    radial-gradient(circle at 86% 18%, rgba(151, 219, 226, 0.05), transparent 24%),
-    radial-gradient(circle at 24% 82%, rgba(239, 141, 127, 0.04), transparent 22%),
-    radial-gradient(circle at 72% 78%, rgba(143, 211, 162, 0.035), transparent 22%),
-    linear-gradient(180deg, rgba(11, 16, 20, 0.22), rgba(8, 12, 16, 0.18));
+    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, calc(var(--glass-backdrop-gradient-opacity) * 0.035)), transparent 26%),
+    radial-gradient(circle at 86% 18%, rgba(151, 219, 226, calc(var(--glass-backdrop-gradient-opacity) * 0.05)), transparent 24%),
+    radial-gradient(circle at 24% 82%, rgba(239, 141, 127, calc(var(--glass-backdrop-gradient-opacity) * 0.04)), transparent 22%),
+    radial-gradient(circle at 72% 78%, rgba(143, 211, 162, calc(var(--glass-backdrop-gradient-opacity) * 0.035)), transparent 22%),
+    linear-gradient(180deg, rgba(11, 16, 20, calc(var(--glass-backdrop-gradient-opacity) * 0.22)), rgba(8, 12, 16, calc(var(--glass-backdrop-gradient-opacity) * 0.18)));
+}
+
+.shell-backdrop-canvas::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+  background-image: var(--glass-dither-texture);
+  background-size: 128px 128px;
+  filter: none;
+  mix-blend-mode: soft-light;
+  opacity: calc(var(--glass-dither-opacity) * 0.8);
 }
 
 .workbench-column {
@@ -3863,8 +3940,74 @@ button:disabled {
   font-size: 12.5px;
 }
 
-.settings-style-slider input[type="range"] {
+.settings-style-slider-control {
+  display: grid;
+  align-items: center;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-pill);
+  background: var(--glass-control);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.settings-style-slider-control input[type="range"] {
+  position: relative;
+  z-index: 1;
+  height: 100%;
   width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.settings-style-slider-control input[type="range"]:focus-visible {
+  box-shadow: none;
+}
+
+.settings-style-slider-control input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background:
+    linear-gradient(90deg, rgba(151, 219, 226, 0.32), rgba(255, 255, 255, 0.12)),
+    rgba(255, 255, 255, 0.08);
+}
+
+.settings-style-slider-control input[type="range"]::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 1px solid rgba(222, 251, 255, 0.7);
+  border-radius: 50%;
+  background: rgba(236, 253, 255, 0.88);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.settings-style-slider-control input[type="range"]::-moz-range-track {
+  height: 4px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background:
+    linear-gradient(90deg, rgba(151, 219, 226, 0.32), rgba(255, 255, 255, 0.12)),
+    rgba(255, 255, 255, 0.08);
+}
+
+.settings-style-slider-control input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(222, 251, 255, 0.7);
+  border-radius: 50%;
+  background: rgba(236, 253, 255, 0.88);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .settings-style-slider input[type="color"] {

@@ -1,7 +1,8 @@
 const REQUIRED_PROPERTIES = [
   'backgroundMaterial: "acrylic"',
-  "transparent: true",
+  "transparent: false",
   'backgroundColor: "#00000000"',
+  "roundedCorners: true",
   "frame: false"
 ];
 const NO_TOP_LEVEL_SPREAD = "no top-level spread in BrowserWindow options";
@@ -17,7 +18,9 @@ export function inspectNativeBrowserWindowOptions(source) {
       backgroundMaterialSource: null,
       frameFalse: false,
       transparent: false,
+      nonLayeredHost: false,
       transparentBackgroundColor: false,
+      roundedCorners: false,
       disablesNativeMaterial: false,
       unsafeTopLevelSpreads: [],
       missingRequiredProperties: [...REQUIRED_PROPERTIES]
@@ -41,7 +44,9 @@ export function inspectNativeBrowserWindowOptions(source) {
     backgroundMaterialSource: firstNonCompliant.backgroundMaterialSource,
     frameFalse: windows.every((window) => window.frameFalse),
     transparent: windows.every((window) => window.transparent),
+    nonLayeredHost: windows.every((window) => window.nonLayeredHost),
     transparentBackgroundColor: windows.every((window) => window.transparentBackgroundColor),
+    roundedCorners: windows.every((window) => window.roundedCorners),
     disablesNativeMaterial: windows.some((window) => window.disablesNativeMaterial),
     unsafeTopLevelSpreads,
     missingRequiredProperties
@@ -63,17 +68,20 @@ function inspectBrowserWindowOptionsObject(optionsObject, windowIndex) {
     : null;
   const frameFalse = booleanLiteralValue(latest.get("frame")?.value) === false;
   const transparent = booleanLiteralValue(latest.get("transparent")?.value) === true;
+  const nonLayeredHost = booleanLiteralValue(latest.get("transparent")?.value) === false;
   const transparentBackgroundColor =
     stringLiteralValue(latest.get("backgroundColor")?.value) === "#00000000";
+  const roundedCorners = booleanLiteralValue(latest.get("roundedCorners")?.value) === true;
   const disablesNativeMaterial = backgroundMaterialProperties.some(
     (property) => stringLiteralValue(property.value) === "none"
   );
 
   const missingRequiredProperties = [];
   if (backgroundMaterial !== "acrylic") missingRequiredProperties.push(REQUIRED_PROPERTIES[0]);
-  if (!transparent) missingRequiredProperties.push(REQUIRED_PROPERTIES[1]);
+  if (!nonLayeredHost) missingRequiredProperties.push(REQUIRED_PROPERTIES[1]);
   if (!transparentBackgroundColor) missingRequiredProperties.push(REQUIRED_PROPERTIES[2]);
-  if (!frameFalse) missingRequiredProperties.push(REQUIRED_PROPERTIES[3]);
+  if (!roundedCorners) missingRequiredProperties.push(REQUIRED_PROPERTIES[3]);
+  if (!frameFalse) missingRequiredProperties.push(REQUIRED_PROPERTIES[4]);
   if (unsafeTopLevelSpreads.length) missingRequiredProperties.push(NO_TOP_LEVEL_SPREAD);
 
   return {
@@ -84,7 +92,9 @@ function inspectBrowserWindowOptionsObject(optionsObject, windowIndex) {
       : null,
     frameFalse,
     transparent,
+    nonLayeredHost,
     transparentBackgroundColor,
+    roundedCorners,
     disablesNativeMaterial,
     unsafeTopLevelSpreads,
     missingRequiredProperties

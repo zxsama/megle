@@ -42,13 +42,18 @@ interface LiquidGlassButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>
 const POINTER_RESET = "50%";
 const POINTER_OPACITY_HIDDEN = "0";
 const GLASS_POINTER_EDGE_PROXIMITY_PX = 112;
-const INTERACTIVE_AFFORDANCE_SELECTOR = [
-  'button:not([data-liquid-glass])',
-  'input:not([data-liquid-glass])',
-  'select:not([data-liquid-glass])',
-  'textarea:not([data-liquid-glass])',
+const WINDOW_EDGE_SURFACE_SELECTOR = '[data-window-edge-surface="true"]';
+const INTERACTIVE_AFFORDANCE_OWNER_SELECTOR = [
   ".tree-item",
-  ".tile-thumb"
+  ".tile-thumb",
+  ".settings-style-slider-control"
+].join(",");
+const INTERACTIVE_AFFORDANCE_SELECTOR = [
+  INTERACTIVE_AFFORDANCE_OWNER_SELECTOR,
+  'button:not([data-liquid-glass])',
+  'input:not([type="range"]):not([data-liquid-glass])',
+  'select:not([data-liquid-glass])',
+  'textarea:not([data-liquid-glass])'
 ].join(",");
 
 export function LiquidGlassLayer({ children }: { children: ReactNode }) {
@@ -70,6 +75,7 @@ export function LiquidGlassLayer({ children }: { children: ReactNode }) {
         animationFrame = window.requestAnimationFrame(() => {
           animationFrame = 0;
           if (latestPointer) {
+            updateWindowEdgePointers(latestPointer.x, latestPointer.y);
             updateLiquidGlassPointer(latestPointer.x, latestPointer.y);
             updateInteractiveAffordancePointers(latestPointer.x, latestPointer.y);
           }
@@ -80,21 +86,32 @@ export function LiquidGlassLayer({ children }: { children: ReactNode }) {
       requestPointerUpdate(event.clientX, event.clientY);
     }
 
-    function handlePointerExit() {
+    function handleMouseMove(event: globalThis.MouseEvent) {
+      requestPointerUpdate(event.clientX, event.clientY);
+    }
+
+    function handlePointerExit(event?: Event) {
+      if (event && pointerEventInsideViewport(event)) {
+        return;
+      }
       clearPointerFrame();
+      hideWindowEdgePointers();
       hideLiquidGlassPointers();
       hideInteractiveAffordancePointers();
     }
 
     window.addEventListener("pointermove", handlePointerMove, { passive: true });
+    window.addEventListener("mousemove", handleMouseMove, { passive: true });
     window.addEventListener("pointerleave", handlePointerExit);
     window.addEventListener("blur", handlePointerExit);
 
     return () => {
       clearPointerFrame();
       window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("pointerleave", handlePointerExit);
       window.removeEventListener("blur", handlePointerExit);
+      hideWindowEdgePointers();
       hideLiquidGlassPointers();
       hideInteractiveAffordancePointers();
     };
@@ -243,6 +260,7 @@ function LiquidGlassMaterialLayers({
       ) : null}
       {outlineOnly ? null : <span aria-hidden="true" className="liquid-glass-backdrop" />}
       {outlineOnly ? null : <span aria-hidden="true" className="liquid-glass-lens" />}
+      {outlineOnly ? null : <span aria-hidden="true" className="liquid-glass-dither" />}
       <span aria-hidden="true" className="liquid-glass-edge" />
     </>
   );
@@ -369,6 +387,30 @@ function shouldPressSurface<TElement extends HTMLElement>(
   return pressable && (target === currentTarget || currentTarget.contains(target as Node));
 }
 
+function updateWindowEdgePointers(clientX: number, clientY: number) {
+  const surfaces = document.querySelectorAll<HTMLElement>(WINDOW_EDGE_SURFACE_SELECTOR);
+  for (const surface of surfaces) {
+    const rect = surface.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      hideWindowEdgePointer(surface);
+      continue;
+    }
+    const maxDistance = pointerEdgeProximity(surface);
+    const distance = distanceToGlassEdge(clientX, clientY, rect);
+    if (distance > maxDistance) {
+      surface.dataset.windowEdgePointer = "idle";
+      surface.style.setProperty("--glass-pointer-opacity", POINTER_OPACITY_HIDDEN);
+      continue;
+    }
+    const pointer = pointerPercentForRect(clientX, clientY, rect);
+    const opacity = Math.pow(1 - distance / maxDistance, 1.55);
+    surface.dataset.windowEdgePointer = "active";
+    surface.style.setProperty("--glass-pointer-x", `${pointer.x}%`);
+    surface.style.setProperty("--glass-pointer-y", `${pointer.y}%`);
+    surface.style.setProperty("--glass-pointer-opacity", opacity.toFixed(3));
+  }
+}
+
 function updateLiquidGlassPointer(clientX: number, clientY: number) {
   const surfaces = document.querySelectorAll<HTMLElement>("[data-liquid-glass]");
   for (const surface of surfaces) {
@@ -384,7 +426,6 @@ function updateLiquidGlassPointer(clientX: number, clientY: number) {
       hideGlassPointer(surface);
       continue;
     }
-    const edgePoint = nearestPointOnGlassEdge(clientX, clientY, rect);
     const maxDistance = pointerEdgeProximity(surface);
     const distance = distanceToGlassEdge(clientX, clientY, rect);
     if (distance > maxDistance) {
@@ -392,12 +433,11 @@ function updateLiquidGlassPointer(clientX: number, clientY: number) {
       surface.style.setProperty("--glass-pointer-opacity", POINTER_OPACITY_HIDDEN);
       continue;
     }
-    const x = ((edgePoint.x - rect.left) / rect.width) * 100;
-    const y = ((edgePoint.y - rect.top) / rect.height) * 100;
+    const pointer = pointerPercentForRect(clientX, clientY, rect);
     const opacity = Math.pow(1 - distance / maxDistance, 1.55);
     surface.dataset.glassPointer = "active";
-    surface.style.setProperty("--glass-pointer-x", `${clampPercent(x)}%`);
-    surface.style.setProperty("--glass-pointer-y", `${clampPercent(y)}%`);
+    surface.style.setProperty("--glass-pointer-x", `${pointer.x}%`);
+    surface.style.setProperty("--glass-pointer-y", `${pointer.y}%`);
     surface.style.setProperty("--glass-pointer-opacity", opacity.toFixed(3));
   }
 }
@@ -438,8 +478,15 @@ function hideLiquidGlassPointers() {
   }
 }
 
+function hideWindowEdgePointers() {
+  const surfaces = document.querySelectorAll<HTMLElement>(WINDOW_EDGE_SURFACE_SELECTOR);
+  for (const surface of surfaces) {
+    hideWindowEdgePointer(surface);
+  }
+}
+
 function updateInteractiveAffordancePointers(clientX: number, clientY: number) {
-  const targets = document.querySelectorAll<HTMLElement>(INTERACTIVE_AFFORDANCE_SELECTOR);
+  const targets = interactiveAffordanceTargets();
   for (const target of targets) {
     if (target.closest('[data-titlebar-search="true"]')) {
       target.removeAttribute("data-interactive-pointer-target");
@@ -448,7 +495,7 @@ function updateInteractiveAffordancePointers(clientX: number, clientY: number) {
       continue;
     }
     target.dataset.interactivePointerTarget = "true";
-    if (target.matches(":disabled")) {
+    if (interactiveAffordanceDisabled(target)) {
       hideInteractiveAffordancePointer(target);
       continue;
     }
@@ -457,7 +504,6 @@ function updateInteractiveAffordancePointers(clientX: number, clientY: number) {
       hideInteractiveAffordancePointer(target);
       continue;
     }
-    const edgePoint = nearestPointOnGlassEdge(clientX, clientY, rect);
     const maxDistance = pointerEdgeProximity(target);
     const distance = distanceToGlassEdge(clientX, clientY, rect);
     if (distance > maxDistance) {
@@ -465,14 +511,37 @@ function updateInteractiveAffordancePointers(clientX: number, clientY: number) {
       target.style.setProperty("--interactive-pointer-opacity", POINTER_OPACITY_HIDDEN);
       continue;
     }
-    const x = ((edgePoint.x - rect.left) / rect.width) * 100;
-    const y = ((edgePoint.y - rect.top) / rect.height) * 100;
+    const pointer = pointerPercentForRect(clientX, clientY, rect);
     const opacity = Math.pow(1 - distance / maxDistance, 1.55);
     target.dataset.interactivePointer = "active";
-    target.style.setProperty("--interactive-pointer-x", `${clampPercent(x)}%`);
-    target.style.setProperty("--interactive-pointer-y", `${clampPercent(y)}%`);
+    target.style.setProperty("--interactive-pointer-x", `${pointer.x}%`);
+    target.style.setProperty("--interactive-pointer-y", `${pointer.y}%`);
     target.style.setProperty("--interactive-pointer-opacity", opacity.toFixed(3));
   }
+}
+
+function interactiveAffordanceTargets() {
+  const candidates = document.querySelectorAll<HTMLElement>(INTERACTIVE_AFFORDANCE_SELECTOR);
+  const targets = new Set<HTMLElement>();
+  for (const candidate of candidates) {
+    const owner = candidate.closest<HTMLElement>(INTERACTIVE_AFFORDANCE_OWNER_SELECTOR);
+    if (owner && owner !== candidate) {
+      candidate.removeAttribute("data-interactive-pointer-target");
+      candidate.removeAttribute("data-interactive-pointer");
+      candidate.style.setProperty("--interactive-pointer-opacity", POINTER_OPACITY_HIDDEN);
+      targets.add(owner);
+      continue;
+    }
+    targets.add(candidate);
+  }
+  return targets;
+}
+
+function interactiveAffordanceDisabled(target: HTMLElement) {
+  if (target.matches(":disabled,[aria-disabled='true']")) {
+    return true;
+  }
+  return target.matches(".settings-style-slider-control") && Boolean(target.querySelector("input:disabled"));
 }
 
 function hideInteractiveAffordancePointers() {
@@ -496,6 +565,37 @@ function hideInteractiveAffordancePointer(target: HTMLElement) {
 
 function pointerEdgeProximity(target: HTMLElement) {
   return GLASS_POINTER_EDGE_PROXIMITY_PX;
+}
+
+function pointerEventInsideViewport(event: Event) {
+  if (!("clientX" in event) || !("clientY" in event)) {
+    return false;
+  }
+  const clientX = Number(event.clientX);
+  const clientY = Number(event.clientY);
+  return (
+    Number.isFinite(clientX) &&
+    Number.isFinite(clientY) &&
+    clientX >= 0 &&
+    clientX <= window.innerWidth &&
+    clientY >= 0 &&
+    clientY <= window.innerHeight
+  );
+}
+
+function pointerPercentForRect(clientX: number, clientY: number, rect: DOMRect) {
+  const x = ((clamp(clientX, rect.left, rect.right) - rect.left) / rect.width) * 100;
+  const y = ((clamp(clientY, rect.top, rect.bottom) - rect.top) / rect.height) * 100;
+  return {
+    x: clampPercent(x),
+    y: clampPercent(y)
+  };
+}
+
+function hideWindowEdgePointer(target: HTMLElement) {
+  target.dataset.windowEdgePointer = "idle";
+  target.style.setProperty("--glass-pointer-opacity", POINTER_OPACITY_HIDDEN);
+  target.style.setProperty("--glass-pressure", "0");
 }
 
 function clamp(value: number, min: number, max: number) {

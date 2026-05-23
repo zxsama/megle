@@ -19,6 +19,8 @@ export interface InterfaceStylePreference {
   centerOverlayColor: string;
   centerSaturation: number;
   centerStrokeOpacity: number;
+  ditherOpacity: number;
+  backdropGradientStrength: number;
   edgeHighlightBrightness: number;
   edgeHighlightSize: number;
   haloBrightness: number;
@@ -32,7 +34,7 @@ export interface InterfaceStylePreference {
 }
 
 export const DEFAULT_INTERFACE_STYLE: InterfaceStylePreference = {
-  windowCornerRadius: 28,
+  windowCornerRadius: 12,
   surfaceCornerRadius: 18,
   controlCornerRadius: 10,
   contentCornerRadius: 8,
@@ -48,6 +50,8 @@ export const DEFAULT_INTERFACE_STYLE: InterfaceStylePreference = {
   centerOverlayColor: "#080c10",
   centerSaturation: 1.55,
   centerStrokeOpacity: 1,
+  ditherOpacity: 1,
+  backdropGradientStrength: 0.75,
   edgeHighlightBrightness: 6.5,
   edgeHighlightSize: 1,
   haloBrightness: 1.45,
@@ -61,7 +65,7 @@ export const DEFAULT_INTERFACE_STYLE: InterfaceStylePreference = {
 };
 
 export const INTERFACE_STYLE_LIMITS = {
-  windowCornerRadius: { min: 18, max: 40, step: 1 },
+  windowCornerRadius: { min: 12, max: 12, step: 1 },
   surfaceCornerRadius: { min: 10, max: 28, step: 1 },
   controlCornerRadius: { min: 6, max: 20, step: 1 },
   contentCornerRadius: { min: 0, max: 18, step: 1 },
@@ -75,6 +79,8 @@ export const INTERFACE_STYLE_LIMITS = {
   centerOverlayStrength: { min: 0, max: 2, step: 0.05 },
   centerSaturation: { min: 1, max: 2.2, step: 0.05 },
   centerStrokeOpacity: { min: 0, max: 2, step: 0.05 },
+  ditherOpacity: { min: 0, max: 2, step: 0.05 },
+  backdropGradientStrength: { min: 0, max: 1.5, step: 0.05 },
   edgeHighlightBrightness: { min: 0, max: 8, step: 0.25 },
   edgeHighlightSize: { min: 0.4, max: 2, step: 0.05 },
   haloBrightness: { min: 0, max: 2, step: 0.05 },
@@ -174,6 +180,16 @@ export function normalizeInterfaceStyle(input: unknown): InterfaceStylePreferenc
       INTERFACE_STYLE_LIMITS.centerStrokeOpacity,
       DEFAULT_INTERFACE_STYLE.centerStrokeOpacity
     ),
+    ditherOpacity: clampNumber(
+      source.ditherOpacity,
+      INTERFACE_STYLE_LIMITS.ditherOpacity,
+      DEFAULT_INTERFACE_STYLE.ditherOpacity
+    ),
+    backdropGradientStrength: clampNumber(
+      source.backdropGradientStrength,
+      INTERFACE_STYLE_LIMITS.backdropGradientStrength,
+      DEFAULT_INTERFACE_STYLE.backdropGradientStrength
+    ),
     edgeHighlightBrightness: clampNumber(
       source.edgeHighlightBrightness,
       INTERFACE_STYLE_LIMITS.edgeHighlightBrightness,
@@ -252,7 +268,7 @@ export function interfaceStyleToCssVariables(
   const overlayRadius = clampRounded(
     normalized.surfaceCornerRadius + 4,
     12,
-    normalized.windowCornerRadius
+    40
   );
   const insetSurfaceRadius = clampRounded(
     normalized.surfaceCornerRadius - 4,
@@ -274,11 +290,11 @@ export function interfaceStyleToCssVariables(
   );
   const centerOverlay = colorWithAlpha(
     normalized.centerOverlayColor,
-    0.34 * normalized.centerOverlayStrength * normalized.centerOpacity
+    0.38 * normalized.centerOverlayStrength * normalized.centerOpacity
   );
   const centerOverlayStrong = colorWithAlpha(
     normalized.centerOverlayColor,
-    0.46 * normalized.centerOverlayStrength * normalized.centerOpacity
+    0.5 * normalized.centerOverlayStrength * normalized.centerOpacity
   );
   const controlAlpha = 0.085 * normalized.centerOpacity;
   const clearDimAlpha = 0.52 * normalized.centerOverlayStrength;
@@ -292,6 +308,7 @@ export function interfaceStyleToCssVariables(
     normalized.centerOverlayColor,
     0.5 * normalized.dialogOverlayStrength * normalized.dialogOpacity
   );
+  const ditherOpacity = 0.055 * normalized.ditherOpacity;
   return {
     "--radius-window": `${roundCssNumber(normalized.windowCornerRadius)}px`,
     "--radius-overlay": `${roundCssNumber(overlayRadius)}px`,
@@ -310,6 +327,8 @@ export function interfaceStyleToCssVariables(
     "--glass-center-fill-strong": centerOverlayStrong,
     "--glass-center-saturation": String(roundCssNumber(normalized.centerSaturation)),
     "--glass-center-stroke": rgbWithAlpha(255, 255, 255, 0.14 * normalized.centerStrokeOpacity),
+    "--glass-dither-opacity": String(roundCssNumber(ditherOpacity)),
+    "--glass-backdrop-gradient-opacity": String(roundCssNumber(normalized.backdropGradientStrength)),
     "--glass-halo-brightness": String(roundCssNumber(normalized.haloBrightness)),
     "--glass-halo-falloff": String(roundCssNumber(normalized.haloFalloff)),
     "--glass-pointer-response-radius": String(roundCssNumber(normalized.pointerResponseRadius)),

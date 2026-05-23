@@ -82,25 +82,55 @@ if (!nativeMaterial.browserWindowOptionsFound) {
 
 for (const [condition, value] of [
   [/backgroundMaterial:\s*"acrylic"/.test(desktopMain), 'backgroundMaterial: "acrylic"'],
-  [nativeMaterial.transparent, "transparent: true"],
+  [nativeMaterial.nonLayeredHost, "transparent: false"],
   [nativeMaterial.transparentBackgroundColor, 'backgroundColor: "#00000000"'],
+  [nativeMaterial.roundedCorners, "roundedCorners: true"],
   [nativeMaterial.frameFalse, "frame: false"]
 ]) {
   if (!condition) {
-    fail(`desktop window must keep a frameless transparent shell with native acrylic support: missing ${value}`);
+    fail(`desktop window must keep a frameless non-layered native acrylic host so DWM can round the window: missing ${value}`);
   }
+}
+
+if (nativeMaterial.disablesNativeMaterial) {
+  fail('desktop window must not set backgroundMaterial: "none"; Windows blur requires native acrylic');
+}
+
+if (/\.setOpacity\s*\(/.test(desktopMain)) {
+  fail("desktop window reveal must not use opacity gating because it can leave Windows acrylic in an opaque gray launch state");
+}
+
+if (/titleBarStyle\s*:\s*"hidden"/.test(desktopMain)) {
+  fail('desktop BrowserWindow must not combine titleBarStyle: "hidden" with native acrylic; that Electron Windows path can stay opaque until resize');
+}
+
+if (/\.setShape\s*\(/.test(desktopMain)) {
+  fail("desktop window must not set a custom window region; Windows DWM cannot apply rounded corners to window regions");
 }
 
 if (nativeMaterial.unsafeTopLevelSpreads.length > 0) {
   fail("desktop BrowserWindow options must not use top-level spreads that can override acrylic transparency settings");
 }
 
-if (!/show:\s*false\b/.test(desktopMain)) {
-  fail("desktop window must stay hidden until the desktop shell is ready so startup never flashes a gray rectangular backing plate");
+if (!/show:\s*true\b/.test(desktopMain) || !/skipTaskbar:\s*true\b/.test(desktopMain)) {
+  fail("desktop window must start as an offscreen skip-taskbar composition bootstrap window so Windows acrylic is active before user-visible reveal");
 }
 
 if (!/ready-to-show/.test(desktopMain)) {
-  fail("desktop window must wait for ready-to-show before becoming visible");
+  fail("desktop window must wait for ready-to-show before moving the composition-primed window onscreen");
+}
+
+for (const value of [
+  "WINDOW_COMPOSITION_BOOTSTRAP_MARGIN_PX",
+  "compositionBootstrapPlacement",
+  "prepareWindowCompositionForReveal",
+  "restoreWindowFromCompositionBootstrap",
+  "primeWindowComposition",
+  "windowStatePersistenceEnabled"
+]) {
+  if (!desktopMain.includes(value)) {
+    fail(`desktop startup must use the offscreen Windows acrylic composition bootstrap: missing ${value}`);
+  }
 }
 
 for (const value of [
@@ -352,6 +382,11 @@ for (const value of [
 
 for (const [source, value, message] of [
   [titlebarPointerPlane, "TITLEBAR_PLANE_HALO_PX", "shared titlebar pointer plane must include a halo-zone radius instead of relying on direct hover only"],
+  [titlebarPointerPlane, "TITLEBAR_DRAG_START_THRESHOLD_PX", "titlebar drag must wait for movement threshold so a maximized click does not restore the window"],
+  [titlebarPointerPlane, "pendingDragStateRef", "titlebar drag must keep a pending drag state before restoring or moving the native window"],
+  [titlebarPointerPlane, "moveDrag", "titlebar drag movement must be owned by the desktop main process cursor coordinate system"],
+  [desktopMain, 'ipcMain.handle("megle:window-drag-move"', "desktop main must own window drag movement using native cursor coordinates"],
+  [desktopMain, "screen.getCursorScreenPoint", "desktop drag must use Electron's native screen cursor point instead of renderer PointerEvent screen coordinates"],
   [titlebarPointerPlane, "data-titlebar-surface", "shared titlebar pointer plane must route over annotated titlebar surfaces"],
   [appShell, "titlebarSurfaceProps", "AppShell must consume the shared titlebar pointer plane helper"],
   [shellTitlebar, "tasks-palette", "titlebar tasks control must participate in the shared titlebar pointer plane"],
@@ -365,6 +400,14 @@ for (const [source, value, message] of [
   if (!source.includes(value)) {
     fail(message);
   }
+}
+
+const titlebarPointerDownBody = extractFunctionBody(
+  titlebarPointerPlane,
+  "handleTitlebarPointerDown"
+);
+if (/\.beginDrag\s*\(/.test(titlebarPointerDownBody)) {
+  fail("titlebar pointerdown must only arm a pending drag; native restore/move begins after drag threshold is crossed");
 }
 
 for (const [source, value, message] of [
@@ -413,9 +456,52 @@ if (
   !/border-radius:\s*var\(--radius-window\)/.test(baseAppShellBlock) ||
   !/background:\s*transparent/.test(baseAppShellBlock) ||
   !/box-shadow:\s*none/.test(baseAppShellBlock) ||
-  !/overflow:\s*hidden/.test(baseAppShellBlock)
+  !/overflow:\s*hidden/.test(baseAppShellBlock) ||
+  !/clip-path:\s*inset\(0\s+round\s+var\(--radius-window\)\)/.test(baseAppShellBlock)
 ) {
-  fail("app shell must fill the transparent Electron window and clip child surfaces at the window radius");
+  fail("app shell must fill the native acrylic host and clip child surfaces at the DWM-matched host radius");
+}
+
+if (stylesForChecks.includes("--radius-window-host")) {
+  fail("window radius must use a single global --radius-window parameter, not separate host/window radius tokens");
+}
+
+if (!/--radius-window:\s*12px/.test(stylesForChecks)) {
+  fail("global window radius must be fixed to 12px to match the native DWM host corner");
+}
+
+if (/\.workbench-column::after[\s\S]*?border-color:\s*transparent/.test(stylesForChecks)) {
+  fail("workbench columns must keep their own liquid-glass layout strokes; do not hide global pane borders to fix the window edge");
+}
+
+if (/\.workbench-column\s*>\s*\.liquid-glass-edge[\s\S]*?display:\s*none/.test(stylesForChecks)) {
+  fail("workbench columns must keep pointer-driven liquid-glass edge layers active");
+}
+
+const windowEdgeFrameBlock = cssBlocksForSelector(stylesForChecks, ".window-edge-frame").join("\n");
+const windowEdgeFrameBeforeBlock = cssBlocksForSelector(stylesForChecks, ".window-edge-frame::before").join("\n");
+const windowEdgeFrameAfterBlock = cssBlocksForSelector(stylesForChecks, ".window-edge-frame::after").join("\n");
+if (
+  !appShell.includes('className="window-edge-frame"') ||
+  !appShell.includes('data-window-edge-surface="true"') ||
+  !liquidGlassSurface.includes('WINDOW_EDGE_SURFACE_SELECTOR = \'[data-window-edge-surface="true"]\'') ||
+  !liquidGlassSurface.includes("querySelectorAll<HTMLElement>(WINDOW_EDGE_SURFACE_SELECTOR)") ||
+  !liquidGlassSurface.includes("updateWindowEdgePointers") ||
+  !liquidGlassSurface.includes("hideWindowEdgePointers") ||
+  !/inset:\s*1px/.test(windowEdgeFrameBlock) ||
+  !/border-radius:\s*calc\(var\(--radius-window\)\s*-\s*1px\)/.test(windowEdgeFrameBlock) ||
+  !/background:\s*var\(--glass-window-stroke\)/.test(windowEdgeFrameBeforeBlock) ||
+  !/padding:\s*1px/.test(windowEdgeFrameBeforeBlock) ||
+  !/-webkit-mask-composite:\s*xor/.test(windowEdgeFrameBeforeBlock) ||
+  !/mask-composite:\s*exclude/.test(windowEdgeFrameBeforeBlock) ||
+  !/border-radius:\s*inherit/.test(windowEdgeFrameAfterBlock) ||
+  !/padding:\s*1px/.test(windowEdgeFrameAfterBlock) ||
+  !/radial-gradient\([\s\S]*var\(--glass-border-highlight-size\)[\s\S]*var\(--glass-pointer-x/.test(windowEdgeFrameAfterBlock) ||
+  !/opacity:\s*calc\(var\(--glass-pointer-opacity,\s*0\)\s*\*\s*var\(--glass-border-highlight-opacity\)\s*\*\s*var\(--glass-edge-highlight-brightness\)\)/.test(windowEdgeFrameAfterBlock) ||
+  !/-webkit-mask-composite:\s*xor/.test(windowEdgeFrameAfterBlock) ||
+  !/mask-composite:\s*exclude/.test(windowEdgeFrameAfterBlock)
+) {
+  fail("app shell outer stroke must be a dedicated top-level pointer-driven window edge frame, not a pane override or static border");
 }
 
 if (
@@ -1049,6 +1135,8 @@ for (const value of [
   "centerOverlayColor",
   "centerSaturation",
   "centerStrokeOpacity",
+  "ditherOpacity",
+  "backdropGradientStrength",
   "edgeHighlightBrightness",
   "edgeHighlightSize",
   "haloBrightness",
@@ -1079,6 +1167,8 @@ for (const value of [
   "--glass-center-blur",
   "--glass-center-fill",
   "--glass-center-stroke",
+  "--glass-dither-opacity",
+  "--glass-backdrop-gradient-opacity",
   "--glass-halo-brightness",
   "--glass-halo-falloff",
   "--glass-pointer-response-radius",
@@ -1102,6 +1192,10 @@ for (const value of [
 }
 
 const defaultInterfaceStyleBody = extractObjectBody(interfaceStyle, "DEFAULT_INTERFACE_STYLE");
+if (!/windowCornerRadius:\s*12\b/.test(defaultInterfaceStyleBody)) {
+  fail("default window corner radius must be fixed to 12px to match Windows DWM's native host radius");
+}
+
 if (!/haloBrightness:\s*(?:1\.[2-9]\d*|[2-9](?:\.\d+)?)\b/.test(defaultInterfaceStyleBody)) {
   fail("default halo brightness must be visibly stronger than the old 1x baseline");
 }
@@ -1118,6 +1212,7 @@ for (const value of [
   "Shared shape",
   "Side shell material",
   "Center workbench material",
+  "Glass smoothness",
   "Shared liquid glass interaction",
   "Dialog material",
   'id="window-corner-radius"',
@@ -1136,6 +1231,8 @@ for (const value of [
   'id="center-overlay-color"',
   'id="center-saturation"',
   'id="center-stroke-opacity"',
+  'id="dither-opacity"',
+  'id="backdrop-gradient-strength"',
   'id="edge-highlight-brightness"',
   'id="edge-highlight-size"',
   'id="halo-brightness"',
@@ -1230,6 +1327,89 @@ if (!stylesForChecks.includes("--glass-pointer-opacity")) {
   fail("global shell/overlay contract missing --glass-pointer-opacity in styles.css");
 }
 
+if (!stylesForChecks.includes("--glass-dither-opacity")) {
+  fail("global glass material contract missing --glass-dither-opacity for anti-banding control");
+}
+
+if (/fractalNoise/.test(stylesForChecks)) {
+  fail("glass dither texture must not use fractalNoise; it creates low-frequency clouding on acrylic gradients");
+}
+
+if (
+  !stylesForChecks.includes("megle-blue-noise-dither") ||
+  !stylesForChecks.includes("feConvolveMatrix") ||
+  !stylesForChecks.includes("type='turbulence'") ||
+  !stylesForChecks.includes("numOctaves='1'")
+) {
+  fail("glass dither texture must use a high-pass blue-noise-style turbulence mask for smoother acrylic gradients");
+}
+
+if (!liquidGlassSurface.includes("liquid-glass-dither")) {
+  fail("liquid glass material primitive must include an unfiltered anti-banding dither layer");
+}
+
+const glassDitherBlocks = cssBlocksForExactSelector(stylesForChecks, ".liquid-glass-dither");
+if (
+  !glassDitherBlocks.some(
+    (block) =>
+      /mix-blend-mode:\s*(?:overlay|soft-light)/.test(block) &&
+      /opacity:\s*var\(--glass-dither-opacity\)/.test(block) &&
+      /filter:\s*none/.test(block)
+  )
+) {
+  fail("liquid glass dither must be an unfiltered blend layer above blurred/acrylic material to reduce color banding");
+}
+
+const shellBackdropCanvasBlocks = cssBlocksForExactSelector(stylesForChecks, ".shell-backdrop-canvas");
+const shellBackdropDitherBlocks = cssBlocksForExactSelector(stylesForChecks, ".shell-backdrop-canvas::after");
+if (
+  !shellBackdropCanvasBlocks.some(
+    (block) =>
+      block.includes("--glass-backdrop-gradient-opacity") &&
+      /calc\(var\(--glass-backdrop-gradient-opacity\)\s*\*/.test(block)
+  )
+) {
+  fail("shell backdrop gradients must be intensity-controlled by --glass-backdrop-gradient-opacity to reduce banding globally");
+}
+
+if (
+  !shellBackdropDitherBlocks.some(
+    (block) =>
+      /background-image:\s*var\(--glass-dither-texture\)/.test(block) &&
+      /opacity:\s*calc\(var\(--glass-dither-opacity\)\s*\*/.test(block)
+  )
+) {
+  fail("shell backdrop must share the global anti-banding dither layer");
+}
+
+const interactivePointerBackgroundBlocks = cssBlocksForExactSelector(
+  stylesForChecks,
+  '[data-interactive-pointer-target="true"]::before'
+);
+if (
+  !interactivePointerBackgroundBlocks.some(
+    (block) =>
+      block.includes("--glass-dither-texture") &&
+      /background-blend-mode:\s*(?:soft-light|overlay),\s*normal/.test(block)
+  )
+) {
+  fail("interactive pointer background glow must include the global dither texture instead of drawing a clean banded radial gradient");
+}
+
+const interactivePointerEdgeBlocks = cssBlocksForExactSelector(
+  stylesForChecks,
+  '[data-interactive-pointer-target="true"]::after'
+);
+if (
+  !interactivePointerEdgeBlocks.some(
+    (block) =>
+      block.includes("--interactive-pointer-x") &&
+      block.includes("--interactive-pointer-y")
+  )
+) {
+  fail("interactive pointer edge highlights must use the same real cursor coordinates as the background glow");
+}
+
 for (const [token, minValue] of [
   ["--glass-pointer-fill-opacity", 0.024],
   ["--glass-pointer-illumination-opacity", 0.1],
@@ -1257,6 +1437,92 @@ for (const value of [
   }
 }
 
+const glassEdgeBlocks = cssBlocksForExactSelector(stylesForChecks, ".liquid-glass-edge");
+if (
+  !glassEdgeBlocks.some(
+    (block) =>
+      block.includes("--glass-pointer-x") &&
+      block.includes("--glass-pointer-y")
+  )
+) {
+  fail("liquid glass edge highlights must use the same real cursor coordinates as the background glow");
+}
+
+for (const value of [
+  "pointerPercentForRect",
+  "style.setProperty(\"--glass-pointer-x\"",
+  "style.setProperty(\"--interactive-pointer-x\""
+]) {
+  if (!liquidGlassSurface.includes(value)) {
+    fail(`liquid glass pointer routing must write real cursor coordinates instead of snapped edge coordinates: missing ${value}`);
+  }
+}
+
+if (
+  liquidGlassSurface.includes("'input:not([data-liquid-glass])'") ||
+  liquidGlassSurface.includes('"input:not([data-liquid-glass])"')
+) {
+  fail("interactive affordance routing must not target native inputs wholesale; range sliders need a stylable visual owner");
+}
+
+for (const value of [
+  "INTERACTIVE_AFFORDANCE_OWNER_SELECTOR",
+  ".settings-style-slider-control",
+  'input:not([type="range"]):not([data-liquid-glass])',
+  "interactiveAffordanceTargets"
+]) {
+  if (!liquidGlassSurface.includes(value)) {
+    fail(`interactive affordance routing must resolve pointer highlights to visual owner elements: missing ${value}`);
+  }
+}
+
+if (!settingsView.includes("settings-style-slider-control")) {
+  fail("Interface style sliders must wrap native range inputs in a stylable pointer-highlight owner");
+}
+
+if (!settingsView.includes("data-settings-slider-control={id}")) {
+  fail("Interface style slider visual owners must be addressable by slider id for pointer-highlight verification");
+}
+
+const settingsSliderControlBlocks = cssBlocksForExactSelector(stylesForChecks, ".settings-style-slider-control");
+if (
+  !settingsSliderControlBlocks.some(
+    (block) =>
+      /border:\s*1px\s+solid/.test(block) &&
+      block.includes("var(--radius-pill)") &&
+      block.includes("var(--glass-control)")
+  )
+) {
+  fail("Interface style slider controls must expose a single global visual stroke owner for local pointer highlights");
+}
+
+for (const functionName of [
+  "updateWindowEdgePointers",
+  "updateLiquidGlassPointer",
+  "updateInteractiveAffordancePointers"
+]) {
+  const body = extractFunctionBody(liquidGlassSurface, functionName);
+  if (
+    /const\s+edgePoint\s*=\s*nearestPointOnGlassEdge/.test(body) ||
+    /\(\(edgePoint\.x\s*-\s*rect\.left\)/.test(body) ||
+    /\(\(edgePoint\.y\s*-\s*rect\.top\)/.test(body)
+  ) {
+    fail(`${functionName} must not snap highlight coordinates to the nearest edge; use the real cursor position`);
+  }
+}
+
+const titlebarControlPointerBody = extractFunctionBody(
+  titlebarPointerPlane,
+  "updateTitlebarControlPointers"
+);
+if (
+  /const\s+edgePoint\s*=\s*nearestPointOnRect/.test(titlebarControlPointerBody) ||
+  /\(\(edgePoint\.x\s*-\s*rect\.left\)/.test(titlebarControlPointerBody) ||
+  /\(\(edgePoint\.y\s*-\s*rect\.top\)/.test(titlebarControlPointerBody)
+) {
+  fail("titlebar control pointer highlights must use the real cursor position, not snapped edge coordinates");
+}
+
 const glassBackdropBlocks = cssBlocksForExactSelector(stylesForChecks, ".liquid-glass-backdrop");
 if (
   !glassBackdropBlocks.some(
@@ -1266,6 +1532,28 @@ if (
   )
 ) {
   fail("liquid glass surfaces must keep CSS backdrop blur plus SVG refraction active in the renderer");
+}
+
+if (
+  glassBackdropBlocks.some(
+    (block) =>
+      /filter:\s*url\("#megle-liquid-glass-refraction"\)/.test(block) &&
+      /box-shadow\s*:/.test(block)
+  )
+) {
+  fail("liquid glass refraction backdrop must not draw 1px edge shadows; filtered edge lines create jagged/noisy borders");
+}
+
+const glassStructureBorderBlocks = cssBlocksForExactSelector(stylesForChecks, ".liquid-glass::after");
+if (
+  !glassStructureBorderBlocks.some(
+    (block) =>
+      /border:\s*1px\s+solid\s+var\(--glass-border-current\)/.test(block) &&
+      /inset\s+0\s+1px\s+0\s+var\(--glass-inner-light\)/.test(block) &&
+      /inset\s+0\s+-1px\s+0\s+rgba\(255,\s*255,\s*255,\s*0\.06\)/.test(block)
+  )
+) {
+  fail("liquid glass structural edge highlights must be drawn on the unfiltered border layer");
 }
 
 const glassLensBlocks = cssBlocksForExactSelector(stylesForChecks, ".liquid-glass-lens");
@@ -1295,6 +1583,7 @@ if (pointerHideBody.includes("--glass-pointer-x") || pointerHideBody.includes("-
 for (const value of [
   "useEffect",
   "window.addEventListener(\"pointermove\"",
+  "window.addEventListener(\"mousemove\"",
   "querySelectorAll<HTMLElement>(\"[data-liquid-glass]\"",
   "GLASS_POINTER_EDGE_PROXIMITY_PX",
   "updateLiquidGlassPointer",

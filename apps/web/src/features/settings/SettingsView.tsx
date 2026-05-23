@@ -127,6 +127,7 @@ function InterfaceStyleSection({ interfaceStyle }: { interfaceStyle: InterfaceSt
         <h3 className="settings-style-group-title">Shared shape</h3>
         <StyleSlider
           id="window-corner-radius"
+          disabled
           label="Window corner radius"
           max={limits.windowCornerRadius.max}
           min={limits.windowCornerRadius.min}
@@ -285,6 +286,29 @@ function InterfaceStyleSection({ interfaceStyle }: { interfaceStyle: InterfaceSt
         />
       </div>
       <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Glass smoothness</h3>
+        <StyleSlider
+          id="dither-opacity"
+          label="Dither strength"
+          max={limits.ditherOpacity.max}
+          min={limits.ditherOpacity.min}
+          onChange={(ditherOpacity) => setInterfaceStyle({ ditherOpacity })}
+          step={limits.ditherOpacity.step}
+          unit="x"
+          value={value.ditherOpacity}
+        />
+        <StyleSlider
+          id="backdrop-gradient-strength"
+          label="Backdrop gradient strength"
+          max={limits.backdropGradientStrength.max}
+          min={limits.backdropGradientStrength.min}
+          onChange={(backdropGradientStrength) => setInterfaceStyle({ backdropGradientStrength })}
+          step={limits.backdropGradientStrength.step}
+          unit="x"
+          value={value.backdropGradientStrength}
+        />
+      </div>
+      <div className="settings-style-group">
         <h3 className="settings-style-group-title">Shared liquid glass interaction</h3>
         <StyleSlider
           id="edge-highlight-brightness"
@@ -420,6 +444,7 @@ function ColorField({
 }
 
 function StyleSlider({
+  disabled = false,
   id,
   label,
   max,
@@ -429,6 +454,7 @@ function StyleSlider({
   unit = "x",
   value
 }: {
+  disabled?: boolean;
   id: string;
   label: string;
   max: number;
@@ -441,15 +467,18 @@ function StyleSlider({
   return (
     <label className="settings-style-slider no-drag" htmlFor={id}>
       <span>{label}</span>
-      <input
-        id={id}
-        max={max}
-        min={min}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
-        step={step}
-        type="range"
-        value={value}
-      />
+      <span className="settings-style-slider-control" data-settings-slider-control={id}>
+        <input
+          id={id}
+          disabled={disabled}
+          max={max}
+          min={min}
+          onChange={(event) => onChange(Number(event.currentTarget.value))}
+          step={step}
+          type="range"
+          value={value}
+        />
+      </span>
       <output htmlFor={id}>{formatStyleValue(value, unit)}</output>
     </label>
   );

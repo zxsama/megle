@@ -4,6 +4,7 @@ import { getWindowControls } from "../core/desktop";
 const TITLEBAR_CONTROL_SELECTOR = "[data-titlebar-control]";
 const TITLEBAR_SURFACE_SELECTOR = '[data-titlebar-surface="true"]';
 const TITLEBAR_PLANE_HALO_PX = 24;
+const TITLEBAR_DRAG_START_THRESHOLD_PX = 5;
 const TITLEBAR_CONTROL_POINTER_EDGE_PROXIMITY_PX = 156;
 const TITLEBAR_NO_DRAG_SELECTOR = [
   ".no-drag",
@@ -26,40 +27,108 @@ interface DragState {
   pointerOffsetY: number;
 }
 
+interface PendingDragState {
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startScreenX: number;
+  startScreenY: number;
+  titlebarOffsetY: number;
+  viewportWidth: number;
+  starting: boolean;
+}
+
 export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) {
   const dragStateRef = useRef<DragState | null>(null);
+  const pendingDragStateRef = useRef<PendingDragState | null>(null);
   const pointerCaptureRef = useRef<HTMLElement | null>(null);
   const dragFrameRef = useRef<number>(0);
-  const pendingDragPositionRef = useRef<{ x: number; y: number } | null>(null);
+  const pendingDragMoveRef = useRef(false);
 
   function releasePointerCapture(pointerId?: number) {
-    const drag = dragStateRef.current;
+    const trackedPointerId =
+      pointerId ?? dragStateRef.current?.pointerId ?? pendingDragStateRef.current?.pointerId;
     const captureTarget = pointerCaptureRef.current;
-    if (!drag || !captureTarget) {
+    if (!captureTarget || trackedPointerId === undefined) {
       pointerCaptureRef.current = null;
       return;
     }
-    if (pointerId !== undefined && drag.pointerId !== pointerId) {
-      return;
-    }
-    if (captureTarget.hasPointerCapture(drag.pointerId)) {
-      captureTarget.releasePointerCapture(drag.pointerId);
+    if (captureTarget.hasPointerCapture(trackedPointerId)) {
+      captureTarget.releasePointerCapture(trackedPointerId);
     }
     pointerCaptureRef.current = null;
   }
 
   function clearDrag(pointerId?: number) {
     const drag = dragStateRef.current;
-    if (!drag || (pointerId !== undefined && drag.pointerId !== pointerId)) {
+    const pending = pendingDragStateRef.current;
+    const trackedPointerId = drag?.pointerId ?? pending?.pointerId;
+    if (trackedPointerId === undefined || (pointerId !== undefined && trackedPointerId !== pointerId)) {
       return;
     }
     dragStateRef.current = null;
-    pendingDragPositionRef.current = null;
+    pendingDragStateRef.current = null;
+    pendingDragMoveRef.current = false;
     if (dragFrameRef.current) {
       window.cancelAnimationFrame(dragFrameRef.current);
       dragFrameRef.current = 0;
     }
-    releasePointerCapture(pointerId);
+    void getWindowControls()?.endDrag?.();
+    releasePointerCapture(trackedPointerId);
+  }
+
+  function scheduleNativeDragMove() {
+    pendingDragMoveRef.current = true;
+    if (dragFrameRef.current) {
+      return;
+    }
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = 0;
+      const controls = getWindowControls();
+      if (!pendingDragMoveRef.current || !controls?.moveDrag) return;
+      pendingDragMoveRef.current = false;
+      void controls.moveDrag();
+    });
+  }
+
+  async function startNativeDrag(
+    pending: PendingDragState,
+    point: { clientX: number; clientY: number; screenX: number; screenY: number; buttons: number }
+  ) {
+    const controls = getWindowControls();
+    if (!controls?.moveDrag || !controls.beginDrag || pending.starting) {
+      return;
+    }
+
+    pending.starting = true;
+    const bounds = await controls.beginDrag({
+      clientX: pending.startClientX,
+      screenX: point.screenX,
+      screenY: point.screenY,
+      titlebarOffsetY: pending.titlebarOffsetY,
+      viewportWidth: pending.viewportWidth
+    });
+    if (
+      !bounds ||
+      pendingDragStateRef.current !== pending ||
+      (point.buttons & 1) === 0
+    ) {
+      clearDrag(pending.pointerId);
+      return;
+    }
+
+    pendingDragStateRef.current = null;
+    const drag: DragState = {
+      pointerId: pending.pointerId,
+      pointerOffsetX: bounds.restoredFromMaximized
+        ? Math.max(0, point.screenX - bounds.x)
+        : Math.max(0, pending.startScreenX - bounds.x),
+      pointerOffsetY: bounds.restoredFromMaximized
+        ? Math.max(0, point.screenY - bounds.y)
+        : Math.max(0, pending.startScreenY - bounds.y)
+    };
+    dragStateRef.current = drag;
+    scheduleNativeDragMove();
   }
 
   function handlePointerPlaneMove(
@@ -71,9 +140,23 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     screenY: number
   ) {
     updateTitlebarPointerPlane(rootRef.current, clientX, clientY);
+    const pending = pendingDragStateRef.current;
+    if (pending?.pointerId === pointerId) {
+      if ((buttons & 1) === 0) {
+        clearDrag(pointerId);
+        return;
+      }
+      const distance = Math.hypot(clientX - pending.startClientX, clientY - pending.startClientY);
+      if (distance < TITLEBAR_DRAG_START_THRESHOLD_PX) {
+        return;
+      }
+      void startNativeDrag(pending, { clientX, clientY, screenX, screenY, buttons });
+      return;
+    }
+
     const drag = dragStateRef.current;
     const controls = getWindowControls();
-    if (!drag || drag.pointerId !== pointerId || !controls?.setPosition) {
+    if (!drag || drag.pointerId !== pointerId || !controls?.moveDrag) {
       if (drag && (buttons & 1) === 0) {
         clearDrag(drag.pointerId);
       }
@@ -83,19 +166,7 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
       clearDrag(pointerId);
       return;
     }
-    pendingDragPositionRef.current = {
-      x: Math.round(screenX - drag.pointerOffsetX),
-      y: Math.round(screenY - drag.pointerOffsetY)
-    };
-    if (dragFrameRef.current) {
-      return;
-    }
-    dragFrameRef.current = window.requestAnimationFrame(() => {
-      dragFrameRef.current = 0;
-      const pending = pendingDragPositionRef.current;
-      if (!pending) return;
-      void controls.setPosition(pending.x, pending.y);
-    });
+    scheduleNativeDragMove();
   }
 
   function handlePointerPlaneExit(pointerId?: number) {
@@ -188,7 +259,7 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     }
 
     const controls = getWindowControls();
-    if (!controls?.setPosition || !controls.beginDrag) {
+    if (!controls?.moveDrag || !controls.beginDrag) {
       return;
     }
 
@@ -198,22 +269,15 @@ export function useTitlebarPointerPlane(rootRef: RefObject<HTMLElement | null>) 
     pointerCaptureRef.current = captureTarget;
 
     const titlebarRect = captureTarget.getBoundingClientRect();
-    const bounds = await controls.beginDrag({
-      clientX: event.clientX,
-      screenX: event.screenX,
-      screenY: event.screenY,
-      titlebarOffsetY: event.clientY - titlebarRect.top,
-      viewportWidth: window.innerWidth
-    });
-    if (!bounds) {
-      releasePointerCapture(event.pointerId);
-      return;
-    }
-
-    dragStateRef.current = {
+    pendingDragStateRef.current = {
       pointerId: event.pointerId,
-      pointerOffsetX: Math.max(0, event.screenX - bounds.x),
-      pointerOffsetY: Math.max(0, event.screenY - bounds.y)
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startScreenX: event.screenX,
+      startScreenY: event.screenY,
+      titlebarOffsetY: event.clientY - titlebarRect.top,
+      viewportWidth: window.innerWidth,
+      starting: false
     };
   }
 
@@ -278,19 +342,17 @@ function updateTitlebarPointerPlane(
       continue;
     }
 
-    const edgePoint = nearestPointOnRect(clientX, clientY, rect);
     const distance = distanceToRectEdge(clientX, clientY, rect);
     if (distance > TITLEBAR_CONTROL_POINTER_EDGE_PROXIMITY_PX) {
       resetTitlebarControlPointer(control);
       continue;
     }
 
-    const x = ((edgePoint.x - rect.left) / rect.width) * 100;
-    const y = ((edgePoint.y - rect.top) / rect.height) * 100;
+    const pointer = pointerPercentForRect(clientX, clientY, rect);
     const opacity = Math.pow(1 - distance / TITLEBAR_CONTROL_POINTER_EDGE_PROXIMITY_PX, 1.55);
     control.dataset.glassPointer = "active";
-    control.style.setProperty("--glass-pointer-x", `${clampPercent(x)}%`);
-    control.style.setProperty("--glass-pointer-y", `${clampPercent(y)}%`);
+    control.style.setProperty("--glass-pointer-x", `${pointer.x}%`);
+    control.style.setProperty("--glass-pointer-y", `${pointer.y}%`);
     control.style.setProperty("--glass-pointer-opacity", opacity.toFixed(3));
   }
 }
@@ -359,6 +421,15 @@ function pointInsideExpandedRect(rect: DOMRect, clientX: number, clientY: number
     clientY >= rect.top - expandBy &&
     clientY <= rect.bottom + expandBy
   );
+}
+
+function pointerPercentForRect(clientX: number, clientY: number, rect: DOMRect) {
+  const x = ((clamp(clientX, rect.left, rect.right) - rect.left) / rect.width) * 100;
+  const y = ((clamp(clientY, rect.top, rect.bottom) - rect.top) / rect.height) * 100;
+  return {
+    x: clampPercent(x),
+    y: clampPercent(y)
+  };
 }
 
 function clamp(value: number, min: number, max: number) {

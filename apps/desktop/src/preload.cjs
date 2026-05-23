@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld("megleDesktop", {
     close: () => ipcRenderer.invoke("megle:window-close"),
     isMaximized: () => ipcRenderer.invoke("megle:window-is-maximized"),
     beginDrag: (payload) => ipcRenderer.invoke("megle:window-begin-drag", payload),
+    moveDrag: () => ipcRenderer.invoke("megle:window-drag-move"),
+    endDrag: () => ipcRenderer.invoke("megle:window-end-drag"),
     getBounds: () => ipcRenderer.invoke("megle:window-get-bounds"),
     setPosition: (x, y) => ipcRenderer.invoke("megle:window-set-position", x, y)
   },

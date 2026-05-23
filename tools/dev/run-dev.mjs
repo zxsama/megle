@@ -105,10 +105,13 @@ if (process.env.MEGLE_ELECTRON_USER_DATA_DIR) {
   electronArgs.unshift(`--user-data-dir=${path.resolve(process.env.MEGLE_ELECTRON_USER_DATA_DIR)}`);
 }
 if (process.env.MEGLE_REMOTE_DEBUG === "1") {
-  electronArgs.unshift("--remote-debugging-port=9222");
+  electronArgs.unshift(`--remote-debugging-port=${process.env.MEGLE_REMOTE_DEBUG_PORT ?? "9222"}`);
 }
 if (process.env.MEGLE_VISUAL_HARNESS === "1") {
   electronArgs.push("--megle-visual-harness=1");
+}
+if (process.env.MEGLE_VISUAL_RUN_ID) {
+  electronArgs.push(`--megle-visual-run-id=${process.env.MEGLE_VISUAL_RUN_ID}`);
 }
 const electron = spawnChild(electronCommand(), electronArgs);
 electron.on("exit", (code) => {

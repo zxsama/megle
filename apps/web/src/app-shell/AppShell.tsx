@@ -29,6 +29,12 @@ export function AppShell({
   return (
     <main ref={shellRef} className="app-shell" data-layout={layout}>
       <div className="shell-backdrop-canvas" aria-hidden="true" />
+      <div
+        className="window-edge-frame"
+        data-window-edge-surface="true"
+        data-window-edge-pointer="idle"
+        aria-hidden="true"
+      />
       <LiquidGlassSurface
         as="section"
         className="workbench-column workbench-column-left"

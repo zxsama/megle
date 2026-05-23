@@ -15,7 +15,15 @@ export interface DesktopWindowControls {
     screenY: number;
     titlebarOffsetY: number;
     viewportWidth: number;
-  }) => Promise<{ x: number; y: number; width: number; height: number } | null>;
+  }) => Promise<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    restoredFromMaximized?: boolean;
+  } | null>;
+  moveDrag: () => Promise<boolean>;
+  endDrag: () => Promise<boolean>;
   getBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
   setPosition: (x: number, y: number) => Promise<boolean>;
 }

@@ -27,9 +27,14 @@ let mainWindowReadyToShow: Promise<void> | null = null;
 let shellReadyRevealPromise: Promise<boolean> | null = null;
 let shellReadyVisibleWindowId: number | null = null;
 let shellReadyFailureFallbackTimer: NodeJS.Timeout | null = null;
-const WINDOW_CORNER_RADIUS_PX = 28;
+let activeWindowDrag: { pointerOffsetX: number; pointerOffsetY: number } | null = null;
+let launchWindowPlacement: WindowPlacement | null = null;
+let launchWindowMaximized = false;
+let windowStatePersistenceEnabled = false;
+const WINDOW_COMPOSITION_BOOTSTRAP_MARGIN_PX = 96;
 const PERSIST_DEBOUNCE_MS = 500;
 const SHELL_READY_FAILURE_TIMEOUT_MS = 4000;
+const WINDOW_COMPOSITION_REFRESH_DELAYS_MS = [34, 140, 420] as const;
 
 interface WindowState {
   width: number;
@@ -37,6 +42,13 @@ interface WindowState {
   x?: number;
   y?: number;
   maximized: boolean;
+}
+
+interface WindowPlacement {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
 }
 
 const DEFAULT_WINDOW_STATE: WindowState = {
@@ -107,11 +119,12 @@ ipcMain.handle(
   ) => {
     if (!mainWindow) return null;
 
+    const cursor = screen.getCursorScreenPoint();
     if (mainWindow.isMaximized()) {
       const restored = mainWindow.getNormalBounds();
       const pointerRatioX = clampNumber(payload.clientX / Math.max(payload.viewportWidth, 1), 0, 1);
-      const targetX = Math.round(payload.screenX - restored.width * pointerRatioX);
-      const targetY = Math.round(payload.screenY - Math.max(0, payload.titlebarOffsetY));
+      const targetX = Math.round(cursor.x - restored.width * pointerRatioX);
+      const targetY = Math.round(cursor.y - Math.max(0, payload.titlebarOffsetY));
       mainWindow.unmaximize();
       mainWindow.setBounds({
         x: targetX,
@@ -119,13 +132,46 @@ ipcMain.handle(
         width: restored.width,
         height: restored.height
       });
-      applyWindowShape(mainWindow);
-      return { x: targetX, y: targetY, width: restored.width, height: restored.height };
+      refreshWindowComposition(mainWindow);
+      activeWindowDrag = {
+        pointerOffsetX: cursor.x - targetX,
+        pointerOffsetY: cursor.y - targetY
+      };
+      return {
+        x: targetX,
+        y: targetY,
+        width: restored.width,
+        height: restored.height,
+        restoredFromMaximized: true
+      };
     }
 
-    return mainWindow.getBounds();
+    const bounds = mainWindow.getBounds();
+    activeWindowDrag = {
+      pointerOffsetX: cursor.x - bounds.x,
+      pointerOffsetY: cursor.y - bounds.y
+    };
+    return {
+      ...bounds,
+      restoredFromMaximized: false
+    };
   }
 );
+
+ipcMain.handle("megle:window-drag-move", () => {
+  if (!mainWindow || !activeWindowDrag) return false;
+  const cursor = screen.getCursorScreenPoint();
+  mainWindow.setPosition(
+    Math.round(cursor.x - activeWindowDrag.pointerOffsetX),
+    Math.round(cursor.y - activeWindowDrag.pointerOffsetY)
+  );
+  return true;
+});
+
+ipcMain.handle("megle:window-end-drag", () => {
+  activeWindowDrag = null;
+  return true;
+});
 
 ipcMain.handle("megle:shell-reveal-path", (_event, targetPath: string) => {
   if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
@@ -201,21 +247,28 @@ ipcMain.handle("megle:visual-capture-page", async () => {
 async function createWindow(): Promise<void> {
   const session = await ensureCoreReady();
   const state = await loadWindowState();
-  const placement = clampWindowPlacement(state);
+  const placement = resolveVisibleWindowPlacement(clampWindowPlacement(state));
+  const bootstrapPlacement = compositionBootstrapPlacement(placement);
+  const runId = visualHarnessRunId();
+  launchWindowPlacement = placement;
+  launchWindowMaximized = state.maximized;
+  windowStatePersistenceEnabled = false;
 
   mainWindow = new BrowserWindow({
+    title: runId ? `Megle ${runId}` : "Megle",
     width: placement.width,
     height: placement.height,
-    x: placement.x,
-    y: placement.y,
+    x: bootstrapPlacement.x,
+    y: bootstrapPlacement.y,
     minWidth: 1100,
     minHeight: 720,
     backgroundMaterial: "acrylic",
-    transparent: true,
+    transparent: false,
     backgroundColor: "#00000000",
-    show: false,
+    roundedCorners: true,
+    show: true,
     frame: false,
-    titleBarStyle: "hidden",
+    skipTaskbar: true,
     webPreferences: {
       preload: fileURLToPath(new URL("./preload.cjs", import.meta.url)),
       contextIsolation: true,
@@ -228,22 +281,19 @@ async function createWindow(): Promise<void> {
     }
   });
   const window = mainWindow;
-  window.setBackgroundMaterial("acrylic");
-  window.setOpacity(0);
-  applyWindowShape(window);
+  applyWindowMaterial(window);
   shellReadyVisibleWindowId = null;
   shellReadyRevealPromise = null;
   clearShellReadyFailureFallback();
   mainWindowReadyToShow = new Promise<void>((resolve) => {
     window.once("ready-to-show", () => {
-      armShellReadyFailureFallback(window);
-      resolve();
+      void (async () => {
+        await prepareWindowCompositionForReveal(window);
+        armShellReadyFailureFallback(window);
+        resolve();
+      })();
     });
   });
-
-  if (state.maximized) {
-    window.maximize();
-  }
 
   window.webContents.on(
     "did-fail-load",
@@ -261,13 +311,20 @@ async function createWindow(): Promise<void> {
   // writes synchronously so a clean exit always flushes the latest bounds.
   window.on("move", schedulePersistWindowState);
   window.on("resize", () => {
-    applyWindowShape(window);
+    refreshWindowComposition(window);
     schedulePersistWindowState();
   });
-  window.on("maximize", () => applyWindowShape(window));
-  window.on("unmaximize", () => applyWindowShape(window));
+  window.on("maximize", () => refreshWindowComposition(window));
+  window.on("unmaximize", () => refreshWindowComposition(window));
+  window.on("blur", () => {
+    activeWindowDrag = null;
+  });
 
   window.on("closed", () => {
+    activeWindowDrag = null;
+    launchWindowPlacement = null;
+    launchWindowMaximized = false;
+    windowStatePersistenceEnabled = false;
     clearShellReadyFailureFallback();
     mainWindowReadyToShow = null;
     shellReadyRevealPromise = null;
@@ -326,6 +383,13 @@ function isVisualHarnessEnabled(): boolean {
   );
 }
 
+function visualHarnessRunId(): string | null {
+  const fromEnv = process.env.MEGLE_VISUAL_RUN_ID?.trim();
+  if (fromEnv) return fromEnv;
+  const arg = process.argv.find((item) => item.startsWith("--megle-visual-run-id="));
+  return arg ? arg.slice("--megle-visual-run-id=".length) : null;
+}
+
 async function waitForRendererFrame(window: BrowserWindow) {
   if (window.isDestroyed()) return;
   try {
@@ -368,7 +432,8 @@ async function revealMainWindow(
   if (shellReadyVisibleWindowId === window.id) {
     return true;
   }
-  window.show();
+  applyWindowMaterial(window);
+  restoreWindowFromCompositionBootstrap(window);
   if (waitForRendererPaint) {
     await waitForRendererFrame(window);
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -376,8 +441,11 @@ async function revealMainWindow(
   if (window.isDestroyed()) {
     return false;
   }
-  window.setOpacity(1);
+  scheduleWindowCompositionRefresh(window);
+  window.setSkipTaskbar(false);
+  window.show();
   window.focus();
+  windowStatePersistenceEnabled = true;
   shellReadyVisibleWindowId = window.id;
   return true;
 }
@@ -478,7 +546,34 @@ function clampWindowPlacement(state: WindowState): {
   };
 }
 
+function resolveVisibleWindowPlacement(placement: {
+  width: number;
+  height: number;
+  x?: number;
+  y?: number;
+}): WindowPlacement {
+  if (typeof placement.x === "number" && typeof placement.y === "number") {
+    return {
+      width: placement.width,
+      height: placement.height,
+      x: placement.x,
+      y: placement.y
+    };
+  }
+
+  const workArea = screen.getPrimaryDisplay().workArea;
+  return {
+    width: placement.width,
+    height: placement.height,
+    x: Math.round(workArea.x + Math.max(0, (workArea.width - placement.width) / 2)),
+    y: Math.round(workArea.y + Math.max(0, (workArea.height - placement.height) / 2))
+  };
+}
+
 function schedulePersistWindowState(): void {
+  if (!windowStatePersistenceEnabled) {
+    return;
+  }
   if (persistDebounceTimer) {
     clearTimeout(persistDebounceTimer);
   }
@@ -488,44 +583,115 @@ function schedulePersistWindowState(): void {
   }, PERSIST_DEBOUNCE_MS);
 }
 
-function applyWindowShape(window: BrowserWindow): void {
-  if (process.platform !== "win32" || window.isDestroyed()) {
+function applyWindowMaterial(window: BrowserWindow): void {
+  if (window.isDestroyed()) {
     return;
   }
-
-  const bounds = window.getBounds();
-  if (window.isMaximized()) {
-    window.setShape([{ x: 0, y: 0, width: bounds.width, height: bounds.height }]);
-    return;
-  }
-
-  window.setShape(buildRoundedRectShape(bounds.width, bounds.height, WINDOW_CORNER_RADIUS_PX));
+  window.setBackgroundColor("#00000000");
+  window.setBackgroundMaterial("acrylic");
 }
 
-function buildRoundedRectShape(width: number, height: number, radius: number) {
-  const safeRadius = Math.max(0, Math.min(radius, Math.floor(width / 2), Math.floor(height / 2)));
-  if (safeRadius === 0) {
-    return [{ x: 0, y: 0, width, height }];
+async function prepareWindowCompositionForReveal(window: BrowserWindow): Promise<void> {
+  if (window.isDestroyed()) {
+    return;
+  }
+  window.setSkipTaskbar(true);
+  applyWindowMaterial(window);
+  primeWindowComposition(window);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  if (!window.isDestroyed()) {
+    primeWindowComposition(window);
+  }
+}
+
+function restoreWindowFromCompositionBootstrap(window: BrowserWindow): void {
+  const placement = launchWindowPlacement;
+  if (!placement || window.isDestroyed()) {
+    return;
   }
 
-  const rects: Array<{ x: number; y: number; width: number; height: number }> = [];
-  for (let y = 0; y < height; y += 1) {
-    let inset = 0;
-    if (y < safeRadius) {
-      const dy = safeRadius - y - 0.5;
-      inset = Math.max(0, Math.ceil(safeRadius - Math.sqrt(safeRadius * safeRadius - dy * dy)));
-    } else if (y >= height - safeRadius) {
-      const mirrored = height - y - 1;
-      const dy = safeRadius - mirrored - 0.5;
-      inset = Math.max(0, Math.ceil(safeRadius - Math.sqrt(safeRadius * safeRadius - dy * dy)));
-    }
-    rects.push({ x: inset, y, width: Math.max(0, width - inset * 2), height: 1 });
+  windowStatePersistenceEnabled = false;
+  window.setBounds(
+    {
+      x: placement.x,
+      y: placement.y,
+      width: placement.width,
+      height: placement.height
+    },
+    false
+  );
+  refreshWindowComposition(window);
+  if (launchWindowMaximized) {
+    window.maximize();
   }
-  return rects.filter((rect) => rect.width > 0);
+}
+
+function refreshWindowComposition(window: BrowserWindow): void {
+  applyWindowMaterial(window);
+}
+
+function scheduleWindowCompositionRefresh(window: BrowserWindow): void {
+  refreshWindowComposition(window);
+  for (const delay of WINDOW_COMPOSITION_REFRESH_DELAYS_MS) {
+    setTimeout(() => {
+      if (!window.isDestroyed()) {
+        refreshWindowComposition(window);
+      }
+    }, delay);
+  }
+}
+
+function primeWindowComposition(window: BrowserWindow): void {
+  if (window.isDestroyed()) {
+    return;
+  }
+  const bounds = window.getBounds();
+  if (!window.isMaximized() && bounds.width > 2 && bounds.height > 2) {
+    window.setBounds({ ...bounds, width: bounds.width + 1 }, false);
+    window.setBounds(bounds, false);
+  }
+  refreshWindowComposition(window);
 }
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function compositionBootstrapPlacement(placement: {
+  width: number;
+  height: number;
+}): { x: number; y: number } {
+  const displays = screen.getAllDisplays();
+  const union = displays.reduce(
+    (acc, display) => {
+      const bounds = display.bounds;
+      return {
+        left: Math.min(acc.left, bounds.x),
+        top: Math.min(acc.top, bounds.y),
+        right: Math.max(acc.right, bounds.x + bounds.width),
+        bottom: Math.max(acc.bottom, bounds.y + bounds.height)
+      };
+    },
+    {
+      left: Number.POSITIVE_INFINITY,
+      top: Number.POSITIVE_INFINITY,
+      right: Number.NEGATIVE_INFINITY,
+      bottom: Number.NEGATIVE_INFINITY
+    }
+  );
+
+  if (!Number.isFinite(union.left) || !Number.isFinite(union.bottom)) {
+    const primary = screen.getPrimaryDisplay().bounds;
+    return {
+      x: primary.x - placement.width - WINDOW_COMPOSITION_BOOTSTRAP_MARGIN_PX,
+      y: primary.y - placement.height - WINDOW_COMPOSITION_BOOTSTRAP_MARGIN_PX
+    };
+  }
+
+  return {
+    x: union.left,
+    y: union.bottom + WINDOW_COMPOSITION_BOOTSTRAP_MARGIN_PX
+  };
 }
 
 async function persistWindowState(): Promise<void> {

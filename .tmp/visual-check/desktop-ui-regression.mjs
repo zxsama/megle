@@ -15,7 +15,9 @@ const logDir = path.join(visualRoot, "logs");
 const dataDir = path.join(visualRoot, "data-desktop-ui");
 const electronUserDataDir = path.join(dataDir, "electron-user-data");
 const webUrl = "http://127.0.0.1:5179";
-const debugPort = 9222;
+const debugPort = Number(process.env.MEGLE_VISUAL_DEBUG_PORT ?? process.env.MEGLE_REMOTE_DEBUG_PORT ?? 9239);
+const visualRunId = `megle-visual-${Date.now().toString(36)}-${process.pid}`;
+const runStartedAt = new Date();
 const osBackdropEvidenceEnabled = process.env.MEGLE_VISUAL_OS_BACKDROP === "1";
 const osBackdropEvidenceMode = osBackdropEvidenceEnabled
   ? "required-os-composited"
@@ -68,7 +70,9 @@ function startDevApp() {
       MEGLE_ELECTRON_USER_DATA_DIR: electronUserDataDir,
       MEGLE_AUTO_ADD_ROOT: mediaDir,
       MEGLE_REMOTE_DEBUG: "1",
-      MEGLE_VISUAL_HARNESS: "1"
+      MEGLE_REMOTE_DEBUG_PORT: String(debugPort),
+      MEGLE_VISUAL_HARNESS: "1",
+      MEGLE_VISUAL_RUN_ID: visualRunId
     },
     shell: process.platform === "win32",
     stdio: ["ignore", "pipe", "pipe"],
@@ -499,11 +503,11 @@ async function captureWindowBackdropEvidenceViaWindows(name) {
 
   const filePath = path.join(screenshotDir, name);
   const escapedPath = filePath.replace(/'/g, "''");
+  const escapedRunId = visualRunId.replace(/'/g, "''");
   const margin = 28;
   const script = `
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -522,17 +526,41 @@ public class MegleBackdropCapture {
   [DllImport("user32.dll")]
   public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")]
+  public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  [DllImport("user32.dll")]
   public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
 }
 "@
 $path = '${escapedPath}'
+$runId = '${escapedRunId}'
 $margin = ${margin}
-$window = Get-Process | Where-Object {
-  $_.MainWindowHandle -ne 0 -and ($_.MainWindowTitle -like '*Megle*' -or $_.ProcessName -like 'electron*')
-} | Sort-Object @{ Expression = { if ($_.MainWindowTitle -like '*Megle*') { 0 } else { 1 } } } | Select-Object -First 1
+$processInfos = Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -and (
+    $_.CommandLine -like '*apps/desktop/dist/main.js*' -or
+    $_.CommandLine -like '*apps\\desktop\\dist\\main.js*'
+  ) -and
+  $_.CommandLine -like '*--megle-visual-harness=1*' -and
+  $_.CommandLine -like "*--megle-visual-run-id=$runId*" -and
+  $_.CommandLine -notlike '* --type=*' -and
+  $_.Name -notin @('powershell.exe', 'pwsh.exe', 'node.exe')
+} | Sort-Object ProcessId
+$window = $null
+foreach ($processInfo in $processInfos) {
+  $window = Get-Process -Id $processInfo.ProcessId -ErrorAction SilentlyContinue
+  if ($window -and $window.MainWindowHandle -ne 0) {
+    break
+  }
+  $window = $null
+}
 if (-not $window) { throw 'Megle Electron window not found for backdrop capture' }
+$topMost = [IntPtr]::new(-1)
+$notTopMost = [IntPtr]::new(-2)
+$swpNoMove = 0x0002
+$swpNoSize = 0x0001
+$swpShowWindow = 0x0040
 [MegleBackdropCapture]::ShowWindow($window.MainWindowHandle, 9) | Out-Null
 [MegleBackdropCapture]::SetForegroundWindow($window.MainWindowHandle) | Out-Null
+[MegleBackdropCapture]::SetWindowPos($window.MainWindowHandle, $topMost, 0, 0, 0, 0, ($swpNoMove -bor $swpNoSize -bor $swpShowWindow)) | Out-Null
 Start-Sleep -Milliseconds 220
 $rect = New-Object MegleBackdropCapture+RECT
 if (-not [MegleBackdropCapture]::GetWindowRect($window.MainWindowHandle, [ref] $rect)) {
@@ -555,6 +583,8 @@ $leftMargin = $rect.Left - $captureX
 $topMargin = $rect.Top - $captureY
 $captureWidth = $windowWidth + $leftMargin + $margin
 $captureHeight = $windowHeight + $topMargin + $margin
+[MegleBackdropCapture]::SetWindowPos($window.MainWindowHandle, $topMost, 0, 0, 0, 0, ($swpNoMove -bor $swpNoSize -bor $swpShowWindow)) | Out-Null
+Start-Sleep -Milliseconds 260
 $bitmap = New-Object System.Drawing.Bitmap $captureWidth, $captureHeight
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 try {
@@ -629,6 +659,15 @@ try {
 
   [pscustomobject]@{
     path = $path
+    runId = $runId
+    capturedAtUtc = [DateTime]::UtcNow.ToString("o")
+    process = @{
+      id = $window.Id
+      name = $window.ProcessName
+      title = $window.MainWindowTitle
+      handle = $window.MainWindowHandle.ToInt64()
+      commandLine = $processInfo.CommandLine
+    }
     margin = $margin
     image = @{
       width = $bitmap.Width
@@ -648,8 +687,9 @@ try {
     uiSurfaceDelta = MaxDelta $uiSamples
   } | ConvertTo-Json -Depth 8 -Compress
 } finally {
-  $graphics.Dispose()
-  $bitmap.Dispose()
+  [MegleBackdropCapture]::SetWindowPos($window.MainWindowHandle, $notTopMost, 0, 0, 0, 0, ($swpNoMove -bor $swpNoSize -bor $swpShowWindow)) | Out-Null
+  if ($graphics) { $graphics.Dispose() }
+  if ($bitmap) { $bitmap.Dispose() }
 }
 `;
 
@@ -734,7 +774,11 @@ async function doubleClickMediaByName(client, name) {
       if (!button) return false;
       button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window, detail: 1 }));
       button.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window, detail: 2 }));
-      return true;
+      return new Promise((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => resolve(true));
+        });
+      });
     })()`
   );
   if (!opened) throw new Error(`Media tile not found: ${name}`);
@@ -799,19 +843,27 @@ async function forcePseudoState(client, selector, forcedPseudoClasses) {
 async function moveToSelector(client, selector, xRatio, yRatio) {
   const point = await pointFor(client, selector, xRatio, yRatio);
   await mouse(client, "mouseMoved", point);
+  await delay(40);
   await evaluate(
     client,
-    `(() => {
+    `(() => new Promise((resolve) => {
+      window.focus();
       window.dispatchEvent(new PointerEvent("pointermove", {
         bubbles: true,
         clientX: ${point.x},
         clientY: ${point.y},
         pointerType: "mouse"
       }));
-      return true;
-    })()`
+      window.dispatchEvent(new MouseEvent("mousemove", {
+        bubbles: true,
+        clientX: ${point.x},
+        clientY: ${point.y}
+      }));
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve(true));
+      });
+    }))()`
   );
-  await delay(250);
   return point;
 }
 
@@ -1031,6 +1083,13 @@ async function settingsInterfaceStyleEvidence(client) {
   );
   const screenshotPath = await screenshot(client, "ui-settings-interface-style.png");
   const evidenceBefore = await evaluate(client, settingsInterfaceStyleEvidenceExpression());
+  const pointSettingsSlider = await moveToSelector(
+    client,
+    '[data-settings-slider-control="side-blur"]',
+    0.27,
+    0.5
+  );
+  const pointerSettingsSlider = await evaluate(client, pointerEvidenceExpression());
   const beforeSideBlur = evidenceBefore.sideBlur;
   const sliderChange = await evaluate(
     client,
@@ -1095,6 +1154,8 @@ async function settingsInterfaceStyleEvidence(client) {
       ...evidenceAfter,
       before: evidenceBefore,
       after: evidenceAfter,
+      pointerPoint: pointSettingsSlider,
+      pointerSlider: pointerSettingsSlider,
       sliderChange,
       materialBefore,
       materialAfter
@@ -1342,6 +1403,8 @@ function settingsInterfaceStyleEvidenceExpression() {
       "center-overlay-strength",
       "center-saturation",
       "center-stroke-opacity",
+      "dither-opacity",
+      "backdrop-gradient-strength",
       "edge-highlight-brightness",
       "edge-highlight-size",
       "halo-brightness",
@@ -1406,6 +1469,12 @@ function settingsInterfaceStyleEvidenceExpression() {
         .trim(),
       edgeHighlightBrightness: getComputedStyle(document.documentElement)
         .getPropertyValue("--glass-edge-highlight-brightness")
+        .trim(),
+      ditherOpacity: getComputedStyle(document.documentElement)
+        .getPropertyValue("--glass-dither-opacity")
+        .trim(),
+      backdropGradientOpacity: getComputedStyle(document.documentElement)
+        .getPropertyValue("--glass-backdrop-gradient-opacity")
         .trim()
     };
   })()`;
@@ -1604,21 +1673,51 @@ function pointerEvidenceExpression() {
     const affordanceState = (selector) => {
       const element = document.querySelector(selector);
       const style = element ? getComputedStyle(element) : null;
+      const before = element ? getComputedStyle(element, "::before") : null;
+      const after = element ? getComputedStyle(element, "::after") : null;
       return {
+        selector,
+        targetAttr: element?.getAttribute("data-interactive-pointer-target") ?? null,
         interactiveDataset: element?.getAttribute("data-interactive-pointer") ?? null,
         interactiveOpacity: Number(style?.getPropertyValue("--interactive-pointer-opacity") || 0),
         interactiveX: style?.getPropertyValue("--interactive-pointer-x").trim() ?? null,
-        interactiveY: style?.getPropertyValue("--interactive-pointer-y").trim() ?? null
+        interactiveY: style?.getPropertyValue("--interactive-pointer-y").trim() ?? null,
+        beforeBackgroundImage: before?.backgroundImage ?? null,
+        beforeBackgroundBlendMode: before?.backgroundBlendMode ?? null,
+        beforeMaskImage: before?.maskImage ?? null,
+        beforeWebkitMaskImage: before?.webkitMaskImage ?? null,
+        afterBackgroundImage: after?.backgroundImage ?? null
+      };
+    };
+    const windowEdgeState = () => {
+      const element = document.querySelector(".window-edge-frame");
+      const style = element ? getComputedStyle(element) : null;
+      const after = element ? getComputedStyle(element, "::after") : null;
+      return {
+        dataset: element?.getAttribute("data-window-edge-pointer") ?? null,
+        opacity: Number(style?.getPropertyValue("--glass-pointer-opacity") || 0),
+        x: style?.getPropertyValue("--glass-pointer-x").trim() ?? null,
+        y: style?.getPropertyValue("--glass-pointer-y").trim() ?? null,
+        boxShadow: style?.boxShadow ?? null,
+        afterOpacity: Number(after?.opacity || 0),
+        afterBackgroundImage: after?.backgroundImage ?? null,
+        afterMaskComposite: after?.maskComposite ?? null,
+        afterWebkitMaskComposite: after?.webkitMaskComposite ?? null
       };
     };
     return {
+      windowEdge: windowEdgeState(),
       titlebarLeft: surfaceState(".workbench-column-left"),
       titlebarCenter: surfaceState(".workbench-column-center"),
       titlebarRight: surfaceState(".workbench-column-right"),
       inspector: surfaceState(".workbench-column-right"),
       sidebar: surfaceState(".workbench-column-left"),
       treeItem: affordanceState(".tree-item"),
+      treeLabelButton: affordanceState(".tree-item .tree-label"),
+      treeDisclosureButton: affordanceState(".tree-item .tree-disclosure"),
       tileThumb: affordanceState(".tile-thumb"),
+      settingsSliderControl: affordanceState('[data-settings-slider-control="side-blur"]'),
+      settingsSliderInput: affordanceState("#side-blur"),
       haloBrightness: getComputedStyle(document.documentElement)
         .getPropertyValue("--glass-halo-brightness")
         .trim(),
@@ -1697,6 +1796,17 @@ function nonZeroRadius(value) {
     const number = Number.parseFloat(part);
     return Number.isFinite(number) && number > 0.01;
   });
+}
+
+function cssPercentNumber(value) {
+  if (typeof value !== "string") return null;
+  const number = Number.parseFloat(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function nearCssPercent(value, expected, tolerance = 2) {
+  const number = cssPercentNumber(value);
+  return number !== null && Math.abs(number - expected) <= tolerance;
 }
 
 function rectWithin(inner, outer, tolerance = 2) {
@@ -1809,7 +1919,11 @@ try {
   await moveToSelector(client, ".shell-titlebar-right", 0.78, 0.5);
   const titlebarAllButtonsNearby = await evaluate(client, titlebarAllButtonsEvidenceExpression());
   const nativeMaterial = desktopNativeMaterialEvidence();
-  const windowBackdrop = await captureWindowBackdropEvidence(client, "ui-window-backdrop-evidence.png", layout);
+  const windowBackdrop = await captureWindowBackdropEvidence(
+    client,
+    `ui-window-backdrop-evidence-${visualRunId}.png`,
+    layout
+  );
   const titlebarDrag = await titlebarDragEvidence(client);
   const searchNoDrag = await searchNoDragEvidence(client);
   const settingsInterfaceStyle = await settingsInterfaceStyleEvidence(client);
@@ -1868,18 +1982,26 @@ try {
   await closeCentralPreview(client);
   await waitFor(client, `!document.querySelector(".central-preview-stage")`, 10000, "central preview close after portrait");
 
-  await moveToSelector(client, ".inspector-panel", 0.5, 0.5);
+  const pointFarIdle = await moveToSelector(client, ".grid-surface", 0.5, 0.5);
   const pointerFarIdle = await evaluate(client, pointerEvidenceExpression());
   const pointerFarIdleScreenshot = await screenshot(client, "ui-pointer-far-from-edge-idle.png");
-  await moveToSelector(client, ".inspector-panel", 0.5, 0.985);
+  const pointWindowOuterEdge = await moveToSelector(client, ".window-edge-frame", 0.5, 0.01);
+  const pointerWindowOuterEdge = await evaluate(client, pointerEvidenceExpression());
+  const pointerWindowOuterEdgeScreenshot = await screenshot(client, "ui-window-outer-edge-highlight.png");
+  const pointNearEdge = await moveToSelector(client, ".inspector-panel", 0.5, 0.985);
   const pointerNearEdge = await evaluate(client, pointerEvidenceExpression());
-  await moveToSelector(client, ".tree-item", 0.5, 0.5);
+  const pointTreeItem = await moveToSelector(client, ".tree-item", 0.35, 0.6);
   const pointerTreeItem = await evaluate(client, pointerEvidenceExpression());
-  await moveToSelector(client, ".tile-thumb", 0.5, 0.5);
+  const pointTileThumb = await moveToSelector(client, ".tile-thumb", 0.35, 0.72);
   const pointerTileThumb = await evaluate(client, pointerEvidenceExpression());
   const localEdgeHighlight = await screenshot(client, "ui-local-edge-highlight.png");
 
   summary = {
+    run: {
+      id: visualRunId,
+      startedAtUtc: runStartedAt.toISOString(),
+      completedAtUtc: new Date().toISOString()
+    },
     screenshots: {
       integratedTitlebarMain,
       settingsInterfaceStyle: settingsInterfaceStyle.screenshotPath,
@@ -1888,6 +2010,7 @@ try {
       centralLandscapeActual,
       centralPortraitFit,
       pointerFarIdle: pointerFarIdleScreenshot,
+      pointerWindowOuterEdge: pointerWindowOuterEdgeScreenshot,
       localEdgeHighlight,
       windowBackdrop: windowBackdrop.path ?? null
     },
@@ -1914,7 +2037,15 @@ try {
       landscapeToActualAnchor,
       landscapeToFitAnchor,
       portraitFit,
+      pointerPoints: {
+        farIdle: pointFarIdle,
+        windowOuterEdge: pointWindowOuterEdge,
+        nearEdge: pointNearEdge,
+        treeItem: pointTreeItem,
+        tileThumb: pointTileThumb
+      },
       pointerFarIdle,
+      pointerWindowOuterEdge,
       pointerNearEdge,
       pointerTreeItem,
       pointerTileThumb,
@@ -1956,12 +2087,13 @@ try {
   if (
     nativeMaterial.backgroundMaterial !== "acrylic" ||
     !nativeMaterial.frameFalse ||
-    !nativeMaterial.transparent ||
+    !nativeMaterial.nonLayeredHost ||
     !nativeMaterial.transparentBackgroundColor ||
+    !nativeMaterial.roundedCorners ||
     nativeMaterial.disablesNativeMaterial ||
     nativeMaterial.unsafeTopLevelSpreads.length > 0
   ) {
-    hardFailures.push("desktop BrowserWindow must use native acrylic with transparent frameless window settings");
+    hardFailures.push("desktop BrowserWindow must use native acrylic with non-layered DWM-rounded frameless window settings");
   }
   if (
     osBackdropEvidenceEnabled &&
@@ -2134,7 +2266,7 @@ try {
   }
   if (
     !summary.evidence.settingsInterfaceStyle.present ||
-    summary.evidence.settingsInterfaceStyle.rangeSliderCount < 24 ||
+    summary.evidence.settingsInterfaceStyle.rangeSliderCount < 26 ||
     summary.evidence.settingsInterfaceStyle.colorInputCount < 2 ||
     !summary.evidence.settingsInterfaceStyle.sliders?.["window-corner-radius"]?.present ||
     !summary.evidence.settingsInterfaceStyle.sliders?.["surface-corner-radius"]?.present ||
@@ -2152,6 +2284,8 @@ try {
     !summary.evidence.settingsInterfaceStyle.colors?.["center-overlay-color"]?.present ||
     !summary.evidence.settingsInterfaceStyle.sliders?.["center-saturation"]?.present ||
     !summary.evidence.settingsInterfaceStyle.sliders?.["center-stroke-opacity"]?.present ||
+    !summary.evidence.settingsInterfaceStyle.sliders?.["dither-opacity"]?.present ||
+    !summary.evidence.settingsInterfaceStyle.sliders?.["backdrop-gradient-strength"]?.present ||
     !summary.evidence.settingsInterfaceStyle.sliders?.["edge-highlight-brightness"]?.present ||
     !summary.evidence.settingsInterfaceStyle.sliders?.["edge-highlight-size"]?.present ||
     !summary.evidence.settingsInterfaceStyle.sliders?.["halo-brightness"]?.present ||
@@ -2178,6 +2312,8 @@ try {
     summary.evidence.settingsInterfaceStyle.colors?.["center-overlay-color"]?.type !== "color" ||
     summary.evidence.settingsInterfaceStyle.sliders?.["center-saturation"]?.type !== "range" ||
     summary.evidence.settingsInterfaceStyle.sliders?.["center-stroke-opacity"]?.type !== "range" ||
+    summary.evidence.settingsInterfaceStyle.sliders?.["dither-opacity"]?.type !== "range" ||
+    summary.evidence.settingsInterfaceStyle.sliders?.["backdrop-gradient-strength"]?.type !== "range" ||
     summary.evidence.settingsInterfaceStyle.sliders?.["edge-highlight-brightness"]?.type !== "range" ||
     summary.evidence.settingsInterfaceStyle.sliders?.["edge-highlight-size"]?.type !== "range" ||
     summary.evidence.settingsInterfaceStyle.sliders?.["halo-brightness"]?.type !== "range" ||
@@ -2348,8 +2484,22 @@ try {
   if (pointerFarIdle.inspector.opacity !== 0 || pointerFarIdle.inspector.dataset !== "idle") {
     hardFailures.push("glass edge highlight activates far from an edge");
   }
+  if (pointerFarIdle.windowEdge.opacity !== 0 || pointerFarIdle.windowEdge.dataset !== "idle") {
+    hardFailures.push("window outer edge highlight activates far from the shell edge");
+  }
+  if (
+    !(pointerWindowOuterEdge.windowEdge.opacity > 0) ||
+    pointerWindowOuterEdge.windowEdge.dataset !== "active" ||
+    !(pointerWindowOuterEdge.windowEdge.afterOpacity > 0) ||
+    !/radial-gradient/i.test(pointerWindowOuterEdge.windowEdge.afterBackgroundImage ?? "")
+  ) {
+    hardFailures.push("window outer edge does not use a pointer-driven liquid-glass highlight ring");
+  }
   if (!(pointerNearEdge.inspector.opacity > 0) || pointerNearEdge.inspector.dataset !== "active") {
     hardFailures.push("glass edge highlight does not activate near the local edge");
+  }
+  if (!nearCssPercent(pointerNearEdge.inspector.y, 98.6, 2)) {
+    hardFailures.push("glass edge highlight position is snapped to the pane edge instead of following the real cursor");
   }
   if (
     pointerNearEdge.titlebarLeft.opacity !== 0 ||
@@ -2361,8 +2511,54 @@ try {
   if (!(pointerTreeItem.treeItem.interactiveOpacity > 0) || pointerTreeItem.treeItem.interactiveDataset !== "active") {
     hardFailures.push("folder tree items do not participate in the shared local edge highlight model");
   }
+  if (
+    !nearCssPercent(pointerTreeItem.treeItem.interactiveX, 35, 2) ||
+    !nearCssPercent(pointerTreeItem.treeItem.interactiveY, 60, 2)
+  ) {
+    hardFailures.push("folder tree item pointer glow is snapped to an edge instead of following the real cursor");
+  }
+  if (
+    pointerTreeItem.treeLabelButton.targetAttr === "true" ||
+    pointerTreeItem.treeDisclosureButton.targetAttr === "true"
+  ) {
+    hardFailures.push("folder tree inner buttons are drawing their own local edge highlight instead of the tree item owning the stroke");
+  }
   if (!(pointerTileThumb.tileThumb.interactiveOpacity > 0) || pointerTileThumb.tileThumb.interactiveDataset !== "active") {
     hardFailures.push("grid thumbnails do not participate in the shared local edge highlight model");
+  }
+  if (
+    !nearCssPercent(pointerTileThumb.tileThumb.interactiveX, 35, 2) ||
+    !nearCssPercent(pointerTileThumb.tileThumb.interactiveY, 72, 2)
+  ) {
+    hardFailures.push("grid thumbnail pointer glow is snapped to an edge instead of following the real cursor");
+  }
+  if (
+    !/url\(/i.test(pointerTileThumb.tileThumb.beforeBackgroundImage ?? "") ||
+    !/radial-gradient/i.test(pointerTileThumb.tileThumb.beforeBackgroundImage ?? "") ||
+    !/soft-light/i.test(pointerTileThumb.tileThumb.beforeBackgroundBlendMode ?? "") ||
+    !/radial-gradient/i.test(
+      pointerTileThumb.tileThumb.beforeMaskImage ??
+        pointerTileThumb.tileThumb.beforeWebkitMaskImage ??
+        ""
+    )
+  ) {
+    hardFailures.push("interactive pointer background glow is not dithered and masked around the real cursor");
+  }
+  const pointerSettingsSlider = summary.evidence.settingsInterfaceStyle.pointerSlider;
+  if (
+    !(pointerSettingsSlider?.settingsSliderControl?.interactiveOpacity > 0) ||
+    pointerSettingsSlider?.settingsSliderControl?.interactiveDataset !== "active"
+  ) {
+    hardFailures.push("settings range sliders do not expose a stylable local pointer-highlight owner");
+  }
+  if (
+    !nearCssPercent(pointerSettingsSlider?.settingsSliderControl?.interactiveX, 27, 2) ||
+    !nearCssPercent(pointerSettingsSlider?.settingsSliderControl?.interactiveY, 50, 2)
+  ) {
+    hardFailures.push("settings range slider pointer glow is not based on the real cursor position");
+  }
+  if (pointerSettingsSlider?.settingsSliderInput?.targetAttr === "true") {
+    hardFailures.push("native range input is still selected as the local pointer-highlight target");
   }
   if (summary.evidence.previewRouteResponses.length === 0) {
     hardFailures.push("preview route was not requested");
@@ -2378,6 +2574,11 @@ try {
   fatalError = error;
   if (!summary) {
     summary = {
+      run: {
+        id: visualRunId,
+        startedAtUtc: runStartedAt.toISOString(),
+        completedAtUtc: new Date().toISOString()
+      },
       screenshots: {},
       evidence: {},
       consoleWarnings,
