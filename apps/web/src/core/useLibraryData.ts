@@ -195,6 +195,9 @@ export function useLibraryData(): LibraryState {
   );
 
   const selectedMedia = media.find((item) => item.id === selectedMediaId) ?? null;
+  const selectedMediaThumbnailRequestKey = selectedMedia
+    ? mediaContentSignature(selectedMedia)
+    : null;
   const folders = useMemo(
     () => Object.values(folderChildrenByParent).flat(),
     [folderChildrenByParent]
@@ -518,11 +521,11 @@ export function useLibraryData(): LibraryState {
   }, [client, selectedMediaId]);
 
   useEffect(() => {
-    if (selectedMediaId === null) {
+    if (!selectedMedia) {
       return;
     }
-    requestThumbnailStates([selectedMediaId]);
-  }, [requestThumbnailStates, selectedMediaId]);
+    requestThumbnailStates([selectedMedia.id]);
+  }, [requestThumbnailStates, selectedMedia, selectedMediaThumbnailRequestKey]);
 
   const previousTaskStatusRef = useRef<Map<number, TaskRecord["status"]>>(new Map());
   useEffect(() => {

@@ -218,6 +218,13 @@ if (
 ) {
   fail("useLibraryData must carry media signatures through React thumbnail state");
 }
+if (
+  !/selectedMediaThumbnailRequestKey/.test(useLibraryData) ||
+  !/mediaContentSignature\(selectedMedia\)/.test(useLibraryData) ||
+  !/requestThumbnailStates\(\[selectedMedia\.id\]\)/.test(useLibraryData)
+) {
+  fail("useLibraryData selected thumbnail requests must be keyed by selected media signature");
+}
 if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");
 }
@@ -260,6 +267,9 @@ if (!/onRequestThumbnailStates/.test(mediaGrid) || !/visibleMediaIds/.test(media
 if (!/visibleMedia(?:Id)?Key/.test(mediaGrid)) {
   fail("MediaGrid immediate thumbnail requests must be keyed by the stable visible media id set");
 }
+if (!/mediaContentSignature/.test(mediaGrid) || !/visibleMediaSignatureKey/.test(mediaGrid)) {
+  fail("MediaGrid immediate thumbnail requests must include visible media content signatures");
+}
 for (const state of ["pending", "queued", "ready", "failed", "skipped_small"]) {
   if (!mediaGrid.includes(`"${state}"`)) {
     fail(`MediaGrid must render a stable thumbnail state branch for ${state}`);
@@ -279,6 +289,9 @@ if (!/requestThumbnailBlob\(fileId/.test(mediaGrid) || /createCoreClient/.test(m
 }
 if (/thumbnailUpdatedAt=\{thumbnail\?\.updatedAt\s*\?\?\s*null\}/.test(mediaGrid) || !/hasLiveReadyThumbnail/.test(mediaGrid)) {
   fail("MediaGrid must not request thumbnail blobs from media-row ready state without a live updatedAt");
+}
+if (!/hasLiveThumbnailMetadata/.test(mediaGrid) || !/rowState\s*===\s*"ready"/.test(mediaGrid)) {
+  fail("MediaGrid must keep requesting state for pending, queued, or ready rows without live thumbnail metadata");
 }
 if (!/data-preview-placeholder/.test(mediaGrid) || !/data-preview-placeholder/.test(mediaPreview)) {
   fail("Grid and preview placeholder rendering must include data-preview-placeholder markers for smoke tests");
