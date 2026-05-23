@@ -5,12 +5,12 @@
 // 4. Poll /api/tasks until the root_scan task succeeds.
 // 5. listMedia and assert the count matches the on-disk file count.
 // 6. For each media item, request a thumbnail; poll until ready/failed/skipped.
-// 7. Confirm cache files exist on disk and have a real RIFF/WEBP header.
+// 7. Confirm thumbnail state points at db_blob and blob endpoint returns WebP bytes.
 //
 // Run via: node --experimental-strip-types tools/dev/real-load-test.mts
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -26,17 +26,32 @@ function log(...args: unknown[]) {
 }
 
 async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetchResponse(path, init);
+  const body = await response.text();
+  return body ? (JSON.parse(body) as T) : (null as unknown as T);
+}
+
+async function fetchResponse(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("x-megle-session", TOKEN);
   if (init.body && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
   const response = await fetch(`${BASE}${path}`, { ...init, headers });
-  const body = await response.text();
   if (!response.ok) {
+    const body = await response.text();
     throw new Error(`${path} -> ${response.status} ${response.statusText}: ${body}`);
   }
-  return body ? (JSON.parse(body) as T) : (null as unknown as T);
+  return response;
+}
+
+async function fetchThumbnailBlob(fileId: number): Promise<{ bytes: Uint8Array; contentType: string | null; servedBy: string | null }> {
+  const response = await fetchResponse(`/media/${fileId}/thumbnail/blob?target=grid_320`);
+  return {
+    bytes: new Uint8Array(await response.arrayBuffer()),
+    contentType: response.headers.get("content-type"),
+    servedBy: response.headers.get("x-megle-served-by")
+  };
 }
 
 async function waitForHealth(timeoutMs = 30_000) {
@@ -85,7 +100,12 @@ interface MediaRecord {
 
 interface ThumbnailResponse {
   fileId: number;
+  target: string;
   state: string;
+  width: number | null;
+  height: number | null;
+  byteSize: number | null;
+  servedBy: string | null;
   asset: { cacheKey: string; width: number; height: number; byteSize: number } | null;
   error: string | null;
 }
@@ -135,10 +155,6 @@ async function main() {
 
   const dataDir = await mkdtemp(path.join(tmpdir(), "megle-real-load-"));
   const dbPath = path.join(dataDir, "megle.sqlite");
-  // Core resolves the thumbnail cache to <db_parent>/thumbnail-cache, which
-  // it creates on demand. We just need to know the path so we can read the
-  // generated WebP files back.
-  const cacheDir = path.join(dataDir, "thumbnail-cache");
   log(`Data dir: ${dataDir}`);
 
   const env = {
@@ -208,19 +224,30 @@ async function main() {
       const thumb = await pollThumbnail(item.id);
       if (thumb.state === "ready") {
         ready++;
-        if (!thumb.asset) {
-          throw new Error(`ready thumbnail ${item.id} missing asset`);
+        if (thumb.target !== "grid_320") {
+          throw new Error(`ready thumbnail ${item.id} returned unexpected target: ${thumb.target}`);
         }
-        const cachePath = path.join(cacheDir, thumb.asset.cacheKey);
-        if (!existsSync(cachePath)) {
-          throw new Error(`cache file missing: ${cachePath}`);
+        if (thumb.servedBy !== "db_blob") {
+          throw new Error(`ready thumbnail ${item.id} servedBy=${thumb.servedBy ?? "null"}`);
         }
-        const bytes = await readFile(cachePath);
-        const magic = bytes.subarray(0, 4).toString("ascii");
-        const subtype = bytes.subarray(8, 12).toString("ascii");
+        if (!thumb.width || !thumb.height || !thumb.byteSize) {
+          throw new Error(`ready thumbnail ${item.id} missing dimensions or byte size`);
+        }
+        const blob = await fetchThumbnailBlob(item.id);
+        if (blob.servedBy !== "db_blob") {
+          throw new Error(`thumbnail blob ${item.id} servedBy=${blob.servedBy ?? "null"}`);
+        }
+        if (blob.contentType !== "image/webp") {
+          throw new Error(`thumbnail blob ${item.id} content-type=${blob.contentType ?? "null"}`);
+        }
+        if (blob.bytes.length !== thumb.byteSize) {
+          throw new Error(`thumbnail ${item.id} byte size mismatch: state=${thumb.byteSize} blob=${blob.bytes.length}`);
+        }
+        const magic = Buffer.from(blob.bytes.subarray(0, 4)).toString("ascii");
+        const subtype = Buffer.from(blob.bytes.subarray(8, 12)).toString("ascii");
         if (magic !== "RIFF" || subtype !== "WEBP") {
           throw new Error(
-            `thumbnail ${item.id} has invalid header: ${magic}/${subtype} (${bytes.length} bytes)`
+            `thumbnail ${item.id} has invalid header: ${magic}/${subtype} (${blob.bytes.length} bytes)`
           );
         }
       } else if (thumb.state === "skipped_small") {
@@ -237,7 +264,6 @@ async function main() {
     log(`Root scanned: ${ROOT_PATH}`);
     log(`Media indexed: ${media.length} (expected ${expectedFiles.length})`);
     log(`WebP thumbnails generated: ${ready}`);
-    log(`Cache dir: ${cacheDir}`);
     log(`Data dir: ${dataDir}`);
   } finally {
     stop();

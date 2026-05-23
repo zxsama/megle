@@ -11,7 +11,8 @@ use std::path::Path as FilePath;
 use crate::api::AppState;
 use crate::db::{
     FolderRecord, MediaPageQuery, MediaRecord, NewRoot, PluginRecord, RootRecord, SearchQuery,
-    TagError, TagRecord, TaskRecord, ThumbnailRecord, UserMetadataPatch, UserMetadataRecord,
+    TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailRecord, UserMetadataPatch,
+    UserMetadataRecord,
 };
 use crate::fsops::{
     self, DeleteRequest, FileOperationRecord, FsOpsError, FsOpsErrorCode, MoveRequest,
@@ -532,12 +533,12 @@ async fn get_thumbnail(
 ) -> ApiResult<(StatusCode, Json<ThumbnailResponse>)> {
     let target = normalize_profile(query.target.as_deref())
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
-    let (thumbnail, queued_task) = {
+    let (thumbnail, blob, queued_task) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
             .get_thumbnail(file_id, target)?
             .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
-        if is_pending_status(&thumbnail.state) {
+        let (thumbnail, queued_task) = if is_pending_status(&thumbnail.state) {
             let request = database
                 .request_thumbnail_task(file_id, target)
                 .map_err(map_thumbnail_request_error)?;
@@ -556,7 +557,13 @@ async fn get_thumbnail(
             (request.thumbnail, queued_task)
         } else {
             (thumbnail, None)
-        }
+        };
+        let blob = if thumbnail.state.as_str() == "ready" {
+            database.get_thumb_blob(file_id, target)?
+        } else {
+            None
+        };
+        (thumbnail, blob, queued_task)
     };
     if let Some((task_id, attempt_generation)) = queued_task {
         enqueue_task(&state, task_id, attempt_generation).await?;
@@ -566,7 +573,7 @@ async fn get_thumbnail(
     } else {
         StatusCode::OK
     };
-    Ok((status, Json(thumbnail_response(thumbnail))))
+    Ok((status, Json(thumbnail_response(thumbnail, blob))))
 }
 
 async fn get_thumbnail_blob(
@@ -1066,22 +1073,41 @@ fn accepted() -> AcceptedResponse {
     }
 }
 
-fn thumbnail_response(thumbnail: ThumbnailRecord) -> ThumbnailResponse {
-    let asset = match (
-        thumbnail.state.as_str(),
-        thumbnail.cache_key,
-        thumbnail.width,
-        thumbnail.height,
-        thumbnail.byte_size,
-    ) {
-        ("ready", Some(cache_key), Some(width), Some(height), Some(byte_size)) => {
-            Some(ThumbnailAsset {
-                cache_key,
-                width,
-                height,
-                byte_size,
-            })
-        }
+fn thumbnail_response(
+    thumbnail: ThumbnailRecord,
+    blob: Option<ThumbBlobRecord>,
+) -> ThumbnailResponse {
+    let ready_blob = if thumbnail.state.as_str() == "ready" {
+        blob.as_ref()
+    } else {
+        None
+    };
+    let width = ready_blob.map(|blob| blob.width).or_else(|| {
+        (thumbnail.state.as_str() != "ready")
+            .then_some(thumbnail.width)
+            .flatten()
+    });
+    let height = ready_blob.map(|blob| blob.height).or_else(|| {
+        (thumbnail.state.as_str() != "ready")
+            .then_some(thumbnail.height)
+            .flatten()
+    });
+    let byte_size = ready_blob.map(|blob| blob.byte_size).or_else(|| {
+        (thumbnail.state.as_str() != "ready")
+            .then_some(thumbnail.byte_size)
+            .flatten()
+    });
+    let output_format = ready_blob
+        .map(|blob| blob.output_format.clone())
+        .unwrap_or_else(|| thumbnail.output_format.clone());
+    let served_by = ready_blob.map(|_| "db_blob");
+    let asset = match (thumbnail.cache_key, ready_blob) {
+        (Some(cache_key), Some(blob)) => Some(ThumbnailAsset {
+            cache_key,
+            width: blob.width,
+            height: blob.height,
+            byte_size: blob.byte_size,
+        }),
         _ => None,
     };
     ThumbnailResponse {
@@ -1089,11 +1115,11 @@ fn thumbnail_response(thumbnail: ThumbnailRecord) -> ThumbnailResponse {
         target: thumbnail.profile,
         state: thumbnail.state,
         short_side_px: thumbnail.short_side_px,
-        output_format: thumbnail.output_format,
-        width: thumbnail.width,
-        height: thumbnail.height,
-        byte_size: thumbnail.byte_size,
-        served_by: asset.as_ref().map(|_| "db_blob"),
+        output_format,
+        width,
+        height,
+        byte_size,
+        served_by,
         asset,
         error: thumbnail.error,
         updated_at: thumbnail.updated_at,
@@ -1736,6 +1762,16 @@ mod tests {
         .expect("insert ready thumbnail");
         conn.execute(
             r#"
+            INSERT INTO thumb_blobs(
+                file_id, profile, data, width, height, byte_size, output_format, created_at, updated_at
+            )
+            VALUES (?1, 'grid_320', x'524946460400000057454250', 427, 320, 4096, 'image/webp', 10, 10)
+            "#,
+            [ready_file_id],
+        )
+        .expect("insert ready thumbnail blob");
+        conn.execute(
+            r#"
             INSERT INTO thumbs(file_id, profile, state, source_fingerprint, updated_at)
             VALUES (?1, 'grid_320', 'skipped_small', ?2, 11)
             "#,
@@ -1768,6 +1804,7 @@ mod tests {
         assert_eq!(ready["asset"]["width"], 427);
         assert_eq!(ready["asset"]["height"], 320);
         assert_eq!(ready["asset"]["byteSize"], 4096);
+        assert_eq!(ready["servedBy"], "db_blob");
 
         let skipped_response = app
             .oneshot(
@@ -1854,6 +1891,66 @@ mod tests {
             .await
             .expect("read blob body");
         assert_eq!(&bytes[..], blob_bytes.as_slice());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_reports_ready_blob_metadata_without_cache_key() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: None,
+                width: Some(1),
+                height: Some(1),
+                byte_size: Some(1),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("mark thumbnail ready");
+        let blob_bytes = b"RIFF\x08\0\0\0WEBPblob".to_vec();
+        database
+            .upsert_thumb_blob(crate::db::ThumbBlobRecord {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                data: blob_bytes,
+                width: 427,
+                height: 320,
+                byte_size: 4096,
+                output_format: crate::thumbnails::GENERATED_FORMAT.to_string(),
+                created_at: 1,
+                updated_at: 2,
+            })
+            .expect("seed thumb blob");
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/media/{file_id}/thumbnail?target=grid_320"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail state");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["state"], "ready");
+        assert_eq!(body["target"], "grid_320");
+        assert_eq!(body["width"], 427);
+        assert_eq!(body["height"], 320);
+        assert_eq!(body["byteSize"], 4096);
+        assert_eq!(body["servedBy"], "db_blob");
+        assert!(body["asset"].is_null());
     }
 
     #[tokio::test]
