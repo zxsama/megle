@@ -22,7 +22,9 @@ contextBridge.exposeInMainWorld("megleDesktop", {
     minimize: () => ipcRenderer.invoke("megle:window-minimize"),
     maximize: () => ipcRenderer.invoke("megle:window-maximize"),
     close: () => ipcRenderer.invoke("megle:window-close"),
-    isMaximized: () => ipcRenderer.invoke("megle:window-is-maximized")
+    isMaximized: () => ipcRenderer.invoke("megle:window-is-maximized"),
+    getBounds: () => ipcRenderer.invoke("megle:window-get-bounds"),
+    setPosition: (x, y) => ipcRenderer.invoke("megle:window-set-position", x, y)
   },
   shell: {
     revealPath: (path) => ipcRenderer.invoke("megle:shell-reveal-path", path),

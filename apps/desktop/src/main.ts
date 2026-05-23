@@ -84,6 +84,20 @@ ipcMain.handle("megle:window-is-maximized", () => {
   return mainWindow?.isMaximized() ?? false;
 });
 
+ipcMain.handle("megle:window-get-bounds", () => {
+  const bounds = mainWindow?.getBounds();
+  if (!bounds) {
+    return null;
+  }
+  return bounds;
+});
+
+ipcMain.handle("megle:window-set-position", (_event, x: number, y: number) => {
+  if (!mainWindow) return false;
+  mainWindow.setPosition(Math.round(x), Math.round(y));
+  return true;
+});
+
 ipcMain.handle("megle:shell-reveal-path", (_event, targetPath: string) => {
   if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
     return false;

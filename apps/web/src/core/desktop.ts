@@ -9,6 +9,8 @@ export interface DesktopWindowControls {
   maximize: () => Promise<boolean>;
   close: () => Promise<void>;
   isMaximized: () => Promise<boolean>;
+  getBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
+  setPosition: (x: number, y: number) => Promise<boolean>;
 }
 
 export interface DesktopShellActions {
