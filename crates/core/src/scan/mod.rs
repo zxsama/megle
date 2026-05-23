@@ -4,14 +4,17 @@ use std::fs::Metadata;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+use image::imageops::FilterType;
 use walkdir::WalkDir;
 
 use crate::db::{
     Database, FileUpsert, FolderUpsert, RootRecord, ScanFileUpsert, ScanWriteBatch,
     TaskScanProgress,
 };
+use crate::thumbnails::GENERATED_FORMAT;
 
 pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 1_000;
+const PREVIEW_PLACEHOLDER_SHORT_SIDE_PX: u32 = 20;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,6 +358,29 @@ fn probe_image_dimensions(
                 {
                     tracing::debug!(file_id = *file_id, %error, "failed to record probed dimensions");
                 }
+                match generate_preview_placeholder(path) {
+                    Ok(placeholder) => {
+                        if let Err(error) = database.update_media_preview_placeholder(
+                            *file_id,
+                            &placeholder,
+                            GENERATED_FORMAT,
+                        ) {
+                            tracing::debug!(
+                                file_id = *file_id,
+                                %error,
+                                "failed to record preview placeholder"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            file_id = *file_id,
+                            path = %path.display(),
+                            %error,
+                            "preview placeholder generation failed"
+                        );
+                    }
+                }
             }
             Err(error) => {
                 tracing::debug!(
@@ -367,6 +393,49 @@ fn probe_image_dimensions(
         }
     }
     Ok(())
+}
+
+fn generate_preview_placeholder(source_path: &Path) -> anyhow::Result<Vec<u8>> {
+    let reader = image::ImageReader::open(source_path)
+        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?;
+    let decoded = reader
+        .decode()
+        .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?;
+    let source_width = decoded.width();
+    let source_height = decoded.height();
+    if source_width == 0 || source_height == 0 {
+        return Err(anyhow::anyhow!(
+            "placeholder decode failed: zero-sized source image"
+        ));
+    }
+    let (target_width, target_height) = placeholder_dimensions(
+        source_width,
+        source_height,
+        PREVIEW_PLACEHOLDER_SHORT_SIDE_PX,
+    );
+    let resized = decoded.resize_exact(target_width, target_height, FilterType::Triangle);
+    let rgba = resized.to_rgba8();
+    let encoded = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height()).encode(45.0);
+    let bytes: &[u8] = &encoded;
+    Ok(bytes.to_vec())
+}
+
+fn placeholder_dimensions(width: u32, height: u32, short_side_px: u32) -> (u32, u32) {
+    if width <= height {
+        let target_width = short_side_px;
+        let target_height = ((height as u64 * short_side_px as u64) / width as u64)
+            .max(1)
+            .min(u32::MAX as u64) as u32;
+        (target_width, target_height)
+    } else {
+        let target_height = short_side_px;
+        let target_width = ((width as u64 * short_side_px as u64) / height as u64)
+            .max(1)
+            .min(u32::MAX as u64) as u32;
+        (target_width, target_height)
+    }
 }
 
 fn ensure_root_enabled(database: &Database, root_id: i64) -> anyhow::Result<()> {
@@ -1012,6 +1081,40 @@ mod tests {
     }
 
     #[test]
+    fn scan_root_writes_preview_placeholder_for_images() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("image.jpg"), 800, 400);
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.display().to_string(),
+                display_name: "preview-placeholder".to_string(),
+            })
+            .expect("add root");
+        let root = database
+            .get_root(root_id)
+            .expect("get root")
+            .expect("root exists");
+
+        crate::scan::scan_root(&mut database, &root).expect("scan root");
+
+        let media = database
+            .get_media(1)
+            .expect("get media")
+            .expect("media exists");
+        assert!(media.preview_placeholder.is_some());
+        assert_eq!(
+            media.preview_placeholder_format.as_deref(),
+            Some("image/webp")
+        );
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
     fn scan_root_leaves_metadata_pending_when_image_dimensions_probe_fails() {
         let temp_root = unique_temp_dir();
         fs::create_dir_all(&temp_root).expect("create root dir");
@@ -1147,5 +1250,14 @@ mod tests {
                 .as_nanos(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
+    }
+
+    fn write_test_image(path: &Path, width: u32, height: u32) {
+        let buffer = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 255) as u8, (y % 255) as u8, 32])
+        });
+        image::DynamicImage::ImageRgb8(buffer)
+            .save(path)
+            .expect("write test image");
     }
 }

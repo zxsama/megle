@@ -172,6 +172,10 @@ pub struct MediaRecord {
     pub height: Option<i64>,
     pub duration_ms: Option<i64>,
     pub codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_placeholder: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_placeholder_format: Option<String>,
     pub thumbnail_state: Option<String>,
     pub thumbnail_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,6 +207,20 @@ pub struct ThumbnailRecord {
     pub error: Option<String>,
     pub source_fingerprint: Option<String>,
     pub updated_at: Option<i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ThumbBlobRecord {
+    pub file_id: i64,
+    pub profile: String,
+    pub data: Vec<u8>,
+    pub width: i64,
+    pub height: i64,
+    pub byte_size: i64,
+    pub output_format: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -455,6 +473,10 @@ impl Database {
         if !self.migration_applied(11)? {
             self.apply_plugins_extended_migration()?;
         }
+        if !self.migration_applied(12)? {
+            self.connection
+                .execute_batch(migrations::PREVIEW_PIPELINE_REFACTOR_MIGRATION)?;
+        }
         self.backfill_media_fts_if_empty()?;
         Ok(())
     }
@@ -528,6 +550,15 @@ impl Database {
             }
         }
         Ok(false)
+    }
+
+    fn table_exists(&self, table: &str) -> anyhow::Result<bool> {
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type IN ('table', 'virtual') AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
     }
 
     fn apply_task_attempt_generation_migration(&self) -> anyhow::Result<()> {
@@ -1205,6 +1236,7 @@ impl Database {
             SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
                    files.size, files.mtime, media.kind, media.width, media.height,
                    media.duration_ms, media.codec,
+                   media.preview_placeholder, media.preview_placeholder_format,
                    media.metadata_status, files.file_key,
                    thumbs.profile, thumbs.state, thumbs.short_side_px,
                    thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
@@ -1244,6 +1276,7 @@ impl Database {
                 SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
                        files.size, files.mtime, media.kind, media.width, media.height,
                        media.duration_ms, media.codec,
+                       media.preview_placeholder, media.preview_placeholder_format,
                        media.metadata_status, files.file_key,
                        thumbs.profile, thumbs.state, thumbs.short_side_px,
                        thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
@@ -1262,9 +1295,9 @@ impl Database {
                 return Ok(None);
             };
             let mut media = media_from_row(row)?;
-            let rating: Option<i64> = row.get(25)?;
-            let favorite: Option<i64> = row.get(26)?;
-            let note: Option<String> = row.get(27)?;
+            let rating: Option<i64> = row.get(27)?;
+            let favorite: Option<i64> = row.get(28)?;
+            let note: Option<String> = row.get(29)?;
             media.rating = rating;
             media.favorite = favorite.map(|value| value != 0).unwrap_or(false);
             media.note = note;
@@ -1876,6 +1909,8 @@ impl Database {
               has_alpha = NULL,
               dominant_color = NULL,
               phash = NULL,
+              preview_placeholder = NULL,
+              preview_placeholder_format = 'image/webp',
               metadata_status = 'pending'
             "#,
             (file_id, kind),
@@ -1902,6 +1937,24 @@ impl Database {
             WHERE file_id = ?3
             "#,
             (width, height, file_id),
+        )?;
+        Ok(updated != 0)
+    }
+
+    pub fn update_media_preview_placeholder(
+        &self,
+        file_id: i64,
+        placeholder: &[u8],
+        format: &str,
+    ) -> anyhow::Result<bool> {
+        let updated = self.connection.execute(
+            r#"
+            UPDATE media
+            SET preview_placeholder = ?1,
+                preview_placeholder_format = ?2
+            WHERE file_id = ?3
+            "#,
+            (placeholder, format, file_id),
         )?;
         Ok(updated != 0)
     }
@@ -2688,6 +2741,7 @@ impl Database {
             SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
                    files.size, files.mtime, media.kind, media.width, media.height,
                    media.duration_ms, media.codec,
+                   media.preview_placeholder, media.preview_placeholder_format,
                    media.metadata_status, files.file_key,
                    thumbs.profile, thumbs.state, thumbs.short_side_px,
                    thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
@@ -2711,9 +2765,9 @@ impl Database {
         let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(parameters), |row| {
             let mut media = media_from_row(row)?;
-            let rating: Option<i64> = row.get(25)?;
-            let favorite: Option<i64> = row.get(26)?;
-            let note: Option<String> = row.get(27)?;
+            let rating: Option<i64> = row.get(27)?;
+            let favorite: Option<i64> = row.get(28)?;
+            let note: Option<String> = row.get(29)?;
             media.rating = rating;
             media.favorite = favorite.map(|value| value != 0).unwrap_or(false);
             media.note = note;
@@ -3212,6 +3266,8 @@ fn upsert_media_kind_in_transaction(
           has_alpha = NULL,
           dominant_color = NULL,
           phash = NULL,
+          preview_placeholder = NULL,
+          preview_placeholder_format = 'image/webp',
           metadata_status = 'pending'
         "#,
         (file_id, kind),
@@ -3523,6 +3579,8 @@ fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRecord> {
     let height: Option<i64> = row.get(9)?;
     let duration_ms: Option<i64> = row.get(10)?;
     let codec: Option<String> = row.get(11)?;
+    let preview_placeholder: Option<Vec<u8>> = row.get(12)?;
+    let preview_placeholder_format: Option<String> = row.get(13)?;
     let source = ThumbnailSourceRecord {
         file_id: id,
         root_id,
@@ -3530,11 +3588,11 @@ fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRecord> {
         name: name.clone(),
         size,
         mtime,
-        file_key: row.get(13)?,
+        file_key: row.get(15)?,
         media_kind: kind.clone(),
         width,
         height,
-        metadata_status: row.get(12)?,
+        metadata_status: row.get(14)?,
     };
     let (thumbnail_state, thumbnail_cache_key) = media_thumbnail_summary_from_row(row, &source)?;
 
@@ -3551,6 +3609,8 @@ fn media_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaRecord> {
         height,
         duration_ms,
         codec,
+        preview_placeholder,
+        preview_placeholder_format,
         thumbnail_state,
         thumbnail_cache_key,
         rating: None,
@@ -3564,28 +3624,28 @@ fn media_thumbnail_summary_from_row(
     row: &rusqlite::Row<'_>,
     source: &ThumbnailSourceRecord,
 ) -> rusqlite::Result<(Option<String>, Option<String>)> {
-    let Some(state) = row.get(15)? else {
+    let Some(state) = row.get(17)? else {
         return Ok((None, None));
     };
     let mut thumbnail = ThumbnailRecord {
         file_id: source.file_id,
         profile: row
-            .get::<_, Option<String>>(14)?
+            .get::<_, Option<String>>(16)?
             .unwrap_or_else(|| GRID_320_PROFILE.to_string()),
         state,
         short_side_px: row
-            .get::<_, Option<i64>>(16)?
+            .get::<_, Option<i64>>(18)?
             .unwrap_or(GRID_320_SHORT_SIDE_PX),
         output_format: row
-            .get::<_, Option<String>>(17)?
+            .get::<_, Option<String>>(19)?
             .unwrap_or_else(|| GENERATED_FORMAT.to_string()),
-        cache_key: row.get(18)?,
-        width: row.get(19)?,
-        height: row.get(20)?,
-        byte_size: row.get(21)?,
-        error: row.get(22)?,
-        source_fingerprint: row.get(23)?,
-        updated_at: row.get(24)?,
+        cache_key: row.get(20)?,
+        width: row.get(21)?,
+        height: row.get(22)?,
+        byte_size: row.get(23)?,
+        error: row.get(24)?,
+        source_fingerprint: row.get(25)?,
+        updated_at: row.get(26)?,
     };
     normalize_thumbnail_record_for_source(&mut thumbnail, source);
     let thumbnail_cache_key = if thumbnail.state == "ready"
@@ -4147,6 +4207,20 @@ mod tests {
         let database = Database::open_in_memory().expect("open in-memory database");
         database.apply_migrations().expect("apply migrations");
         database
+    }
+
+    #[test]
+    fn preview_pipeline_migration_adds_placeholder_and_thumb_blobs() {
+        let database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+
+        assert!(database
+            .table_has_column("media", "preview_placeholder")
+            .unwrap());
+        assert!(database
+            .table_has_column("media", "preview_placeholder_format")
+            .unwrap());
+        assert!(database.table_exists("thumb_blobs").unwrap());
     }
 
     fn seed_media_page_fixture(database: &Database) -> (i64, i64) {

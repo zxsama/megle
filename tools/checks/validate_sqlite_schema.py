@@ -15,6 +15,7 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0007_task_status_contract.sql",
     ROOT / "crates" / "core" / "migrations" / "0008_task_attempt_generation.sql",
     ROOT / "crates" / "core" / "migrations" / "0011_plugins_extended.sql",
+    ROOT / "crates" / "core" / "migrations" / "0012_preview_pipeline_refactor.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -41,6 +42,7 @@ REQUIRED_TABLES = {
     "file_operations",
     "plugins",
     "media_fts",
+    "thumb_blobs",
 }
 
 REQUIRED_INDEXES = {
@@ -67,6 +69,34 @@ REQUIRED_INDEXES = {
     "idx_tasks_status_priority",
     "idx_file_operations_status_created",
     "idx_plugins_status",
+    "idx_thumb_blobs_profile_updated_at",
+}
+
+EXPECTED_MEDIA_COLUMNS = {
+    "file_id",
+    "kind",
+    "width",
+    "height",
+    "duration_ms",
+    "codec",
+    "orientation",
+    "has_alpha",
+    "dominant_color",
+    "phash",
+    "metadata_status",
+}
+EXPECTED_MEDIA_COLUMNS |= {"preview_placeholder", "preview_placeholder_format"}
+
+EXPECTED_THUMB_BLOBS_COLUMNS = {
+    "file_id",
+    "profile",
+    "data",
+    "width",
+    "height",
+    "byte_size",
+    "output_format",
+    "created_at",
+    "updated_at",
 }
 
 THUMBNAIL_STATUSES = {"pending", "queued", "ready", "failed", "skipped_small"}
@@ -158,6 +188,25 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 11 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 12"
+            ).fetchone()
+            if version is None:
+                fail("migration version 12 was not recorded")
+
+            media_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(media)").fetchall()
+            }
+            missing_media_columns = EXPECTED_MEDIA_COLUMNS - media_columns
+            if missing_media_columns:
+                fail(f"missing media columns: {sorted(missing_media_columns)}")
+
+            thumb_blobs_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(thumb_blobs)").fetchall()
+            }
+            missing_thumb_blobs_columns = EXPECTED_THUMB_BLOBS_COLUMNS - thumb_blobs_columns
+            if missing_thumb_blobs_columns:
+                fail(f"missing thumb blob columns: {sorted(missing_thumb_blobs_columns)}")
 
             task_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
