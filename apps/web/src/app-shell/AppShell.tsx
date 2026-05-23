@@ -1,8 +1,9 @@
-import type { MouseEvent, ReactNode } from "react";
-import { getWindowControls } from "../core/desktop";
+import { useRef, type ReactNode } from "react";
+import { useTitlebarPointerPlane } from "./useTitlebarPointerPlane";
 import { LiquidGlassSurface } from "../design/liquid-glass";
 
 interface AppShellProps {
+  layout: "library" | "simple";
   titlebarLeft: ReactNode;
   titlebarCenter: ReactNode;
   titlebarRight: ReactNode;
@@ -11,27 +12,8 @@ interface AppShellProps {
   overlays: ReactNode;
 }
 
-const titlebarNoDragSelector = [
-  ".no-drag",
-  '[data-no-drag="true"]',
-  "button",
-  "input",
-  "select",
-  "textarea",
-  "a",
-  '[role="button"]',
-  '[role="tab"]',
-  '[role="tablist"]',
-  '[role="group"]'
-].join(",");
-
-function handleTitlebarDoubleClick(event: MouseEvent<HTMLElement>) {
-  const target = event.target;
-  if (!(target instanceof Element) || target.closest(titlebarNoDragSelector)) return;
-  void getWindowControls()?.maximize();
-}
-
 export function AppShell({
+  layout,
   titlebarLeft,
   titlebarCenter,
   titlebarRight,
@@ -39,14 +21,18 @@ export function AppShell({
   workspace,
   overlays
 }: AppShellProps) {
+  const shellRef = useRef<HTMLElement | null>(null);
+  const { titlebarSurfaceProps } = useTitlebarPointerPlane(shellRef);
+
   return (
-    <main className="app-shell">
+    <main ref={shellRef} className="app-shell" data-layout={layout}>
       <LiquidGlassSurface
         as="section"
         className="shell-titlebar shell-titlebar-left shell-drag"
         aria-label="Primary navigation"
+        backgroundGlow
         interactive
-        onDoubleClick={handleTitlebarDoubleClick}
+        {...titlebarSurfaceProps}
         tone="chrome"
       >
         {titlebarLeft}
@@ -55,8 +41,9 @@ export function AppShell({
         as="section"
         className="shell-titlebar shell-titlebar-center shell-drag"
         aria-label="Workspace toolbar"
+        backgroundGlow
         interactive
-        onDoubleClick={handleTitlebarDoubleClick}
+        {...titlebarSurfaceProps}
         tone="chrome"
       >
         {titlebarCenter}
@@ -65,8 +52,9 @@ export function AppShell({
         as="section"
         className="shell-titlebar shell-titlebar-right shell-drag"
         aria-label="Window actions"
+        backgroundGlow
         interactive
-        onDoubleClick={handleTitlebarDoubleClick}
+        {...titlebarSurfaceProps}
         tone="chrome"
       >
         {titlebarRight}

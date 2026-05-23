@@ -133,6 +133,7 @@ export function SortMenu({
         }`}
         data-compact-popover="sort"
         data-compact-popover-trigger="sort"
+        data-titlebar-control="library-sort"
         onClick={() => setOpen(!open)}
         title={`Sort: ${selectedLabel}`}
         tone="control"

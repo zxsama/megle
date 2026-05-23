@@ -43,6 +43,7 @@ const windowChrome = read("apps/web/src/features/window-chrome/WindowChrome.tsx"
 const liquidGlassSurface = read("apps/web/src/design/liquid-glass/LiquidGlassSurface.tsx");
 const liquidGlassIndex = read("apps/web/src/design/liquid-glass/index.ts");
 const sortMenu = read("apps/web/src/features/library/SortMenu.tsx");
+const searchBar = read("apps/web/src/features/library/SearchBar.tsx");
 const inspectorMetadata = read("apps/web/src/features/preview/InspectorMetadata.tsx");
 const renameDialog = read("apps/web/src/features/file-ops/RenameDialog.tsx");
 const moveDialog = read("apps/web/src/features/file-ops/MoveDialog.tsx");
@@ -62,6 +63,7 @@ const interfaceStyle = read("apps/web/src/features/settings/interfaceStyle.ts");
 const taskPanel = read("apps/web/src/features/tasks/TaskPanel.tsx");
 const contextMenu = read("apps/web/src/features/file-ops/ContextMenu.tsx");
 const desktopBridge = read("apps/web/src/core/desktop.ts");
+const titlebarPointerPlane = readOptional("apps/web/src/app-shell/useTitlebarPointerPlane.ts") ?? "";
 const libraryFilterSources = libraryView + "\n" + (filterMenu ?? "");
 const desktopMainAst = ts.createSourceFile(
   "apps/desktop/src/main.ts",
@@ -328,6 +330,55 @@ if (!windowChrome.includes("window-chrome-button-close")) {
 
 if (!shellTitlebar.includes("WindowChrome")) {
   fail("integrated titlebar must render custom window chrome controls");
+}
+
+for (const value of [
+  "useTitlebarPointerPlane",
+  "data-titlebar-control",
+  "data-titlebar-search"
+]) {
+  if (
+    !appShell.includes(value) &&
+    !shellTitlebar.includes(value) &&
+    !windowChrome.includes(value) &&
+    !searchBar.includes(value) &&
+    !titlebarPointerPlane.includes(value)
+  ) {
+    fail(`titlebar interaction plane contract missing ${value}`);
+  }
+}
+
+for (const [source, value, message] of [
+  [titlebarPointerPlane, "TITLEBAR_PLANE_HALO_PX", "shared titlebar pointer plane must include a halo-zone radius instead of relying on direct hover only"],
+  [titlebarPointerPlane, "data-titlebar-surface", "shared titlebar pointer plane must route over annotated titlebar surfaces"],
+  [appShell, "titlebarSurfaceProps", "AppShell must consume the shared titlebar pointer plane helper"],
+  [shellTitlebar, "tasks-palette", "titlebar tasks control must participate in the shared titlebar pointer plane"],
+  [shellTitlebar, "recent-operations", "titlebar recent-operations control must participate in the shared titlebar pointer plane"],
+  [filterMenu ?? "", "library-filter", "library filter trigger must participate in the shared titlebar pointer plane"],
+  [sortMenu, "library-sort", "library sort trigger must participate in the shared titlebar pointer plane"],
+  [searchBar, "library-search", "search field must participate in the shared titlebar pointer plane"],
+  [windowChrome, "window-minimize", "window chrome controls must participate in the shared titlebar pointer plane"],
+  [stylesForChecks, ".shell-titlebar [data-titlebar-control]", "titlebar control annotations must stay no-drag in CSS"]
+]) {
+  if (!source.includes(value)) {
+    fail(message);
+  }
+}
+
+for (const [source, value, message] of [
+  [searchBar, "outlineOnly", "search bar must opt into the outline-only liquid-glass mode"],
+  [searchBar, "interactiveBackground={false}", "search bar must disable inner local glass halo/background fill"],
+  [windowChrome, "data-titlebar-control", "window chrome buttons must participate in the shared titlebar pointer plane"],
+  [liquidGlassSurface, "outlineOnly", "liquid glass surface must expose an outline-only mode for the titlebar search rule"],
+  [liquidGlassSurface, "interactiveBackground", "liquid glass surface must support disabling local interactive background halo"],
+  [stylesForChecks, '[data-glass-outline-only="true"]', "styles must define the outline-only search-field surface contract"],
+  [stylesForChecks, '.search-bar[data-titlebar-search="true"]::after', "titlebar search must keep exactly one outer outline rule"],
+  [stylesForChecks, '.search-bar[data-titlebar-search="true"] > .liquid-glass-backdrop', "titlebar search must suppress the inner glass backdrop/lens layers"],
+  [stylesForChecks, ".search-bar-input:focus-visible", "titlebar search must suppress the inner input focus ring in CSS"]
+]) {
+  if (!source.includes(value)) {
+    fail(message);
+  }
 }
 
 for (const value of [

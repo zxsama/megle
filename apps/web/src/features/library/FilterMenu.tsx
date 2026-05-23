@@ -93,6 +93,7 @@ export function FilterMenu({
         className="filter-menu-trigger"
         data-compact-popover="filter"
         data-compact-popover-trigger="filter"
+        data-titlebar-control="library-filter"
         onClick={() => setOpen(!open)}
         title="Filters"
         tone="control"

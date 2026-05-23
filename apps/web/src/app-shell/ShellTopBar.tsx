@@ -108,6 +108,7 @@ export function ShellPrimaryNav({
                 ? "shell-nav-button active no-drag"
                 : "shell-nav-button no-drag"
             }
+            data-titlebar-control={`nav-${tab.id}`}
             key={tab.id}
             onClick={() => onSelectView(tab.id)}
             role="tab"
@@ -159,7 +160,7 @@ export function LibraryTitlebarToolbar({
 }: LibraryTitlebarToolbarProps) {
   return (
     <div className="titlebar-workspace-toolbar titlebar-library-toolbar">
-      <div className="titlebar-workspace-controls titlebar-library-controls no-drag">
+      <div className="titlebar-workspace-controls titlebar-library-controls no-drag" data-no-drag="true">
         <FilterMenu
           open={filterOpen}
           favorite={favorite}
@@ -186,6 +187,7 @@ export function LibraryTitlebarToolbar({
         <LiquidGlassButton
           aria-label="Refresh library"
           className="titlebar-icon-button"
+          data-titlebar-control="library-refresh"
           onClick={onRefresh}
           title="Refresh"
           tone="control"
@@ -199,7 +201,7 @@ export function LibraryTitlebarToolbar({
         {searchActive ? " / filtered" : ""}
         {scanActive ? " / scanning" : ""}
       </div>
-      <div className="titlebar-library-search no-drag">
+      <div className="titlebar-library-search no-drag" data-no-drag="true">
         <SearchBar value={q} onChange={onSetQ} />
       </div>
     </div>
@@ -224,10 +226,11 @@ export function PreviewTitlebarToolbar({
 
   return (
     <div className="titlebar-workspace-toolbar titlebar-preview-toolbar">
-      <div className="titlebar-workspace-controls titlebar-preview-controls no-drag">
+      <div className="titlebar-workspace-controls titlebar-preview-controls no-drag" data-no-drag="true">
         <LiquidGlassButton
           aria-label="Back to library"
           className="titlebar-icon-button library-toolbar-back"
+          data-titlebar-control="preview-back"
           onClick={onBack}
           title="Back"
           tone="control"
@@ -239,6 +242,7 @@ export function PreviewTitlebarToolbar({
         <LiquidGlassButton
           aria-label="Previous media"
           className="titlebar-icon-button"
+          data-titlebar-control="preview-previous"
           disabled={!canGoPrevious}
           onClick={onGoPrevious}
           title="Previous"
@@ -250,6 +254,7 @@ export function PreviewTitlebarToolbar({
         <LiquidGlassButton
           aria-label="Next media"
           className="titlebar-icon-button"
+          data-titlebar-control="preview-next"
           disabled={!canGoNext}
           onClick={onGoNext}
           title="Next"
@@ -263,6 +268,7 @@ export function PreviewTitlebarToolbar({
           aria-pressed={mode === "actual"}
           active={mode === "actual"}
           className="titlebar-icon-button titlebar-preview-mode"
+          data-titlebar-control="preview-mode"
           onClick={onToggleActualSize}
           title={modeAction}
           tone="control"
@@ -273,6 +279,7 @@ export function PreviewTitlebarToolbar({
         <LiquidGlassButton
           aria-label="Reset preview view"
           className="titlebar-icon-button"
+          data-titlebar-control="preview-reset"
           onClick={onResetView}
           title="Reset view"
           tone="control"
@@ -314,6 +321,7 @@ export function ShellRightActions({
         }
         data-compact-popover="tasks"
         data-compact-popover-trigger="tasks"
+        data-titlebar-control="tasks-palette"
         onClick={taskPaletteOpen ? onCloseTasks : onOpenTasks}
         title={taskPaletteOpen ? "Close tasks palette" : "Open tasks palette"}
         tone="control"
@@ -330,6 +338,7 @@ export function ShellRightActions({
         className={`top-action recent-ops-toggle no-drag${recentOpsOpen ? " active" : ""}`}
         data-compact-popover="recent"
         data-compact-popover-trigger="recent"
+        data-titlebar-control="recent-operations"
         onClick={onToggleRecent}
         title="Recent file operations"
         tone="control"

@@ -12,7 +12,16 @@ export function SearchBar({ value, onChange, placeholder = "Search library…" }
   const inputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <LiquidGlassSurface as="div" className="search-bar" interactive tone="control">
+    <LiquidGlassSurface
+      as="div"
+      className="search-bar no-drag"
+      data-titlebar-control="library-search"
+      data-titlebar-search="true"
+      interactive
+      interactiveBackground={false}
+      outlineOnly
+      tone="control"
+    >
       <Search aria-hidden="true" className="search-bar-icon" size={15} />
       <input
         ref={inputRef}

@@ -51,7 +51,9 @@ export function WindowChrome() {
       <LiquidGlassButton
         aria-label="Minimize window"
         className="window-chrome-button"
+        data-titlebar-control="window-minimize"
         onClick={() => void controls.minimize()}
+        title="Minimize window"
         tone="control"
         type="button"
       >
@@ -60,7 +62,9 @@ export function WindowChrome() {
       <LiquidGlassButton
         aria-label={isMaximized ? "Restore window" : "Maximize window"}
         className="window-chrome-button"
+        data-titlebar-control="window-maximize"
         onClick={() => void handleMaximize()}
+        title={isMaximized ? "Restore window" : "Maximize window"}
         tone="control"
         type="button"
       >
@@ -69,7 +73,9 @@ export function WindowChrome() {
       <LiquidGlassButton
         aria-label="Close window"
         className="window-chrome-button window-chrome-button-close"
+        data-titlebar-control="window-close"
         onClick={() => void controls.close()}
+        title="Close window"
         tone="danger"
         type="button"
       >
