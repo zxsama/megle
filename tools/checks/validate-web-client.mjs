@@ -45,6 +45,14 @@ const scanRefreshEffectBlock = sourceMatch(
   useLibraryData,
   /useEffect\(\(\)\s*=>\s*\{\s*if\s*\(\s*!scanActiveRootTask[\s\S]*?\},\s*\[refreshCurrentScanView,\s*scanActiveRootTask,\s*(?:taskPollFailures|scanRefreshFailures)\]\);/
 );
+const selectedRootHandlerBlock = sourceMatch(
+  useLibraryData,
+  /setSelectedRootId:\s*\(rootId:\s*number\)\s*=>\s*\{[\s\S]*?\n\s*\},\n\s*setSelectedFolder:/
+);
+const selectedFolderHandlerBlock = sourceMatch(
+  useLibraryData,
+  /setSelectedFolder:\s*\(folder:\s*FolderRecord\)\s*=>\s*\{[\s\S]*?\n\s*\},\n\s*setSelectedMediaId:/
+);
 const mediaResourcesPath = "apps/web/src/core/mediaResources.ts";
 const mediaResources = existsSync(path.join(root, mediaResourcesPath))
   ? read(mediaResourcesPath)
@@ -227,6 +235,9 @@ if (!refreshCurrentScanViewBlock) {
 if (!scanRefreshEffectBlock) {
   fail("useLibraryData must keep the root-scan refresh effect inspectable");
 }
+if (!selectedRootHandlerBlock || !selectedFolderHandlerBlock) {
+  fail("useLibraryData must keep root and folder navigation handlers inspectable");
+}
 if (
   !/const\s+\[scanRefreshFailures,\s*setScanRefreshFailures\]\s*=\s*useState\(0\)/.test(useLibraryData) ||
   !/scanRefreshFailures\s*>=\s*3/.test(scanRefreshEffectBlock) ||
@@ -252,6 +263,30 @@ if (
   )
 ) {
   fail("reloadCurrentMedia must rethrow reload failures so scan refresh backoff can trip");
+}
+if (
+  !/reloadCurrentMedia\(\{[\s\S]*?\}\)\s*\.catch\(\(cause\)\s*=>\s*\{[\s\S]*?setError\(errorMessage\(cause\)\)/.test(
+    selectedRootHandlerBlock
+  ) ||
+  !/reloadCurrentMedia\(\{[\s\S]*?\}\)\s*\.catch\(\(cause\)\s*=>\s*\{[\s\S]*?setError\(errorMessage\(cause\)\)/.test(
+    selectedFolderHandlerBlock
+  )
+) {
+  fail("useLibraryData navigation-triggered media reloads must catch rethrown failures");
+}
+if (
+  !/setScanRefreshFailures\(0\)/.test(selectedRootHandlerBlock) ||
+  !/setScanRefreshFailures\(0\)/.test(selectedFolderHandlerBlock)
+) {
+  fail("useLibraryData must reset scan refresh failures when root or folder navigation changes context");
+}
+if (
+  !/scanRefreshActiveRootIdRef\s*=\s*useRef<number\s*\|\s*null>\(null\)/.test(useLibraryData) ||
+  !/useEffect\(\(\)\s*=>\s*\{[\s\S]*?if\s*\(\s*!scanActiveRootTask\s*\)\s*\{[\s\S]*?scanRefreshActiveRootIdRef\.current\s*=\s*null[\s\S]*?return;?[\s\S]*?\}[\s\S]*?if\s*\(\s*scanRefreshActiveRootIdRef\.current\s*!==\s*selectedRootId\s*\)\s*\{[\s\S]*?scanRefreshActiveRootIdRef\.current\s*=\s*selectedRootId[\s\S]*?setScanRefreshFailures\(0\)[\s\S]*?\}[\s\S]*?\},\s*\[scanActiveRootTask,\s*selectedRootId\]\);/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData must reset scan refresh failures when a new selected-root scan context begins");
 }
 if (!/setInterval[\s\S]*?refreshCurrentScanView\(\)[\s\S]*?\.catch/.test(scanRefreshEffectBlock)) {
   fail("useLibraryData must run the current-view refresh loop while a root scan is active");

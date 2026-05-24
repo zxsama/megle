@@ -144,6 +144,7 @@ export function useLibraryData(): LibraryState {
   const inFlightFolderChildPageKeys = useRef<Set<string>>(new Set());
   const loadedFolderChildPageKeys = useRef<Set<string>>(new Set());
   const scanRefreshInFlightRef = useRef(false);
+  const scanRefreshActiveRootIdRef = useRef<number | null>(null);
   const scanRefreshSelectionVersionRef = useRef(0);
   const [roots, setRoots] = useState<RootRecord[]>([]);
   const [folderChildrenByParent, setFolderChildrenByParent] = useState<Record<number, FolderRecord[]>>(
@@ -741,6 +742,18 @@ export function useLibraryData(): LibraryState {
     return () => window.clearInterval(timer);
   }, [refreshCurrentScanView, scanActiveRootTask, scanRefreshFailures]);
 
+  useEffect(() => {
+    if (!scanActiveRootTask) {
+      scanRefreshActiveRootIdRef.current = null;
+      return;
+    }
+
+    if (scanRefreshActiveRootIdRef.current !== selectedRootId) {
+      scanRefreshActiveRootIdRef.current = selectedRootId;
+      setScanRefreshFailures(0);
+    }
+  }, [scanActiveRootTask, selectedRootId]);
+
   const refresh = useCallback(async () => {
     await loadLibrary();
   }, [loadLibrary]);
@@ -1327,6 +1340,7 @@ export function useLibraryData(): LibraryState {
       const root = roots.find((item) => item.id === rootId);
       mediaPageGeneration.current += 1;
       scanRefreshSelectionVersionRef.current += 1;
+      setScanRefreshFailures(0);
       selectRoot(rootId);
       selectFolder(root?.rootFolderId ?? null);
       if (root?.rootFolderId) {
@@ -1334,14 +1348,19 @@ export function useLibraryData(): LibraryState {
         setExpandedFolderIds((current) => new Set(current).add(rootFolderId));
         void loadFolderChildren(rootFolderId);
       }
-      void reloadCurrentMedia({ rootId, folderId: root?.rootFolderId ?? null });
+      void reloadCurrentMedia({ rootId, folderId: root?.rootFolderId ?? null }).catch((cause) => {
+        setError(errorMessage(cause));
+      });
     },
     setSelectedFolder: (folder: FolderRecord) => {
       mediaPageGeneration.current += 1;
       scanRefreshSelectionVersionRef.current += 1;
+      setScanRefreshFailures(0);
       selectRoot(folder.rootId);
       selectFolder(folder.id);
-      void reloadCurrentMedia({ rootId: folder.rootId, folderId: folder.id });
+      void reloadCurrentMedia({ rootId: folder.rootId, folderId: folder.id }).catch((cause) => {
+        setError(errorMessage(cause));
+      });
     },
     setSelectedMediaId: selectMedia,
     requestThumbnailStates,
