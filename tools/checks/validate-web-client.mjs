@@ -189,6 +189,29 @@ if (!/requestGeneration\s*!==\s*mediaPageGeneration\.current/.test(useLibraryDat
 if (!/const loadLibrary = useCallback\(async \(\) => \{\s*const requestGeneration = \+\+mediaPageGeneration\.current;[\s\S]*?await loadRoots/.test(useLibraryData)) {
   fail("loadLibrary must invalidate media page generation before awaited reload work starts");
 }
+if (!/SCAN_REFRESH_INTERVAL_MS/.test(useLibraryData)) {
+  fail("useLibraryData must define a scan-time current-view refresh interval");
+}
+if (!/scanActiveRootTask/.test(useLibraryData) || !/loadTasks/.test(useLibraryData)) {
+  fail("useLibraryData must track active root scans for the selected root");
+}
+if (
+  !/reloadCurrentMedia\s*=\s*useCallback/.test(useLibraryData) ||
+  !/selectedFolderId/.test(useLibraryData) ||
+  !/listMedia/.test(useLibraryData)
+) {
+  fail("useLibraryData must reload current folder media while scanning");
+}
+if (
+  !/refreshCurrentScanView\s*=\s*useCallback[\s\S]*?await\s+loadTasks\(\)[\s\S]*?selectedFolderId[\s\S]*?loadFolderChildren\(selectedFolderId\)[\s\S]*?reloadCurrentMedia\(\{[\s\S]*?folderId:\s*selectedFolderId/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData must incrementally refresh current folder media and children during scan");
+}
+if (!/setInterval[\s\S]*?refreshCurrentScanView\(\)\.catch/.test(useLibraryData)) {
+  fail("useLibraryData must run the current-view refresh loop while a root scan is active");
+}
 if (!mediaGrid.includes("onRequestMore") || !mediaGrid.includes("hasMore")) {
   fail("MediaGrid must request incremental media pages near the loaded tail");
 }

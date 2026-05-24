@@ -26,6 +26,7 @@ import {
 
 const PAGE_LIMIT = 200;
 const SEARCH_DEBOUNCE_MS = 250;
+const SCAN_REFRESH_INTERVAL_MS = 800;
 
 export type LibrarySort =
   | "mtime_desc"
@@ -203,6 +204,14 @@ export function useLibraryData(): LibraryState {
     [folderChildrenByParent]
   );
   const scanActive = tasks.some((task) => task.status === "pending" || task.status === "running");
+  const scanActiveRootTask =
+    selectedRootId !== null &&
+    tasks.some(
+      (task) =>
+        task.kind === "root_scan" &&
+        task.rootId === selectedRootId &&
+        isTaskActive(task)
+    );
   const tagsById = useMemo(() => new Map(tags.map((tag) => [tag.id, tag])), [tags]);
 
   const searchActive = useMemo(
@@ -386,6 +395,92 @@ export function useLibraryData(): LibraryState {
     return response.items;
   }, [client]);
 
+  const reloadCurrentMedia = useCallback(
+    async (scope?: { rootId?: number; folderId?: number | null }) => {
+      const rootId = scope?.rootId ?? selectedRootId;
+      if (rootId === null) {
+        return;
+      }
+
+      const root = roots.find((item) => item.id === rootId);
+      if (!root) {
+        return;
+      }
+
+      const folderId = scope && "folderId" in scope ? scope.folderId : selectedFolderId;
+      const folderFilter =
+        folderId !== null && folderId !== undefined && folderId !== root.rootFolderId
+          ? folderId
+          : undefined;
+      const requestGeneration = ++mediaPageGeneration.current;
+      inFlightMediaPageKeys.current.clear();
+      loadedMediaPageKeys.current.clear();
+      setError(null);
+
+      try {
+        const cursor = null;
+        const sort = searchStateRef.current.sort;
+        const mediaPage = searchActiveRef.current
+          ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
+              rootId: root.id,
+              folderId: folderFilter,
+              cursor: cursor ?? undefined,
+              limit: PAGE_LIMIT
+            }))
+          : await client.listMedia({
+              cursor: cursor ?? undefined,
+              folderId: folderFilter,
+              limit: PAGE_LIMIT,
+              rootId: root.id,
+              sort: listMediaSort(sort)
+            });
+        if (requestGeneration !== mediaPageGeneration.current) {
+          return;
+        }
+        setMedia(mediaPage.items);
+        setMediaNextCursor(mediaPage.nextCursor);
+        selectMedia((current) =>
+          current && mediaPage.items.some((item) => item.id === current)
+            ? current
+            : mediaPage.items[0]?.id ?? null
+        );
+      } catch (cause) {
+        setError(errorMessage(cause));
+      }
+    },
+    [client, roots, selectedFolderId, selectedRootId]
+  );
+
+  const refreshCurrentScanView = useCallback(async () => {
+    if (selectedRootId === null) {
+      return;
+    }
+
+    await loadTasks();
+    const root = roots.find((item) => item.id === selectedRootId);
+    if (selectedFolderId !== null) {
+      await loadFolderChildren(selectedFolderId);
+      const folderIds = new Set<number>(expandedFolderIds);
+      if (root?.rootFolderId) {
+        folderIds.add(root.rootFolderId);
+      }
+      folderIds.delete(selectedFolderId);
+      await Promise.all([...folderIds].map((folderId) => loadFolderChildren(folderId)));
+      await reloadCurrentMedia({ rootId: selectedRootId, folderId: selectedFolderId });
+      return;
+    }
+
+    await reloadCurrentMedia({ rootId: selectedRootId, folderId: null });
+  }, [
+    expandedFolderIds,
+    loadFolderChildren,
+    loadTasks,
+    reloadCurrentMedia,
+    roots,
+    selectedFolderId,
+    selectedRootId
+  ]);
+
   const loadLibrary = useCallback(async () => {
     const requestGeneration = ++mediaPageGeneration.current;
     inFlightMediaPageKeys.current.clear();
@@ -562,6 +657,20 @@ export function useLibraryData(): LibraryState {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [loadTasks, scanActive, taskPollFailures]);
+
+  useEffect(() => {
+    if (!scanActiveRootTask || taskPollFailures >= 3) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshCurrentScanView().catch((cause) => {
+        setTaskPollFailures((failures) => failures + 1);
+        setError(errorMessage(cause));
+      });
+    }, SCAN_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [refreshCurrentScanView, scanActiveRootTask, taskPollFailures]);
 
   const refresh = useCallback(async () => {
     await loadLibrary();
@@ -1154,11 +1263,13 @@ export function useLibraryData(): LibraryState {
         setExpandedFolderIds((current) => new Set(current).add(rootFolderId));
         void loadFolderChildren(rootFolderId);
       }
+      void reloadCurrentMedia({ rootId, folderId: root?.rootFolderId ?? null });
     },
     setSelectedFolder: (folder: FolderRecord) => {
       mediaPageGeneration.current += 1;
       selectRoot(folder.rootId);
       selectFolder(folder.id);
+      void reloadCurrentMedia({ rootId: folder.rootId, folderId: folder.id });
     },
     setSelectedMediaId: selectMedia,
     requestThumbnailStates,
@@ -1310,6 +1421,10 @@ function listMediaSort(sort: LibrarySort): "mtime_desc" | "mtime_asc" | "name_as
     default:
       return "mtime_desc";
   }
+}
+
+function isTaskActive(task: TaskRecord): boolean {
+  return task.status === "pending" || task.status === "running";
 }
 
 function buildSearchParams(
