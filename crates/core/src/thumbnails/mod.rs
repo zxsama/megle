@@ -65,7 +65,9 @@ pub enum ThumbnailStatus {
 pub const GRID_320_PROFILE: &str = "grid_320";
 pub const GRID_320_SHORT_SIDE_PX: i64 = 320;
 pub const GENERATED_FORMAT: &str = "image/webp";
+#[allow(dead_code)]
 pub const PREVIEW_PLACEHOLDER_SHORT_SIDE_PX: u32 = 20;
+#[allow(dead_code)]
 pub const PREVIEW_PLACEHOLDER_MAX_SIDE_PX: u32 = 64;
 #[allow(dead_code)]
 pub const THUMBNAIL_PROFILE_VALUES: &[&str] = &[GRID_320_PROFILE];
@@ -107,6 +109,7 @@ pub struct GeneratedThumbnail {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct PreviewPlaceholder {
     pub data: Vec<u8>,
     pub width: i64,
@@ -241,6 +244,7 @@ pub fn generate_image_thumbnail_bytes(source_path: &Path) -> anyhow::Result<Gene
     })
 }
 
+#[allow(dead_code)]
 pub fn generate_preview_placeholder(source_path: &Path) -> anyhow::Result<PreviewPlaceholder> {
     let reader = ImageReader::open(source_path)
         .map_err(|error| anyhow::anyhow!("placeholder decode failed: {error}"))?
@@ -409,6 +413,7 @@ fn target_dimensions(width: u32, height: u32, short_side_px: u32) -> (u32, u32) 
     }
 }
 
+#[allow(dead_code)]
 fn placeholder_dimensions(
     width: u32,
     height: u32,

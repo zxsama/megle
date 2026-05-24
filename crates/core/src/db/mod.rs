@@ -144,6 +144,7 @@ impl ThumbnailSourceRecord {
 #[derive(Debug)]
 pub struct ScanWriteBatchResult {
     pub folder_ids: Vec<i64>,
+    #[allow(dead_code)]
     pub file_ids: Vec<i64>,
 }
 
@@ -1971,6 +1972,7 @@ impl Database {
     /// Used by metadata/preview work outside the root scan ingest path. Leaves
     /// pixel-level metadata (duration_ms, codec) untouched so a later metadata
     /// task can still fill those in.
+    #[allow(dead_code)]
     pub fn update_media_dimensions(
         &self,
         file_id: i64,
