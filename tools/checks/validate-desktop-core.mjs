@@ -211,6 +211,40 @@ if (!shouldRetryBody) {
     }
   }
 }
+
+const createWindowBody = functionBody(main, "async function createWindow(): Promise<void>");
+if (!createWindowBody) {
+  fail("desktop main must keep createWindow as an async function");
+} else {
+  const loadUrlIndex = createWindowBody.indexOf("await window.loadURL(devServer)");
+  if (loadUrlIndex === -1) {
+    fail("desktop createWindow must load the configured renderer URL");
+  } else if (/const\s+devServer[\s\S]*?;\s*armShellReadyFailureFallback\(window\);\s*try\s*\{\s*await\s+window\.loadURL\(devServer\)/.test(createWindowBody)) {
+    fail("desktop shell-ready failure fallback must not start before renderer loadURL has had a chance to run");
+  }
+  if (!/await\s+window\.loadURL\(devServer\);[\s\S]*?armShellReadyFailureFallback\(window\)/.test(createWindowBody)) {
+    fail("desktop shell-ready failure fallback must be armed after renderer loadURL completes");
+  }
+}
+
+const shellReadyHandlerBody = functionBody(main, 'ipcMain.handle("megle:shell-ready", async () =>');
+if (!shellReadyHandlerBody) {
+  fail("desktop main must handle the shell-ready IPC handshake");
+} else {
+  const clearIndex = shellReadyHandlerBody.indexOf("clearShellReadyFailureFallback()");
+  const revealIndex = shellReadyHandlerBody.indexOf("revealMainWindowForShellReady(window)");
+  if (clearIndex === -1 || revealIndex === -1 || clearIndex > revealIndex) {
+    fail("desktop shell-ready IPC must clear the failure fallback before waiting for ready-to-show reveal");
+  }
+}
+
+const armShellReadyFailureFallbackBody = functionBody(main, "function armShellReadyFailureFallback(window: BrowserWindow)");
+if (!armShellReadyFailureFallbackBody) {
+  fail("desktop main must keep armShellReadyFailureFallback as an inspectable helper");
+} else if (!armShellReadyFailureFallbackBody.includes("shellReadyRevealPromise")) {
+  fail("desktop shell-ready failure fallback must not arm while a shell-ready reveal is already pending");
+}
+
 if (!main.includes(".catch(handleDesktopStartupFailure)")) {
   fail("desktop main must catch app startup failures instead of leaving unhandled rejections");
 }

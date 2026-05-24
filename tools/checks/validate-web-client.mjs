@@ -58,6 +58,7 @@ const mediaResources = existsSync(path.join(root, mediaResourcesPath))
   ? read(mediaResourcesPath)
   : "";
 const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const main = read("apps/web/src/main.tsx");
 const app = read("apps/web/src/app/App.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
 const librarySidebar = read("apps/web/src/features/library/LibrarySidebar.tsx");
@@ -156,6 +157,22 @@ if (
   )
 ) {
   fail("notifyDesktopShellReady must reset its latch when notifyShellReady resolves false so later calls can retry");
+}
+
+if (!/import\s+\{\s*notifyDesktopShellReady\s*\}\s+from\s+"\.\/core\/desktop";/.test(main)) {
+  fail("web entrypoint must import notifyDesktopShellReady for the earliest desktop shell-ready handshake");
+}
+
+if (!/void\s+notifyDesktopShellReady\(\);\s*[\s\S]*?ReactDOM\.createRoot/.test(main)) {
+  fail("web entrypoint must notify desktop shell readiness before mounting React");
+}
+
+if (/import\s+\{\s*App\s*\}\s+from\s+"\.\/app\/App";/.test(main)) {
+  fail("web entrypoint must not statically import App before the desktop shell-ready handshake");
+}
+
+if (!/void\s+notifyDesktopShellReady\(\);\s*[\s\S]*?import\("\.\/app\/App"\)[\s\S]*?ReactDOM\.createRoot/.test(main)) {
+  fail("web entrypoint must load App only after the early desktop shell-ready handshake has been queued");
 }
 
 if (!mediaGrid.includes("@tanstack/react-virtual") || !mediaGrid.includes("useVirtualizer")) {

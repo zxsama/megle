@@ -32,6 +32,7 @@ const desktopMain = read("apps/desktop/src/main.ts");
 const preload = read("apps/desktop/src/preload.cjs");
 const styles = read("apps/web/src/styles.css");
 const stylesForChecks = stripCssComments(styles);
+const webMain = read("apps/web/src/main.tsx");
 const app = read("apps/web/src/app/App.tsx");
 const appShell = read("apps/web/src/app-shell/AppShell.tsx");
 const shellTitlebar = read("apps/web/src/app-shell/ShellTopBar.tsx");
@@ -164,11 +165,24 @@ for (const [source, value, message] of [
   [desktopMain, 'ipcMain.handle("megle:shell-ready"', "desktop main must expose a megle:shell-ready IPC handshake before the window can become visible"],
   [preload, "notifyShellReady", "desktop preload must own the notifyShellReady bridge surface"],
   [desktopBridge, "notifyDesktopShellReady", "desktop bridge helper must expose notifyDesktopShellReady so renderer code stays off window.megleDesktop"],
+  [webMain, "notifyDesktopShellReady", "web entrypoint must notify desktop shell readiness before React effects can miss the startup timeout"],
   [app, "notifyDesktopShellReady", "App must notify desktop shell readiness after the shell mounts"]
 ]) {
   if (!source.includes(value)) {
     fail(message);
   }
+}
+
+if (!/void\s+notifyDesktopShellReady\(\);\s*[\s\S]*?ReactDOM\.createRoot/.test(webMain)) {
+  fail("web entrypoint shell-ready notification must run before React mounts");
+}
+
+if (/import\s+\{\s*App\s*\}\s+from\s+"\.\/app\/App";/.test(webMain)) {
+  fail("web entrypoint must not statically import App before the desktop shell-ready handshake");
+}
+
+if (!/void\s+notifyDesktopShellReady\(\);\s*[\s\S]*?import\("\.\/app\/App"\)[\s\S]*?ReactDOM\.createRoot/.test(webMain)) {
+  fail("web entrypoint must load App only after the early desktop shell-ready handshake has been queued");
 }
 
 assertDesktopRevealOrderingContract();
@@ -2944,7 +2958,6 @@ function assertDesktopRevealOrderingRegressionProbe() {
     async function createWindow() {
       const window = createMockWindow();
       const armFallback = () => armShellReadyFailureFallback(window);
-      armFallback();
       window.once("ready-to-show", () => {
         const rearmFallback = () => armShellReadyFailureFallback(window);
         rearmFallback();
@@ -2956,6 +2969,7 @@ function assertDesktopRevealOrderingRegressionProbe() {
         revealMainWindowForLaunchFailure(window);
       });
       await window.loadURL("http://127.0.0.1:5173");
+      armShellReadyFailureFallback(window);
     }
     function armShellReadyFailureFallback(window) {
       return window;
@@ -3005,7 +3019,6 @@ function assertDesktopRevealOrderingRegressionProbe() {
     async function createWindow() {
       const window = createMockWindow();
       const helpers = { armFallback: () => armShellReadyFailureFallback(window) };
-      helpers.armFallback();
       window.once("ready-to-show", () => {
         const readyHelpers = {
           rearmFallback() {
@@ -3021,6 +3034,7 @@ function assertDesktopRevealOrderingRegressionProbe() {
         revealMainWindowForLaunchFailure(window);
       });
       await window.loadURL("http://127.0.0.1:5173");
+      armShellReadyFailureFallback(window);
     }
     function armShellReadyFailureFallback(window) {
       return window;
@@ -3245,7 +3259,6 @@ function assertDesktopRevealOrderingRegressionProbe() {
     async function createWindow() {
       const window = createMockWindow();
       const armLater = armShellReadyFailureFallback;
-      armLater(window);
       window.once("ready-to-show", () => {
         const rearmLater = armShellReadyFailureFallback;
         rearmLater(window);
@@ -3257,6 +3270,7 @@ function assertDesktopRevealOrderingRegressionProbe() {
         revealMainWindowForLaunchFailure(window);
       });
       await window.loadURL("http://127.0.0.1:5173");
+      armLater(window);
     }
     function armShellReadyFailureFallback(window) {
       return window;
@@ -3424,9 +3438,9 @@ function assertDesktopRevealOrderingRegressionProbe() {
           revealMainWindowForLaunchFailure(window);
         });
       };
-      armShellReadyFailureFallback(window);
       registerHandlers();
       await window.loadURL("http://127.0.0.1:5173");
+      armShellReadyFailureFallback(window);
     }
     function armShellReadyFailureFallback(window) {
       return window;
@@ -3448,7 +3462,6 @@ function assertDesktopRevealOrderingRegressionProbe() {
     }
     async function createWindow() {
       const window = createMockWindow();
-      armShellReadyFailureFallback(window);
       window.once("ready-to-show", () => {
         armShellReadyFailureFallback(window);
         {
@@ -3465,6 +3478,7 @@ function assertDesktopRevealOrderingRegressionProbe() {
         revealMainWindowForLaunchFailure(window);
       });
       await window.loadURL("http://127.0.0.1:5173");
+      armShellReadyFailureFallback(window);
     }
     function armShellReadyFailureFallback(window) {
       return window;
@@ -3545,8 +3559,19 @@ function collectDesktopRevealOrderingFailures(sourceFile) {
       getCreateWindowCallContext(record.call, parentMap) === "createWindow" &&
       record.call.getStart(sourceFile) < firstLoadUrlCall.getStart(sourceFile)
   );
-  if (!absoluteFallbackCall) {
-    failures.push("desktop startup must arm an absolute shell-ready failure fallback before loadURL begins navigation");
+  if (absoluteFallbackCall) {
+    failures.push("desktop startup must not arm the shell-ready failure fallback before loadURL gives the renderer a chance to run");
+  }
+
+  const postLoadFallbackCall = createWindowExecution.callRecords.find(
+    (record) =>
+      fallbackArmBinding &&
+      record.resolvedBinding?.id === fallbackArmBinding.id &&
+      getCreateWindowCallContext(record.call, parentMap) === "createWindow" &&
+      record.call.getStart(sourceFile) > firstLoadUrlCall.getStart(sourceFile)
+  );
+  if (!postLoadFallbackCall) {
+    failures.push("desktop startup must arm a shell-ready failure fallback after loadURL completes");
   }
 
   if (

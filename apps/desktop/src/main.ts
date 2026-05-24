@@ -210,6 +210,7 @@ ipcMain.handle("megle:shell-ready", async () => {
     return shellReadyRevealPromise;
   }
 
+  clearShellReadyFailureFallback();
   const revealPromise = revealMainWindowForShellReady(window);
   shellReadyRevealPromise = revealPromise;
   try {
@@ -334,9 +335,9 @@ async function createWindow(): Promise<void> {
   });
 
   const devServer = process.env.MEGLE_WEB_URL ?? "http://127.0.0.1:5173";
-  armShellReadyFailureFallback(window);
   try {
     await window.loadURL(devServer);
+    armShellReadyFailureFallback(window);
   } catch (error) {
     await revealMainWindowForLaunchFailure(window, "loadURL-rejected");
     console.warn("[megle] desktop renderer loadURL rejected:", error);
@@ -440,7 +441,7 @@ function clearShellReadyFailureFallback() {
 }
 
 function armShellReadyFailureFallback(window: BrowserWindow) {
-  if (window.isDestroyed() || shellReadyVisibleWindowId === window.id) {
+  if (window.isDestroyed() || shellReadyVisibleWindowId === window.id || shellReadyRevealPromise) {
     return;
   }
   clearShellReadyFailureFallback();
