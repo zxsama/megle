@@ -32,7 +32,19 @@ function walk(directory) {
   return files;
 }
 
+function sourceMatch(source, pattern) {
+  return source.match(pattern)?.[0] ?? "";
+}
+
 const useLibraryData = read("apps/web/src/core/useLibraryData.ts");
+const refreshCurrentScanViewBlock = sourceMatch(
+  useLibraryData,
+  /const\s+refreshCurrentScanView\s*=\s*useCallback\([\s\S]*?\n\s*\]\);\n\n\s*const\s+loadLibrary/
+);
+const scanRefreshEffectBlock = sourceMatch(
+  useLibraryData,
+  /useEffect\(\(\)\s*=>\s*\{[\s\S]*?!scanActiveRootTask[\s\S]*?\},\s*\[refreshCurrentScanView,\s*scanActiveRootTask,\s*taskPollFailures\]\);/
+);
 const mediaResourcesPath = "apps/web/src/core/mediaResources.ts";
 const mediaResources = existsSync(path.join(root, mediaResourcesPath))
   ? read(mediaResourcesPath)
@@ -209,7 +221,31 @@ if (
 ) {
   fail("useLibraryData must incrementally refresh current folder media and children during scan");
 }
-if (!/setInterval[\s\S]*?refreshCurrentScanView\(\)\.catch/.test(useLibraryData)) {
+if (!refreshCurrentScanViewBlock) {
+  fail("useLibraryData must keep refreshCurrentScanView as an inspectable useCallback");
+}
+if (!scanRefreshEffectBlock) {
+  fail("useLibraryData must keep the root-scan refresh effect inspectable");
+}
+if (
+  !/scanRefreshInFlightRef\s*=\s*useRef\(false\)/.test(useLibraryData) ||
+  !/if\s*\(\s*scanRefreshInFlightRef\.current\s*\)\s*\{\s*return;?\s*\}/.test(scanRefreshEffectBlock) ||
+  !/scanRefreshInFlightRef\.current\s*=\s*true/.test(scanRefreshEffectBlock) ||
+  !/finally\s*\(\(\)\s*=>\s*\{[\s\S]*?scanRefreshInFlightRef\.current\s*=\s*false/.test(scanRefreshEffectBlock)
+) {
+  fail("useLibraryData scan refresh loop must prevent overlapping refreshes with an in-flight guard");
+}
+if (/expandedFolderIds/.test(refreshCurrentScanViewBlock)) {
+  fail("useLibraryData scan refresh must not fan out across expanded folders");
+}
+if (
+  !/reloadCurrentMedia\s*=\s*useCallback[\s\S]*?catch\s*\(\s*cause\s*\)\s*\{[\s\S]*?setError\(errorMessage\(cause\)\);[\s\S]*?throw\s+cause;[\s\S]*?\}/.test(
+    useLibraryData
+  )
+) {
+  fail("reloadCurrentMedia must rethrow reload failures so scan refresh backoff can trip");
+}
+if (!/setInterval[\s\S]*?refreshCurrentScanView\(\)[\s\S]*?\.catch/.test(scanRefreshEffectBlock)) {
   fail("useLibraryData must run the current-view refresh loop while a root scan is active");
 }
 if (!mediaGrid.includes("onRequestMore") || !mediaGrid.includes("hasMore")) {

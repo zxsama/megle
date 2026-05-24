@@ -137,6 +137,7 @@ export function useLibraryData(): LibraryState {
   const loadedMediaPageKeys = useRef<Set<string>>(new Set());
   const inFlightFolderChildPageKeys = useRef<Set<string>>(new Set());
   const loadedFolderChildPageKeys = useRef<Set<string>>(new Set());
+  const scanRefreshInFlightRef = useRef(false);
   const [roots, setRoots] = useState<RootRecord[]>([]);
   const [folderChildrenByParent, setFolderChildrenByParent] = useState<Record<number, FolderRecord[]>>(
     {}
@@ -446,6 +447,7 @@ export function useLibraryData(): LibraryState {
         );
       } catch (cause) {
         setError(errorMessage(cause));
+        throw cause;
       }
     },
     [client, roots, selectedFolderId, selectedRootId]
@@ -460,19 +462,15 @@ export function useLibraryData(): LibraryState {
     const root = roots.find((item) => item.id === selectedRootId);
     if (selectedFolderId !== null) {
       await loadFolderChildren(selectedFolderId);
-      const folderIds = new Set<number>(expandedFolderIds);
-      if (root?.rootFolderId) {
-        folderIds.add(root.rootFolderId);
+      if (root?.rootFolderId && root.rootFolderId !== selectedFolderId) {
+        await loadFolderChildren(root.rootFolderId);
       }
-      folderIds.delete(selectedFolderId);
-      await Promise.all([...folderIds].map((folderId) => loadFolderChildren(folderId)));
       await reloadCurrentMedia({ rootId: selectedRootId, folderId: selectedFolderId });
       return;
     }
 
     await reloadCurrentMedia({ rootId: selectedRootId, folderId: null });
   }, [
-    expandedFolderIds,
     loadFolderChildren,
     loadTasks,
     reloadCurrentMedia,
@@ -664,10 +662,18 @@ export function useLibraryData(): LibraryState {
     }
 
     const timer = window.setInterval(() => {
-      void refreshCurrentScanView().catch((cause) => {
-        setTaskPollFailures((failures) => failures + 1);
-        setError(errorMessage(cause));
-      });
+      if (scanRefreshInFlightRef.current) {
+        return;
+      }
+      scanRefreshInFlightRef.current = true;
+      void refreshCurrentScanView()
+        .catch((cause) => {
+          setTaskPollFailures((failures) => failures + 1);
+          setError(errorMessage(cause));
+        })
+        .finally(() => {
+          scanRefreshInFlightRef.current = false;
+        });
     }, SCAN_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [refreshCurrentScanView, scanActiveRootTask, taskPollFailures]);
