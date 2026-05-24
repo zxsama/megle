@@ -39,12 +39,27 @@ function run(command, args) {
   const result = spawnSync(command, args, {
     cwd: root,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: shouldUseShell(command),
     env: process.env
   });
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+function shouldUseShell(command) {
+  return process.platform === "win32" && !path.isAbsolute(command);
+}
+
+function findCargoCommand() {
+  if (process.env.CARGO?.trim()) {
+    return process.env.CARGO;
+  }
+
+  const cargoHome = process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? "", ".cargo");
+  const cargoExe = process.platform === "win32" ? "cargo.exe" : "cargo";
+  const cargoPath = path.join(cargoHome, "bin", cargoExe);
+  return fs.existsSync(cargoPath) ? cargoPath : "cargo";
 }
 
 function electronCommand() {
@@ -83,6 +98,10 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 process.on("exit", shutdown);
+
+if (process.env.MEGLE_CORE_EXTERNAL !== "1") {
+  run(findCargoCommand(), ["build", "-p", "megle-core"]);
+}
 
 const web = spawnChild("npm", [
   "--workspace",

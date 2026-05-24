@@ -89,7 +89,6 @@ for (const value of [
 
 for (const value of [
   "MEGLE_CORE_EXTERNAL",
-  "cargo",
   "MEGLE_DB_PATH",
   "MEGLE_CORE_ADDR",
   "MEGLE_SESSION_TOKEN",
@@ -101,6 +100,16 @@ for (const value of [
 ]) {
   if (!processFile.includes(value)) {
     fail(`core process orchestration missing ${value}`);
+  }
+}
+const cargoRunCoreLaunchPattern =
+  /spawn\(\s*[\s\S]*?,\s*\[\s*["']run["']\s*,\s*["']-p["']\s*,\s*["']megle-core["']\s*\]/;
+if (cargoRunCoreLaunchPattern.test(processFile)) {
+  fail("desktop internal Core launch must not use cargo run because it rewrites the Windows debug exe");
+}
+for (const value of ["coreBinaryPath", "target", "debug", "megle-core.exe", "fs.existsSync"]) {
+  if (!processFile.includes(value)) {
+    fail(`core process must spawn the prebuilt internal Core binary directly: ${value}`);
   }
 }
 for (const value of ["taskkill", "/T", "/F", "stopCoreProcessTree"]) {
@@ -137,6 +146,14 @@ for (const value of ["--port", "5173", "--strictPort"]) {
   if (!devRunner.includes(value)) {
     fail(`dev runner must start Vite with explicit ${value}`);
   }
+}
+for (const value of ["MEGLE_CORE_EXTERNAL", "findCargoCommand", "cargo", "build", "-p", "megle-core"]) {
+  if (!devRunner.includes(value)) {
+    fail(`dev runner must build internal Core before Electron startup: ${value}`);
+  }
+}
+if (!/run\(\s*findCargoCommand\(\)\s*,\s*\[\s*"build"\s*,\s*"-p"\s*,\s*"megle-core"\s*\]\s*\)/.test(devRunner)) {
+  fail("dev runner must use cargo build -p megle-core instead of leaving Core build to Electron startup");
 }
 
 const startCoreCalls = [...main.matchAll(/\bstartCoreProcess\(/g)].length;

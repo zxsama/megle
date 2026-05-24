@@ -18,7 +18,14 @@ export function startCoreProcess(session: CoreSession): CoreProcessHandle {
     };
   }
 
-  const child = spawn(findCargoCommand(), ["run", "-p", "megle-core"], {
+  const binaryPath = coreBinaryPath();
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(
+      `Core debug binary is missing at ${binaryPath}. Run "cargo build -p megle-core" before starting internal desktop Core.`
+    );
+  }
+
+  const child = spawn(binaryPath, [], {
     cwd: repoRoot(),
     env: {
       ...process.env,
@@ -79,19 +86,13 @@ export async function waitForCoreHealth(
   throw new Error(`Core did not become healthy: ${String(lastError)}`);
 }
 
-function findCargoCommand(): string {
-  if (process.env.CARGO) {
-    return process.env.CARGO;
-  }
-
-  const cargoHome = process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? "", ".cargo");
-  const cargoExe = process.platform === "win32" ? "cargo.exe" : "cargo";
-  const cargoPath = path.join(cargoHome, "bin", cargoExe);
-  return fs.existsSync(cargoPath) ? cargoPath : "cargo";
-}
-
 function repoRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+}
+
+function coreBinaryPath(): string {
+  const binaryName = process.platform === "win32" ? "megle-core.exe" : "megle-core";
+  return path.join(repoRoot(), "target", "debug", binaryName);
 }
 
 function ensureTrailingSlash(value: string): string {
