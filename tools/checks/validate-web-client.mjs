@@ -509,10 +509,16 @@ if (!/MediaPreview[\s\S]{0,180}source="thumbnail"[\s\S]{0,180}thumbnail=\{thumbn
 }
 if (
   !/prefetchOriginalPreview/.test(app) ||
-  !/previewOpen[\s\S]*selectedMediaIndex[\s\S]*library\.media\[selectedMediaIndex - 1\][\s\S]*prefetchOriginalPreview/.test(app) ||
-  !/library\.media\[selectedMediaIndex \+ 1\][\s\S]*prefetchOriginalPreview/.test(app)
+  !/previewOpen[\s\S]*selectedMediaIndex[\s\S]*CENTER_PREVIEW_PREFETCH_RADIUS[\s\S]*library\.media\[selectedMediaIndex \+ offset\][\s\S]*prefetchOriginalPreview/.test(app)
 ) {
   fail("App must prefetch previous and next original previews when center preview is open");
+}
+if (
+  !/CENTER_PREVIEW_PREFETCH_RADIUS\s*=\s*1/.test(app) ||
+  !/for\s*\([\s\S]*?offset[\s\S]*?CENTER_PREVIEW_PREFETCH_RADIUS/.test(app) ||
+  !/selectedMediaIndex\s*\+\s*offset/.test(app)
+) {
+  fail("App must keep center original preview prefetch explicitly bounded to previous/next neighbors");
 }
 if (!librarySidebar.includes("loadMoreFolderChildren") || !librarySidebar.includes("Load more")) {
   fail("LibrarySidebar must expose a load-more affordance for paginated folder children");

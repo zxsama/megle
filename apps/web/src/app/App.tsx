@@ -57,6 +57,7 @@ const DEFAULT_PREVIEW_VIEW_STATE: PreviewViewState = {
   mode: "fit-long-edge",
   scale: 1
 };
+const CENTER_PREVIEW_PREFETCH_RADIUS = 1;
 
 export function App() {
   const [activeView, setActiveView] = useState<AppView>("library");
@@ -81,10 +82,15 @@ export function App() {
 
   useEffect(() => {
     if (!previewOpen || selectedMediaIndex < 0) return;
-    const previous = library.media[selectedMediaIndex - 1];
-    const next = library.media[selectedMediaIndex + 1];
-    if (previous) prefetchOriginalPreview(previous);
-    if (next) prefetchOriginalPreview(next);
+    for (
+      let offset = -CENTER_PREVIEW_PREFETCH_RADIUS;
+      offset <= CENTER_PREVIEW_PREFETCH_RADIUS;
+      offset += 1
+    ) {
+      if (offset === 0) continue;
+      const neighbor = library.media[selectedMediaIndex + offset];
+      if (neighbor) prefetchOriginalPreview(neighbor);
+    }
   }, [library.media, previewOpen, selectedMediaIndex]);
 
   const handleClosePreview = useCallback(() => {
