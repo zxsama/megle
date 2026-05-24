@@ -76,6 +76,29 @@ one real `<img class="tile-thumb-image">`).
 If the inspector reports `hasBridge: false`, the preload script crashed — check
 that `apps/desktop/dist/preload.cjs` exists and is loaded by the BrowserWindow.
 
+### 2.2 Disclosure-scan real outputs benchmark
+
+Run this smoke before release candidates that touch root scanning, folder
+disclosure, thumbnail priority, or preview loading. It uses a clean temporary DB
+and the real Stable Diffusion outputs directory by default:
+
+```bash
+node --experimental-strip-types tools/dev/real-load-test.mts
+```
+
+Expected:
+
+- The source directory is `G:\AI_Painter\stable-diffusion\stable-diffusion-webui\outputs`
+  unless `MEGLE_REAL_LOAD_ROOT` overrides it.
+- The script reports add-root to first visible media timing before scan
+  completion when the real tree is large enough for an active-scan observation.
+- Switching between media-bearing folders returns scoped media while the scan is
+  still running, or logs a warning if the local scan completed too quickly.
+- Visible `grid_320` thumbnails settle after explicit current-view requests,
+  while an unrequested background folder has no ready thumbnails first.
+- `/media/:id/preview` reports original media size and private cache headers,
+  not the `db_blob` thumbnail path.
+
 ## 3. Release artifacts
 
 1. Bump versions in lockstep:

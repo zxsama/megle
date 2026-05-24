@@ -1,11 +1,11 @@
-// End-to-end real load test:
+// End-to-end real load test for the disclosure-scan priority flow:
 // 1. Spawn megle-core with a known session token + dynamic data dir.
-// 2. Wait for /api/health to return 200.
-// 3. addRoot pointing at C:/Users/84460/Pictures/normal.
-// 4. Poll /api/tasks until the root_scan task succeeds.
-// 5. listMedia and assert the count matches the on-disk file count.
-// 6. For each media item, request a thumbnail; poll until ready/failed/skipped.
-// 7. Confirm thumbnail state points at db_blob and blob endpoint returns WebP bytes.
+// 2. addRoot pointing at the real Stable Diffusion outputs directory.
+// 3. Measure add-root -> first visible media before the root scan completes.
+// 4. Switch between real folders during the active scan.
+// 5. Request only current visible grid_320 thumbnails and prove background
+//    folders stay uncleared until requested.
+// 6. Verify the center preview path streams the original media bytes.
 //
 // Run via: node --experimental-strip-types tools/dev/real-load-test.mts
 
@@ -17,14 +17,54 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const TOKEN = "real-load-test-token";
-const ADDR = "127.0.0.1:47391";
+const ADDR = process.env.MEGLE_REAL_LOAD_CORE_ADDR ?? "127.0.0.1:47391";
 const BASE = `http://${ADDR}/api`;
-const ROOT_PATH = "C:/Users/84460/Pictures/normal";
+const ROOT_PATH = normalizeRootPath(
+  process.env.MEGLE_REAL_LOAD_ROOT ??
+    "G:/AI_Painter/stable-diffusion/stable-diffusion-webui/outputs"
+);
+const VISIBLE_LIMIT = Number(process.env.MEGLE_REAL_LOAD_VISIBLE_LIMIT ?? 24);
+const SWITCH_SAMPLE_LIMIT = Number(process.env.MEGLE_REAL_LOAD_SWITCH_LIMIT ?? 24);
+const SCAN_TIMEOUT_MS = Number(process.env.MEGLE_REAL_LOAD_SCAN_TIMEOUT_MS ?? 300_000);
+const DISCLOSURE_TIMEOUT_MS = Number(process.env.MEGLE_REAL_LOAD_DISCLOSURE_TIMEOUT_MS ?? 120_000);
+const THUMBNAIL_TIMEOUT_MS = Number(process.env.MEGLE_REAL_LOAD_THUMBNAIL_TIMEOUT_MS ?? 90_000);
+const MEDIA_EXTENSIONS = new Set([
+  ".avif",
+  ".avi",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".jpeg",
+  ".jpg",
+  ".m4v",
+  ".mkv",
+  ".mov",
+  ".mp4",
+  ".png",
+  ".psd",
+  ".raw",
+  ".webm",
+  ".wmv"
+]);
+const TERMINAL_TASK_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+const TERMINAL_THUMBNAIL_STATES = new Set(["ready", "failed", "skipped_small"]);
 const closedChildren = new WeakSet<ChildProcess>();
 
 function log(...args: unknown[]) {
   // eslint-disable-next-line no-console
   console.log("[test]", ...args);
+}
+
+function normalizeRootPath(input: string): string {
+  return input.replace(/\\/g, "/");
+}
+
+function elapsedSince(startedAt: number): number {
+  return Date.now() - startedAt;
+}
+
+function formatMs(ms: number): string {
+  return `${ms}ms`;
 }
 
 function isExited(child: ChildProcess): boolean {
@@ -129,27 +169,29 @@ async function runLifecycleSelfTest(): Promise<void> {
   log(`Lifecycle self-test stopped process tree in ${Date.now() - startedAt}ms`);
 }
 
-async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetchResponse(path, init);
+async function fetchJson<T>(apiPath: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetchResponse(apiPath, init);
   const body = await response.text();
   return body ? (JSON.parse(body) as T) : (null as unknown as T);
 }
 
-async function fetchResponse(path: string, init: RequestInit = {}): Promise<Response> {
+async function fetchResponse(apiPath: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("x-megle-session", TOKEN);
   if (init.body && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
-  const response = await fetch(`${BASE}${path}`, { ...init, headers });
+  const response = await fetch(`${BASE}${apiPath}`, { ...init, headers });
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`${path} -> ${response.status} ${response.statusText}: ${body}`);
+    throw new Error(`${apiPath} -> ${response.status} ${response.statusText}: ${body}`);
   }
   return response;
 }
 
-async function fetchThumbnailBlob(fileId: number): Promise<{ bytes: Uint8Array; contentType: string | null; servedBy: string | null }> {
+async function fetchThumbnailBlob(
+  fileId: number
+): Promise<{ bytes: Uint8Array; contentType: string | null; servedBy: string | null }> {
   const response = await fetchResponse(`/media/${fileId}/thumbnail/blob?target=grid_320`);
   return {
     bytes: new Uint8Array(await response.arrayBuffer()),
@@ -177,6 +219,14 @@ interface AcceptedRoot {
   rootId: number | null;
 }
 
+interface RootRecord {
+  id: number;
+  path: string;
+  displayName: string;
+  enabled: boolean;
+  rootFolderId: number | null;
+}
+
 interface TaskRecord {
   id: number;
   kind: string;
@@ -184,6 +234,7 @@ interface TaskRecord {
   rootId: number | null;
   fileId: number | null;
   itemsSeen: number;
+  foldersSeen: number;
   mediaFilesSeen: number;
   error: string | null;
 }
@@ -193,13 +244,25 @@ interface Page<T> {
   nextCursor: string | null;
 }
 
+interface FolderRecord {
+  id: number;
+  rootId: number;
+  parentId: number | null;
+  name: string;
+  status: string;
+}
+
 interface MediaRecord {
   id: number;
+  rootId: number;
+  folderId: number;
   name: string;
   ext: string;
+  size: number;
   width: number | null;
   height: number | null;
   thumbnailState: string | null;
+  previewPlaceholder?: number[] | null;
 }
 
 interface ThumbnailResponse {
@@ -212,23 +275,42 @@ interface ThumbnailResponse {
   servedBy: string | null;
   asset: { width: number; height: number; byteSize: number } | null;
   error: string | null;
+  updatedAt: number | null;
+}
+
+interface MediaFolder {
+  folder: FolderRecord;
+  media: MediaRecord[];
+}
+
+interface ThumbnailSummary {
+  ready: number;
+  skipped: number;
+  failed: number;
+}
+
+async function getTask(taskId: number): Promise<TaskRecord | null> {
+  const tasks = await fetchJson<Page<TaskRecord>>("/tasks");
+  return tasks.items.find((task) => task.id === taskId) ?? null;
 }
 
 async function pollTask(taskId: number, label: string, timeoutMs = 60_000): Promise<TaskRecord> {
   const start = Date.now();
   let last: TaskRecord | null = null;
   while (Date.now() - start < timeoutMs) {
-    const tasks = await fetchJson<Page<TaskRecord>>("/tasks");
-    last = tasks.items.find((task) => task.id === taskId) ?? null;
+    last = await getTask(taskId);
     if (!last) {
       await delay(200);
       continue;
     }
-    if (last.status === "succeeded" || last.status === "failed" || last.status === "cancelled") {
+    if (TERMINAL_TASK_STATUSES.has(last.status)) {
       return last;
     }
-    log(`${label} task ${taskId} -> ${last.status} (items_seen=${last.itemsSeen}, media=${last.mediaFilesSeen})`);
-    await delay(500);
+    log(
+      `${label} task ${taskId} -> ${last.status} ` +
+        `(items=${last.itemsSeen}, folders=${last.foldersSeen}, media=${last.mediaFilesSeen})`
+    );
+    await delay(1_000);
   }
   if (!last) {
     throw new Error(`task ${taskId} never appeared`);
@@ -236,11 +318,11 @@ async function pollTask(taskId: number, label: string, timeoutMs = 60_000): Prom
   throw new Error(`${label} task ${taskId} timed out in status ${last.status}`);
 }
 
-async function pollThumbnail(fileId: number, timeoutMs = 30_000): Promise<ThumbnailResponse> {
+async function pollThumbnail(fileId: number, timeoutMs = THUMBNAIL_TIMEOUT_MS): Promise<ThumbnailResponse> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const response = await fetchJson<ThumbnailResponse>(`/media/${fileId}/thumbnail?target=grid_320`);
-    if (response.state === "ready" || response.state === "failed" || response.state === "skipped_small") {
+    const response = await requestThumbnail(fileId);
+    if (TERMINAL_THUMBNAIL_STATES.has(response.state)) {
       return response;
     }
     await delay(250);
@@ -248,14 +330,263 @@ async function pollThumbnail(fileId: number, timeoutMs = 30_000): Promise<Thumbn
   throw new Error(`thumbnail ${fileId} never settled`);
 }
 
+async function requestThumbnail(fileId: number): Promise<ThumbnailResponse> {
+  return fetchJson<ThumbnailResponse>(`/media/${fileId}/thumbnail?target=grid_320`);
+}
+
+async function listRoots(): Promise<RootRecord[]> {
+  const page = await fetchJson<Page<RootRecord>>("/roots");
+  return page.items;
+}
+
+async function listFolderChildren(folderId: number, limit = 200): Promise<FolderRecord[]> {
+  const folders: FolderRecord[] = [];
+  let cursor: string | undefined;
+  do {
+    const page: Page<FolderRecord> = await fetchJson(
+      `/folders/${folderId}/children?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`
+    );
+    folders.push(...page.items);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return folders;
+}
+
+async function listMediaPage(rootId: number, folderId?: number, limit = 200): Promise<Page<MediaRecord>> {
+  const params = new URLSearchParams({
+    rootId: String(rootId),
+    limit: String(limit),
+    sort: "mtime_desc"
+  });
+  if (folderId !== undefined) {
+    params.set("folderId", String(folderId));
+  }
+  return fetchJson<Page<MediaRecord>>(`/media?${params.toString()}`);
+}
+
+async function listAllMedia(rootId: number): Promise<MediaRecord[]> {
+  const media: MediaRecord[] = [];
+  let cursor: string | undefined;
+  do {
+    const params = new URLSearchParams({
+      rootId: String(rootId),
+      limit: "500",
+      sort: "mtime_desc"
+    });
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+    const page = await fetchJson<Page<MediaRecord>>(`/media?${params.toString()}`);
+    media.push(...page.items);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return media;
+}
+
+async function waitForRootRecord(rootId: number, timeoutMs = 30_000): Promise<RootRecord> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const root = (await listRoots()).find((item) => item.id === rootId);
+    if (root?.rootFolderId) {
+      return root;
+    }
+    await delay(250);
+  }
+  throw new Error(`root ${rootId} did not expose a rootFolderId`);
+}
+
+async function waitForFirstVisibleMedia(
+  rootId: number,
+  scanTaskId: number,
+  addRootStartedAt: number
+): Promise<{ media: MediaRecord[]; elapsedMs: number; scanStatus: string }> {
+  const start = Date.now();
+  while (Date.now() - start < DISCLOSURE_TIMEOUT_MS) {
+    const page = await listMediaPage(rootId, undefined, VISIBLE_LIMIT);
+    const scanTask = await getTask(scanTaskId);
+    if (page.items.length > 0) {
+      return {
+        media: page.items,
+        elapsedMs: elapsedSince(addRootStartedAt),
+        scanStatus: scanTask?.status ?? "unknown"
+      };
+    }
+    if (scanTask && TERMINAL_TASK_STATUSES.has(scanTask.status)) {
+      throw new Error(`scan reached ${scanTask.status} before any visible media was listed`);
+    }
+    await delay(250);
+  }
+  throw new Error("current root view did not show visible media during scan");
+}
+
+async function discoverMediaFoldersOnce(rootId: number, rootFolderId: number, desired: number): Promise<MediaFolder[]> {
+  const result: MediaFolder[] = [];
+  const queue = [rootFolderId];
+  const visited = new Set<number>();
+
+  while (queue.length > 0 && result.length < desired && visited.size < 250) {
+    const parentId = queue.shift();
+    if (parentId === undefined || visited.has(parentId)) {
+      continue;
+    }
+    visited.add(parentId);
+
+    let children: FolderRecord[];
+    try {
+      children = await listFolderChildren(parentId, 100);
+    } catch {
+      continue;
+    }
+
+    for (const child of children) {
+      if (result.length >= desired) {
+        break;
+      }
+      const page = await listMediaPage(rootId, child.id, SWITCH_SAMPLE_LIMIT);
+      if (page.items.length > 0) {
+        result.push({ folder: child, media: page.items });
+      }
+      queue.push(child.id);
+    }
+  }
+
+  return result;
+}
+
+async function waitForFoldersWithMedia(
+  rootId: number,
+  rootFolderId: number,
+  scanTaskId: number,
+  desired = 2
+): Promise<{ folders: MediaFolder[]; scanStatus: string }> {
+  const start = Date.now();
+  while (Date.now() - start < DISCLOSURE_TIMEOUT_MS) {
+    const folders = await discoverMediaFoldersOnce(rootId, rootFolderId, desired);
+    const scanTask = await getTask(scanTaskId);
+    if (folders.length >= desired) {
+      return { folders, scanStatus: scanTask?.status ?? "unknown" };
+    }
+    if (scanTask && TERMINAL_TASK_STATUSES.has(scanTask.status) && folders.length > 0) {
+      return { folders, scanStatus: scanTask.status };
+    }
+    await delay(500);
+  }
+  throw new Error(`did not discover ${desired} media-bearing folders during scan`);
+}
+
+async function verifyFolderSwitching(rootId: number, folders: MediaFolder[]): Promise<number[]> {
+  const timings: number[] = [];
+  for (const candidate of folders.slice(0, 2)) {
+    const startedAt = Date.now();
+    const page = await listMediaPage(rootId, candidate.folder.id, SWITCH_SAMPLE_LIMIT);
+    const elapsedMs = elapsedSince(startedAt);
+    if (page.items.length === 0) {
+      throw new Error(`folder switch to ${candidate.folder.name} returned no media`);
+    }
+    timings.push(elapsedMs);
+    log(`folder switch: ${candidate.folder.name} -> ${page.items.length} media in ${formatMs(elapsedMs)}`);
+  }
+  return timings;
+}
+
+async function verifyThumbnailBlob(fileId: number, thumb: ThumbnailResponse): Promise<void> {
+  if (thumb.target !== "grid_320") {
+    throw new Error(`ready thumbnail ${fileId} returned unexpected target: ${thumb.target}`);
+  }
+  if (thumb.servedBy !== "db_blob") {
+    throw new Error(`ready thumbnail ${fileId} servedBy=${thumb.servedBy ?? "null"}`);
+  }
+  if (!thumb.width || !thumb.height || !thumb.byteSize) {
+    throw new Error(`ready thumbnail ${fileId} missing dimensions or byte size`);
+  }
+  const blob = await fetchThumbnailBlob(fileId);
+  if (blob.servedBy !== "db_blob") {
+    throw new Error(`thumbnail blob ${fileId} servedBy=${blob.servedBy ?? "null"}`);
+  }
+  if (blob.contentType !== "image/webp") {
+    throw new Error(`thumbnail blob ${fileId} content-type=${blob.contentType ?? "null"}`);
+  }
+  if (blob.bytes.length !== thumb.byteSize) {
+    throw new Error(`thumbnail ${fileId} byte size mismatch: state=${thumb.byteSize} blob=${blob.bytes.length}`);
+  }
+  const magic = Buffer.from(blob.bytes.subarray(0, 4)).toString("ascii");
+  const subtype = Buffer.from(blob.bytes.subarray(8, 12)).toString("ascii");
+  if (magic !== "RIFF" || subtype !== "WEBP") {
+    throw new Error(`thumbnail ${fileId} has invalid header: ${magic}/${subtype} (${blob.bytes.length} bytes)`);
+  }
+}
+
+async function settleVisibleThumbnails(media: MediaRecord[]): Promise<ThumbnailSummary> {
+  const summary: ThumbnailSummary = { ready: 0, skipped: 0, failed: 0 };
+  for (const item of media) {
+    const thumb = await pollThumbnail(item.id);
+    if (thumb.state === "ready") {
+      summary.ready++;
+      await verifyThumbnailBlob(item.id, thumb);
+    } else if (thumb.state === "skipped_small") {
+      summary.skipped++;
+    } else {
+      summary.failed++;
+      log(`  ${item.name} -> failed: ${thumb.error}`);
+    }
+  }
+  return summary;
+}
+
+async function verifyOriginalPreview(media: MediaRecord): Promise<{ elapsedMs: number; contentType: string | null }> {
+  const startedAt = Date.now();
+  const response = await fetchResponse(`/media/${media.id}/preview`);
+  const contentLength = Number(response.headers.get("content-length"));
+  const servedBy = response.headers.get("x-megle-served-by");
+  const cacheControl = response.headers.get("cache-control");
+  const contentType = response.headers.get("content-type");
+  await response.body?.cancel();
+
+  if (contentLength !== media.size) {
+    throw new Error(`preview ${media.id} content-length=${contentLength}, expected original size=${media.size}`);
+  }
+  if (servedBy === "db_blob") {
+    throw new Error(`preview ${media.id} was served by thumbnail blob path`);
+  }
+  if (cacheControl !== "private, max-age=0, must-revalidate") {
+    throw new Error(`preview ${media.id} cache-control=${cacheControl ?? "null"}`);
+  }
+  return { elapsedMs: elapsedSince(startedAt), contentType };
+}
+
+async function countMediaFiles(rootPath: string): Promise<number> {
+  let count = 0;
+  const queue = [rootPath];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch (error) {
+      log(`WARN: cannot read ${current}: ${String(error)}`);
+      continue;
+    }
+    for (const entry of entries) {
+      const child = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(child);
+      } else if (entry.isFile() && MEDIA_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
 async function main() {
   if (!existsSync(ROOT_PATH)) {
     throw new Error(`Test directory does not exist: ${ROOT_PATH}`);
   }
-  const expectedFiles = (await readdir(ROOT_PATH)).filter((name) =>
-    /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i.test(name)
-  );
-  log(`Source dir: ${ROOT_PATH} (${expectedFiles.length} image files)`);
+  const expectedFiles = await countMediaFiles(ROOT_PATH);
+  log(`Source dir: ${ROOT_PATH} (${expectedFiles} supported media files, recursive)`);
 
   const dataDir = await mkdtemp(path.join(tmpdir(), "megle-real-load-"));
   const dbPath = path.join(dataDir, "megle.sqlite");
@@ -298,6 +629,7 @@ async function main() {
     log("Core is healthy");
 
     log(`addRoot ${ROOT_PATH}`);
+    const addRootStartedAt = Date.now();
     const root = await fetchJson<AcceptedRoot>("/roots", {
       method: "POST",
       body: JSON.stringify({ path: ROOT_PATH })
@@ -307,76 +639,107 @@ async function main() {
     }
     log(`scan task ${root.taskId} queued for root ${root.rootId}`);
 
-    const scanTask = await pollTask(root.taskId, "scan", 120_000);
-    log(`scan finished: status=${scanTask.status} media=${scanTask.mediaFilesSeen} error=${scanTask.error ?? "none"}`);
+    const rootRecord = await waitForRootRecord(root.rootId);
+    const firstVisible = await waitForFirstVisibleMedia(root.rootId, root.taskId, addRootStartedAt);
+    log(
+      `first visible current-root media: ${firstVisible.media.length} items in ` +
+        `${formatMs(firstVisible.elapsedMs)} while scan=${firstVisible.scanStatus}`
+    );
+
+    const discovered = await waitForFoldersWithMedia(root.rootId, rootRecord.rootFolderId!, root.taskId, 2);
+    log(
+      `media folders discovered while scan=${discovered.scanStatus}: ` +
+        discovered.folders.map((item) => `${item.folder.name}(${item.media.length})`).join(", ")
+    );
+    if (discovered.scanStatus === "succeeded") {
+      log("WARN: real-directory scan completed before folder switching assertion could observe an active scan");
+    }
+
+    const switchTimings = await verifyFolderSwitching(root.rootId, discovered.folders);
+
+    const visibleFolder = discovered.folders[0];
+    const backgroundFolder = discovered.folders[1];
+    const visibleMedia = visibleFolder.media.slice(0, VISIBLE_LIMIT);
+    if (visibleMedia.length === 0) {
+      throw new Error("visible folder sample is empty");
+    }
+
+    const initialVisibleStates = await Promise.all(visibleMedia.map((item) => requestThumbnail(item.id)));
+    const placeholderPhaseCount = initialVisibleStates.filter((thumb) => !TERMINAL_THUMBNAIL_STATES.has(thumb.state)).length;
+    if (placeholderPhaseCount === 0) {
+      throw new Error("visible thumbnail requests did not expose a pending/queued placeholder phase");
+    }
+    log(
+      `visible thumbnail placeholder phase: ${placeholderPhaseCount}/${visibleMedia.length} ` +
+        `started as pending/queued`
+    );
+
+    const visibleThumbStartedAt = Date.now();
+    const visibleSummary = await settleVisibleThumbnails(visibleMedia);
+    const visibleClearMs = elapsedSince(visibleThumbStartedAt);
+    if (visibleSummary.ready + visibleSummary.skipped === 0) {
+      throw new Error(`visible thumbnails did not produce any usable output: ${JSON.stringify(visibleSummary)}`);
+    }
+
+    const backgroundBefore = await listMediaPage(root.rootId, backgroundFolder.folder.id, SWITCH_SAMPLE_LIMIT);
+    const backgroundReadyBefore = backgroundBefore.items.filter((item) => item.thumbnailState === "ready").length;
+    if (backgroundReadyBefore > 0) {
+      throw new Error(`background folder already had ${backgroundReadyBefore} ready thumbnails before being requested`);
+    }
+    log(
+      `visible thumbnails settled in ${formatMs(visibleClearMs)}: ` +
+        `ready=${visibleSummary.ready} skipped=${visibleSummary.skipped} failed=${visibleSummary.failed}; ` +
+        `background ready before request=${backgroundReadyBefore}/${backgroundBefore.items.length}`
+    );
+
+    const backgroundSample = backgroundBefore.items[0];
+    if (!backgroundSample) {
+      throw new Error("background folder sample is empty");
+    }
+    const backgroundStartedAt = Date.now();
+    const backgroundThumb = await pollThumbnail(backgroundSample.id);
+    const backgroundFirstClearMs = elapsedSince(backgroundStartedAt);
+    if (backgroundThumb.state === "ready") {
+      await verifyThumbnailBlob(backgroundSample.id, backgroundThumb);
+    }
+    log(
+      `background first thumbnail after explicit request: ${backgroundThumb.state} ` +
+        `in ${formatMs(backgroundFirstClearMs)}`
+    );
+
+    const previewResult = await verifyOriginalPreview(visibleMedia[0]);
+    log(
+      `center preview original: file=${visibleMedia[0].name}, content-type=${previewResult.contentType ?? "null"}, ` +
+        `size=${visibleMedia[0].size}, loaded headers in ${formatMs(previewResult.elapsedMs)}`
+    );
+
+    const scanTask = await pollTask(root.taskId, "scan", SCAN_TIMEOUT_MS);
+    log(
+      `scan finished: status=${scanTask.status} folders=${scanTask.foldersSeen} ` +
+        `media=${scanTask.mediaFilesSeen} error=${scanTask.error ?? "none"}`
+    );
     if (scanTask.status !== "succeeded") {
       throw new Error(`scan failed: ${scanTask.error}`);
     }
 
-    log("listMedia");
-    const media: MediaRecord[] = [];
-    let cursor: string | undefined;
-    do {
-      const page: Page<MediaRecord> = await fetchJson(
-        `/media?rootId=${root.rootId}&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`
-      );
-      media.push(...page.items);
-      cursor = page.nextCursor ?? undefined;
-    } while (cursor);
-    log(`listMedia returned ${media.length} items`);
-
-    if (media.length !== expectedFiles.length) {
-      log(`WARN: expected ${expectedFiles.length} files, got ${media.length}`);
+    const indexedMedia = await listAllMedia(root.rootId);
+    log(`listMedia returned ${indexedMedia.length} indexed items after scan`);
+    if (indexedMedia.length !== scanTask.mediaFilesSeen) {
+      throw new Error(`indexed media ${indexedMedia.length} did not match scan media count ${scanTask.mediaFilesSeen}`);
     }
-
-    log("Requesting thumbnails for each media item...");
-    let ready = 0;
-    let skipped = 0;
-    let failed = 0;
-    for (const item of media) {
-      const thumb = await pollThumbnail(item.id);
-      if (thumb.state === "ready") {
-        ready++;
-        if (thumb.target !== "grid_320") {
-          throw new Error(`ready thumbnail ${item.id} returned unexpected target: ${thumb.target}`);
-        }
-        if (thumb.servedBy !== "db_blob") {
-          throw new Error(`ready thumbnail ${item.id} servedBy=${thumb.servedBy ?? "null"}`);
-        }
-        if (!thumb.width || !thumb.height || !thumb.byteSize) {
-          throw new Error(`ready thumbnail ${item.id} missing dimensions or byte size`);
-        }
-        const blob = await fetchThumbnailBlob(item.id);
-        if (blob.servedBy !== "db_blob") {
-          throw new Error(`thumbnail blob ${item.id} servedBy=${blob.servedBy ?? "null"}`);
-        }
-        if (blob.contentType !== "image/webp") {
-          throw new Error(`thumbnail blob ${item.id} content-type=${blob.contentType ?? "null"}`);
-        }
-        if (blob.bytes.length !== thumb.byteSize) {
-          throw new Error(`thumbnail ${item.id} byte size mismatch: state=${thumb.byteSize} blob=${blob.bytes.length}`);
-        }
-        const magic = Buffer.from(blob.bytes.subarray(0, 4)).toString("ascii");
-        const subtype = Buffer.from(blob.bytes.subarray(8, 12)).toString("ascii");
-        if (magic !== "RIFF" || subtype !== "WEBP") {
-          throw new Error(
-            `thumbnail ${item.id} has invalid header: ${magic}/${subtype} (${blob.bytes.length} bytes)`
-          );
-        }
-      } else if (thumb.state === "skipped_small") {
-        skipped++;
-      } else {
-        failed++;
-        log(`  ${item.name} -> failed: ${thumb.error}`);
-      }
+    if (expectedFiles !== indexedMedia.length) {
+      log(`WARN: on-disk media count ${expectedFiles} differs from indexed media ${indexedMedia.length}`);
     }
-    log(`Thumbnails: ready=${ready} skipped=${skipped} failed=${failed} of ${media.length}`);
 
     log("");
     log("=== SUCCESS ===");
     log(`Root scanned: ${ROOT_PATH}`);
-    log(`Media indexed: ${media.length} (expected ${expectedFiles.length})`);
-    log(`WebP thumbnails generated: ${ready}`);
+    log(`Add root -> first visible media: ${formatMs(firstVisible.elapsedMs)}`);
+    log(`Folder switch timings: ${switchTimings.map(formatMs).join(", ")}`);
+    log(`Visible grid_320 clear: ${formatMs(visibleClearMs)} for ${visibleMedia.length} items`);
+    log(`Background first clear after request: ${formatMs(backgroundFirstClearMs)}`);
+    log(`Center preview original header load: ${formatMs(previewResult.elapsedMs)}`);
+    log(`Media indexed: ${indexedMedia.length} (on disk: ${expectedFiles})`);
     log(`Data dir: ${dataDir}`);
   } finally {
     process.off("SIGINT", handleStopSignal);
