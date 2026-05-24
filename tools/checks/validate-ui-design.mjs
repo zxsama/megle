@@ -173,6 +173,15 @@ for (const [source, value, message] of [
   }
 }
 
+const shellReadyRevealMatch = desktopMain.match(
+  /async function revealMainWindowForShellReady\(window: BrowserWindow\): Promise<boolean> \{([\s\S]*?)\n\}/
+);
+if (!shellReadyRevealMatch) {
+  fail("desktop main must keep revealMainWindowForShellReady inspectable for shell-ready deadlock checks");
+} else if (/mainWindowReadyToShow|waitForRendererPaint:\s*true|waitForRendererFrame|executeJavaScript/.test(shellReadyRevealMatch[1])) {
+  fail("desktop shell-ready reveal must not wait on renderer readiness or call back into the renderer while the renderer awaits the shell-ready IPC response");
+}
+
 if (!/void\s+notifyDesktopShellReady\(\);\s*[\s\S]*?ReactDOM\.createRoot/.test(webMain)) {
   fail("web entrypoint shell-ready notification must run before React mounts");
 }

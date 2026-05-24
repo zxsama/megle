@@ -481,8 +481,8 @@ async function revealMainWindow(
 }
 
 async function revealMainWindowForShellReady(window: BrowserWindow): Promise<boolean> {
-  await (mainWindowReadyToShow ?? Promise.resolve());
-  return revealMainWindow(window, { waitForRendererPaint: true });
+  await prepareWindowCompositionForReveal(window);
+  return revealMainWindow(window);
 }
 
 async function revealMainWindowForLaunchFailure(

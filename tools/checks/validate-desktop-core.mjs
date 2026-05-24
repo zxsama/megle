@@ -255,6 +255,25 @@ if (!shellReadyHandlerBody) {
   }
 }
 
+const shellReadyRevealBody = functionBody(
+  main,
+  "async function revealMainWindowForShellReady(window: BrowserWindow): Promise<boolean>"
+);
+if (!shellReadyRevealBody) {
+  fail("desktop main must keep revealMainWindowForShellReady as an inspectable helper");
+} else {
+  if (
+    shellReadyRevealBody.includes("mainWindowReadyToShow") ||
+    shellReadyRevealBody.includes("waitForRendererPaint: true") ||
+    shellReadyRevealBody.includes("waitForRendererFrame") ||
+    shellReadyRevealBody.includes("executeJavaScript")
+  ) {
+    fail(
+      "desktop shell-ready reveal must not wait on renderer readiness or renderer paint because the renderer is awaiting the shell-ready IPC response"
+    );
+  }
+}
+
 const armShellReadyFailureFallbackBody = functionBody(main, "function armShellReadyFailureFallback(window: BrowserWindow)");
 if (!armShellReadyFailureFallbackBody) {
   fail("desktop main must keep armShellReadyFailureFallback as an inspectable helper");
