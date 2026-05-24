@@ -130,6 +130,12 @@ export interface LibraryState {
   deleteTag: (tagId: number) => Promise<void>;
 }
 
+type ScanRefreshSelectionToken = {
+  rootId: number;
+  folderId: number | null;
+  version: number;
+};
+
 export function useLibraryData(): LibraryState {
   const client = useMemo(() => createCoreClient(), []);
   const mediaPageGeneration = useRef(0);
@@ -138,6 +144,7 @@ export function useLibraryData(): LibraryState {
   const inFlightFolderChildPageKeys = useRef<Set<string>>(new Set());
   const loadedFolderChildPageKeys = useRef<Set<string>>(new Set());
   const scanRefreshInFlightRef = useRef(false);
+  const scanRefreshSelectionVersionRef = useRef(0);
   const [roots, setRoots] = useState<RootRecord[]>([]);
   const [folderChildrenByParent, setFolderChildrenByParent] = useState<Record<number, FolderRecord[]>>(
     {}
@@ -165,6 +172,7 @@ export function useLibraryData(): LibraryState {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [busyTaskIds, setBusyTaskIds] = useState<Set<number>>(() => new Set());
   const [taskPollFailures, setTaskPollFailures] = useState(0);
+  const [scanRefreshFailures, setScanRefreshFailures] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<ScanSummary | null>(null);
   const [tags, setTags] = useState<TagRecord[]>([]);
@@ -396,10 +404,42 @@ export function useLibraryData(): LibraryState {
     return response.items;
   }, [client]);
 
+  const createScanRefreshSelectionToken = useCallback((): ScanRefreshSelectionToken | null => {
+    if (selectedRootId === null) {
+      return null;
+    }
+
+    return {
+      rootId: selectedRootId,
+      folderId: selectedFolderId,
+      version: scanRefreshSelectionVersionRef.current
+    };
+  }, [selectedFolderId, selectedRootId]);
+
+  const isCurrentScanRefreshSelection = useCallback(
+    (token: ScanRefreshSelectionToken) =>
+      token.version === scanRefreshSelectionVersionRef.current &&
+      token.rootId === selectedRootId &&
+      token.folderId === selectedFolderId,
+    [selectedFolderId, selectedRootId]
+  );
+
   const reloadCurrentMedia = useCallback(
-    async (scope?: { rootId?: number; folderId?: number | null }) => {
+    async (scope?: {
+      rootId?: number;
+      folderId?: number | null;
+      scanRefreshSelectionToken?: ScanRefreshSelectionToken;
+    }) => {
       const rootId = scope?.rootId ?? selectedRootId;
       if (rootId === null) {
+        return;
+      }
+
+      const scanRefreshSelectionToken = scope?.scanRefreshSelectionToken;
+      if (
+        scanRefreshSelectionToken &&
+        !isCurrentScanRefreshSelection(scanRefreshSelectionToken)
+      ) {
         return;
       }
 
@@ -435,7 +475,11 @@ export function useLibraryData(): LibraryState {
               rootId: root.id,
               sort: listMediaSort(sort)
             });
-        if (requestGeneration !== mediaPageGeneration.current) {
+        if (
+          requestGeneration !== mediaPageGeneration.current ||
+          (scanRefreshSelectionToken &&
+            !isCurrentScanRefreshSelection(scanRefreshSelectionToken))
+        ) {
           return;
         }
         setMedia(mediaPage.items);
@@ -450,33 +494,49 @@ export function useLibraryData(): LibraryState {
         throw cause;
       }
     },
-    [client, roots, selectedFolderId, selectedRootId]
+    [client, isCurrentScanRefreshSelection, roots, selectedFolderId, selectedRootId]
   );
 
   const refreshCurrentScanView = useCallback(async () => {
-    if (selectedRootId === null) {
+    const selectionToken = createScanRefreshSelectionToken();
+    if (!selectionToken || !isCurrentScanRefreshSelection(selectionToken)) {
       return;
     }
 
     await loadTasks();
-    const root = roots.find((item) => item.id === selectedRootId);
-    if (selectedFolderId !== null) {
-      await loadFolderChildren(selectedFolderId);
-      if (root?.rootFolderId && root.rootFolderId !== selectedFolderId) {
-        await loadFolderChildren(root.rootFolderId);
-      }
-      await reloadCurrentMedia({ rootId: selectedRootId, folderId: selectedFolderId });
+    if (!isCurrentScanRefreshSelection(selectionToken)) {
       return;
     }
 
-    await reloadCurrentMedia({ rootId: selectedRootId, folderId: null });
+    const root = roots.find((item) => item.id === selectionToken.rootId);
+    if (selectionToken.folderId !== null) {
+      await loadFolderChildren(selectionToken.folderId);
+      if (!isCurrentScanRefreshSelection(selectionToken)) {
+        return;
+      }
+      if (root?.rootFolderId && root.rootFolderId !== selectionToken.folderId) {
+        await loadFolderChildren(root.rootFolderId);
+      }
+      await reloadCurrentMedia({
+        rootId: selectionToken.rootId,
+        folderId: selectionToken.folderId,
+        scanRefreshSelectionToken: selectionToken
+      });
+      return;
+    }
+
+    await reloadCurrentMedia({
+      rootId: selectionToken.rootId,
+      folderId: null,
+      scanRefreshSelectionToken: selectionToken
+    });
   }, [
+    createScanRefreshSelectionToken,
+    isCurrentScanRefreshSelection,
     loadFolderChildren,
     loadTasks,
     reloadCurrentMedia,
-    roots,
-    selectedFolderId,
-    selectedRootId
+    roots
   ]);
 
   const loadLibrary = useCallback(async () => {
@@ -657,7 +717,7 @@ export function useLibraryData(): LibraryState {
   }, [loadTasks, scanActive, taskPollFailures]);
 
   useEffect(() => {
-    if (!scanActiveRootTask || taskPollFailures >= 3) {
+    if (!scanActiveRootTask || scanRefreshFailures >= 3) {
       return;
     }
 
@@ -667,8 +727,11 @@ export function useLibraryData(): LibraryState {
       }
       scanRefreshInFlightRef.current = true;
       void refreshCurrentScanView()
+        .then(() => {
+          setScanRefreshFailures(0);
+        })
         .catch((cause) => {
-          setTaskPollFailures((failures) => failures + 1);
+          setScanRefreshFailures((failures) => failures + 1);
           setError(errorMessage(cause));
         })
         .finally(() => {
@@ -676,7 +739,7 @@ export function useLibraryData(): LibraryState {
         });
     }, SCAN_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [refreshCurrentScanView, scanActiveRootTask, taskPollFailures]);
+  }, [refreshCurrentScanView, scanActiveRootTask, scanRefreshFailures]);
 
   const refresh = useCallback(async () => {
     await loadLibrary();
@@ -694,6 +757,7 @@ export function useLibraryData(): LibraryState {
         setLastScan(response.scan);
         if (response.rootId) {
           mediaPageGeneration.current += 1;
+          scanRefreshSelectionVersionRef.current += 1;
           selectRoot(response.rootId);
           selectFolder(null);
           setExpandedFolderIds(new Set());
@@ -1262,6 +1326,7 @@ export function useLibraryData(): LibraryState {
     setSelectedRootId: (rootId: number) => {
       const root = roots.find((item) => item.id === rootId);
       mediaPageGeneration.current += 1;
+      scanRefreshSelectionVersionRef.current += 1;
       selectRoot(rootId);
       selectFolder(root?.rootFolderId ?? null);
       if (root?.rootFolderId) {
@@ -1273,6 +1338,7 @@ export function useLibraryData(): LibraryState {
     },
     setSelectedFolder: (folder: FolderRecord) => {
       mediaPageGeneration.current += 1;
+      scanRefreshSelectionVersionRef.current += 1;
       selectRoot(folder.rootId);
       selectFolder(folder.id);
       void reloadCurrentMedia({ rootId: folder.rootId, folderId: folder.id });

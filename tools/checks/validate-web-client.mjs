@@ -43,7 +43,7 @@ const refreshCurrentScanViewBlock = sourceMatch(
 );
 const scanRefreshEffectBlock = sourceMatch(
   useLibraryData,
-  /useEffect\(\(\)\s*=>\s*\{[\s\S]*?!scanActiveRootTask[\s\S]*?\},\s*\[refreshCurrentScanView,\s*scanActiveRootTask,\s*taskPollFailures\]\);/
+  /useEffect\(\(\)\s*=>\s*\{\s*if\s*\(\s*!scanActiveRootTask[\s\S]*?\},\s*\[refreshCurrentScanView,\s*scanActiveRootTask,\s*(?:taskPollFailures|scanRefreshFailures)\]\);/
 );
 const mediaResourcesPath = "apps/web/src/core/mediaResources.ts";
 const mediaResources = existsSync(path.join(root, mediaResourcesPath))
@@ -215,7 +215,7 @@ if (
   fail("useLibraryData must reload current folder media while scanning");
 }
 if (
-  !/refreshCurrentScanView\s*=\s*useCallback[\s\S]*?await\s+loadTasks\(\)[\s\S]*?selectedFolderId[\s\S]*?loadFolderChildren\(selectedFolderId\)[\s\S]*?reloadCurrentMedia\(\{[\s\S]*?folderId:\s*selectedFolderId/.test(
+  !/refreshCurrentScanView\s*=\s*useCallback[\s\S]*?await\s+loadTasks\(\)[\s\S]*?(?:selectedFolderId|selectionToken\.folderId)[\s\S]*?loadFolderChildren\((?:selectedFolderId|selectionToken\.folderId)\)[\s\S]*?reloadCurrentMedia\(\{[\s\S]*?folderId:\s*(?:selectedFolderId|selectionToken\.folderId)/.test(
     useLibraryData
   )
 ) {
@@ -226,6 +226,14 @@ if (!refreshCurrentScanViewBlock) {
 }
 if (!scanRefreshEffectBlock) {
   fail("useLibraryData must keep the root-scan refresh effect inspectable");
+}
+if (
+  !/const\s+\[scanRefreshFailures,\s*setScanRefreshFailures\]\s*=\s*useState\(0\)/.test(useLibraryData) ||
+  !/scanRefreshFailures\s*>=\s*3/.test(scanRefreshEffectBlock) ||
+  /taskPollFailures\s*>=\s*3/.test(scanRefreshEffectBlock) ||
+  !/setScanRefreshFailures\(\(failures\)\s*=>\s*failures\s*\+\s*1\)/.test(scanRefreshEffectBlock)
+) {
+  fail("useLibraryData scan refresh must keep separate failure accounting so loadTasks success cannot reset refresh backoff");
 }
 if (
   !/scanRefreshInFlightRef\s*=\s*useRef\(false\)/.test(useLibraryData) ||
@@ -247,6 +255,22 @@ if (
 }
 if (!/setInterval[\s\S]*?refreshCurrentScanView\(\)[\s\S]*?\.catch/.test(scanRefreshEffectBlock)) {
   fail("useLibraryData must run the current-view refresh loop while a root scan is active");
+}
+if (
+  !/type\s+ScanRefreshSelectionToken\s*=/.test(useLibraryData) ||
+  !/scanRefreshSelectionVersionRef\s*=\s*useRef\(0\)/.test(useLibraryData) ||
+  !/createScanRefreshSelectionToken\s*=\s*useCallback\(\(\)\s*:\s*ScanRefreshSelectionToken\s*\|\s*null/.test(useLibraryData) ||
+  !/isCurrentScanRefreshSelection\s*=\s*useCallback\(\s*\(\s*token:\s*ScanRefreshSelectionToken\s*\)/.test(useLibraryData) ||
+  !/scanRefreshSelectionToken\?:\s*ScanRefreshSelectionToken/.test(useLibraryData) ||
+  !/if\s*\(\s*scanRefreshSelectionToken\s*&&\s*!isCurrentScanRefreshSelection\(scanRefreshSelectionToken\)\s*\)\s*\{\s*return;?\s*\}/.test(useLibraryData) ||
+  !/if\s*\(\s*requestGeneration\s*!==\s*mediaPageGeneration\.current\s*\|\|\s*\(\s*scanRefreshSelectionToken\s*&&\s*!isCurrentScanRefreshSelection\(scanRefreshSelectionToken\)\s*\)\s*\)/.test(useLibraryData) ||
+  !/const\s+selectionToken\s*=\s*createScanRefreshSelectionToken\(\)/.test(refreshCurrentScanViewBlock) ||
+  !/if\s*\(\s*!selectionToken\s*\|\|\s*!isCurrentScanRefreshSelection\(selectionToken\)\s*\)\s*\{\s*return;?\s*\}/.test(refreshCurrentScanViewBlock) ||
+  !/reloadCurrentMedia\(\{[\s\S]*?scanRefreshSelectionToken:\s*selectionToken/.test(refreshCurrentScanViewBlock) ||
+  !/scanRefreshSelectionVersionRef\.current\s*\+=\s*1[\s\S]*?selectRoot\(rootId\)/.test(useLibraryData) ||
+  !/scanRefreshSelectionVersionRef\.current\s*\+=\s*1[\s\S]*?selectRoot\(folder\.rootId\)/.test(useLibraryData)
+) {
+  fail("useLibraryData scan refresh must use a selection/version token to discard stale media after root or folder navigation");
 }
 if (!mediaGrid.includes("onRequestMore") || !mediaGrid.includes("hasMore")) {
   fail("MediaGrid must request incremental media pages near the loaded tail");
