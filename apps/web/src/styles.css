@@ -1089,7 +1089,7 @@ button:disabled {
 }
 
 .titlebar-preview-toolbar {
-  --titlebar-preview-side-width: calc((34px * 5) + 1px + (8px * 5));
+  --titlebar-preview-side-width: calc((34px * 6) + 1px + (8px * 6));
   display: grid;
   grid-template-columns:
     var(--titlebar-preview-side-width)
@@ -1242,6 +1242,54 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: center;
+}
+.media-grid-loading {
+  display: grid;
+  place-items: center;
+}
+.media-gridcell--list {
+  padding-inline: 2px;
+}
+.media-tile--list {
+  border-radius: 12px;
+}
+.media-tile--list .tile-thumb {
+  margin-top: 0;
+  border-radius: 10px;
+}
+.tile-thumb--list {
+  flex: 0 0 auto;
+}
+.tile-label--list {
+  display: block;
+  min-width: 0;
+  color: var(--text-soft);
+  font-weight: 560;
+}
+.tile-meta {
+  margin-top: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.media-tile--adaptive .tile-label,
+.media-tile--waterfall .tile-label {
+  height: auto;
+  min-height: 28px;
+  margin-top: 0;
+  text-align: left;
+}
+.media-tile--adaptive,
+.media-tile--waterfall {
+  gap: 8px;
+}
+.media-tile--adaptive .tile-thumb,
+.media-tile--waterfall .tile-thumb {
+  border-radius: 10px;
+}
+.virtual-grid--list .load-more-row {
+  justify-content: flex-start;
 }
 
 .media-tile.skeleton .tile-thumb,
@@ -2230,6 +2278,10 @@ button:disabled {
   position: relative;
 }
 
+.layout-menu {
+  position: relative;
+}
+
 .filter-menu {
   position: relative;
   flex: 0 0 auto;
@@ -2370,6 +2422,10 @@ button:disabled {
   border-color: rgba(255, 255, 255, 0.18);
 }
 
+.layout-menu-trigger {
+  justify-content: center;
+}
+
 .sort-menu-trigger-icon-only {
   width: 34px;
   min-width: 34px;
@@ -2413,6 +2469,18 @@ button:disabled {
 
 .sort-menu-item:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+
+.layout-menu-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.layout-menu-item svg {
+  flex: 0 0 auto;
+}
+.layout-menu-item span {
+  min-width: 0;
 }
 
 .sort-menu-item:focus-visible {

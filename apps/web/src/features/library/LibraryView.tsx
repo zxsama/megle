@@ -3,6 +3,7 @@ import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassButton } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
+import type { LibraryLayoutMode } from "../media-grid/layoutMode";
 import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
@@ -11,6 +12,7 @@ const AHEAD_THUMBNAIL_ROW_COUNT = 4;
 
 interface LibraryViewProps {
   library: LibraryState;
+  layoutMode: LibraryLayoutMode;
   previewOpen: boolean;
   onOpenPreview: (mediaId: number) => void;
   onClosePreview: () => void;
@@ -31,6 +33,7 @@ interface LibraryViewProps {
 
 export function LibraryView({
   library,
+  layoutMode,
   onClosePreview,
   onMediaContextMenu,
   onOpenPreview,
@@ -44,6 +47,7 @@ export function LibraryView({
     <>
       <LibraryCenterPane
         library={library}
+        layoutMode={layoutMode}
         onClosePreview={onClosePreview}
         onMediaContextMenu={onMediaContextMenu}
         onOpenPreview={onOpenPreview}
@@ -60,6 +64,7 @@ export function LibraryView({
 
 export function LibraryCenterPane({
   library,
+  layoutMode,
   onClosePreview,
   onMediaContextMenu,
   onOpenPreview,
@@ -72,7 +77,11 @@ export function LibraryCenterPane({
   const selectedRoot = library.roots.find((root) => root.id === library.selectedRootId) ?? null;
   const selectedMedia = library.selectedMedia;
   const previewMedia = previewOpen && selectedMedia ? selectedMedia : null;
-  const mediaScrollKey = mediaScrollPositionKey(library.selectedRootId, library.selectedFolderId);
+  const mediaScrollKey = mediaScrollPositionKey(
+    layoutMode,
+    library.selectedRootId,
+    library.selectedFolderId
+  );
 
   useEffect(() => {
     if (previewOpen && !selectedMedia) {
@@ -108,6 +117,7 @@ export function LibraryCenterPane({
                 aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
                 hasMore={library.mediaHasMore}
                 items={library.media}
+                layoutMode={layoutMode}
                 loading={library.loading}
                 loadingMore={library.loadingMoreMedia}
                 onContextMenu={onMediaContextMenu}
@@ -204,6 +214,10 @@ function renderEmptyState({
   return null;
 }
 
-function mediaScrollPositionKey(rootId: number | null, folderId: number | null): string {
-  return `${rootId ?? "root"}:${folderId ?? "folder"}`;
+function mediaScrollPositionKey(
+  layoutMode: LibraryLayoutMode,
+  rootId: number | null,
+  folderId: number | null
+): string {
+  return `${layoutMode}:${rootId ?? "root"}:${folderId ?? "folder"}`;
 }

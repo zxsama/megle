@@ -16,8 +16,10 @@ import type { LucideIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 import { LiquidGlassButton } from "../design/liquid-glass";
 import { FilterMenu } from "../features/library/FilterMenu";
+import { LayoutMenu } from "../features/library/LayoutMenu";
 import { SearchBar } from "../features/library/SearchBar";
 import { SortMenu } from "../features/library/SortMenu";
+import { type LibraryLayoutMode } from "../features/media-grid/layoutMode";
 import { WindowChrome } from "../features/window-chrome/WindowChrome";
 
 export type ShellWorkspaceView = "library" | "plugins" | "settings";
@@ -33,8 +35,10 @@ interface LibraryTitlebarToolbarProps {
   kind: FilterMenuProps["kind"];
   mediaCount: number;
   minRating: FilterMenuProps["minRating"];
+  layoutMode: LibraryLayoutMode;
   onClearFilters: FilterMenuProps["onClear"];
   onFilterOpenChange: (open: boolean) => void;
+  onLayoutModeChange: (mode: LibraryLayoutMode) => void;
   onRefresh: () => void;
   onSetKind: FilterMenuProps["onSetKind"];
   onSetMinRating: FilterMenuProps["onSetMinRating"];
@@ -59,8 +63,10 @@ interface PreviewTitlebarToolbarProps {
   mode: PreviewViewMode;
   scale: number;
   selectedName: string;
+  layoutMode: LibraryLayoutMode;
   onBack: () => void;
   onGoNext: () => void;
+  onLayoutModeChange: (mode: LibraryLayoutMode) => void;
   onGoPrevious: () => void;
   onResetView: () => void;
   onToggleActualSize: () => void;
@@ -137,10 +143,12 @@ export function LibraryTitlebarToolbar({
   favorite,
   filterOpen,
   kind,
+  layoutMode,
   mediaCount,
   minRating,
   onClearFilters,
   onFilterOpenChange,
+  onLayoutModeChange,
   onRefresh,
   onSetKind,
   onSetMinRating,
@@ -184,6 +192,12 @@ export function LibraryTitlebarToolbar({
             onOpenChange={onSortOpenChange}
           />
         </div>
+        <LayoutMenu
+          iconOnly
+          onChange={onLayoutModeChange}
+          titlebarControlId="library-layout"
+          value={layoutMode}
+        />
         <LiquidGlassButton
           aria-label="Refresh library"
           className="titlebar-icon-button"
@@ -211,11 +225,13 @@ export function LibraryTitlebarToolbar({
 export function PreviewTitlebarToolbar({
   canGoNext,
   canGoPrevious,
+  layoutMode,
   mode,
   scale,
   selectedName,
   onBack,
   onGoNext,
+  onLayoutModeChange,
   onGoPrevious,
   onResetView,
   onToggleActualSize
@@ -263,6 +279,12 @@ export function PreviewTitlebarToolbar({
         >
           <ChevronRight aria-hidden="true" size={16} />
         </LiquidGlassButton>
+        <LayoutMenu
+          iconOnly
+          onChange={onLayoutModeChange}
+          titlebarControlId="preview-layout"
+          value={layoutMode}
+        />
         <LiquidGlassButton
           aria-label={modeAction}
           aria-pressed={mode === "actual"}

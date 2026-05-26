@@ -43,6 +43,11 @@ import {
   LibraryCenterPane,
   LibraryInspectorPane
 } from "../features/library/LibraryView";
+import {
+  DEFAULT_LIBRARY_LAYOUT_MODE,
+  isLibraryLayoutMode,
+  type LibraryLayoutMode
+} from "../features/media-grid/layoutMode";
 import { OnboardingHero } from "../features/onboarding/OnboardingHero";
 import { PluginsView } from "../features/plugins/PluginsView";
 import { SettingsView } from "../features/settings/SettingsView";
@@ -58,6 +63,7 @@ const DEFAULT_PREVIEW_VIEW_STATE: PreviewViewState = {
   scale: 1
 };
 const CENTER_PREVIEW_PREFETCH_RADIUS = 1;
+const LIBRARY_LAYOUT_STORAGE_KEY = "megle.library.layout-mode";
 
 export function App() {
   const [activeView, setActiveView] = useState<AppView>("library");
@@ -73,6 +79,9 @@ export function App() {
     useState<PreviewViewState>(DEFAULT_PREVIEW_VIEW_STATE);
   const [previewViewCommands, setPreviewViewCommands] =
     useState<PreviewViewCommands | null>(null);
+  const [layoutMode, setLayoutMode] = useState<LibraryLayoutMode>(() =>
+    readStoredLibraryLayoutMode()
+  );
   const selectedMediaIndex = library.media.findIndex(
     (item) => item.id === library.selectedMediaId
   );
@@ -109,6 +118,14 @@ export function App() {
   useEffect(() => {
     void notifyDesktopShellReady();
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LIBRARY_LAYOUT_STORAGE_KEY, layoutMode);
+    } catch {
+      // Ignore storage failures in hardened/browser-restricted environments.
+    }
+  }, [layoutMode]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -336,11 +353,13 @@ export function App() {
         <PreviewTitlebarToolbar
           canGoNext={canPreviewNext}
           canGoPrevious={canPreviewPrevious}
+          layoutMode={layoutMode}
           mode={previewViewState.mode}
           scale={previewViewState.scale}
           selectedName={library.selectedMedia.name}
           onBack={handleClosePreview}
           onGoNext={handlePreviewNext}
+          onLayoutModeChange={setLayoutMode}
           onGoPrevious={handlePreviewPrevious}
           onResetView={() => previewViewCommands?.reset()}
           onToggleActualSize={() => previewViewCommands?.toggleActualSize()}
@@ -359,10 +378,12 @@ export function App() {
           favorite={library.searchState.favorite}
           filterOpen={filterMenuOpen}
           kind={library.searchState.kind}
+          layoutMode={layoutMode}
           mediaCount={library.media.length}
           minRating={library.searchState.minRating}
           onClearFilters={library.clearFilters}
           onFilterOpenChange={setFilterOpen}
+          onLayoutModeChange={setLayoutMode}
           onRefresh={() => void library.refresh()}
           onSetKind={library.setKind}
           onSetMinRating={library.setMinRating}
@@ -409,6 +430,7 @@ export function App() {
       ) : (
         <LibraryCenterPane
           library={library}
+          layoutMode={layoutMode}
           onClosePreview={handleClosePreview}
           onMediaContextMenu={handleMediaContextMenu}
           onOpenPreview={handleOpenPreview}
@@ -482,6 +504,15 @@ export function App() {
       />
     </LiquidGlassLayer>
   );
+}
+
+function readStoredLibraryLayoutMode(): LibraryLayoutMode {
+  try {
+    const value = window.localStorage.getItem(LIBRARY_LAYOUT_STORAGE_KEY);
+    return isLibraryLayoutMode(value) ? value : DEFAULT_LIBRARY_LAYOUT_MODE;
+  } catch {
+    return DEFAULT_LIBRARY_LAYOUT_MODE;
+  }
 }
 
 interface BuildFileItemsArgs {
