@@ -237,6 +237,7 @@ export function useLibraryData(): LibraryState {
   );
 
   const selectedMedia = media.find((item) => item.id === selectedMediaId) ?? null;
+  const selectedRoot = roots.find((item) => item.id === selectedRootId) ?? null;
   const selectedThumbnail = selectedMedia
     ? freshThumbnailStatesByMediaId[selectedMedia.id]
     : undefined;
@@ -902,6 +903,14 @@ export function useLibraryData(): LibraryState {
       return;
     }
 
+    // Never recursively "interactive-scan" the root folder itself for very
+    // large libraries. On million-file roots this duplicates the background
+    // root scan and blocks folder browsing without adding useful disclosure.
+    if (selectedRoot?.rootFolderId === selectedFolderId) {
+      pendingInteractiveScanRequestRef.current = null;
+      return;
+    }
+
     const rootId = selectedRootIdRef.current;
     if (rootId === null) {
       pendingInteractiveScanRequestRef.current = null;
@@ -933,7 +942,7 @@ export function useLibraryData(): LibraryState {
     return () => {
       cancelled = true;
     };
-  }, [client, selectedFolderId]);
+  }, [client, selectedFolderId, selectedRoot?.rootFolderId]);
 
   const previousTaskStatusRef = useRef<Map<number, TaskRecord["status"]>>(new Map());
   useEffect(() => {
