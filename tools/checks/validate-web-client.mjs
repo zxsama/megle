@@ -335,7 +335,7 @@ if (
   fail("useLibraryData must reload current folder media while scanning");
 }
 if (
-  !/refreshCurrentScanView\s*=\s*useCallback[\s\S]*?await\s+loadTasks\(\)[\s\S]*?(?:selectedFolderId|selectionToken\.folderId)[\s\S]*?loadFolderChildren\((?:selectedFolderId|selectionToken\.folderId)\)[\s\S]*?reloadCurrentMedia\(\{[\s\S]*?folderId:\s*(?:selectedFolderId|selectionToken\.folderId)/.test(
+  !/refreshCurrentScanView\s*=\s*useCallback[\s\S]*?await\s+loadTasks\(\)[\s\S]*?(?:selectedFolderId|selectionToken\.folderId|resolvedFolderId|folderId)[\s\S]*?loadFolderChildren\((?:selectedFolderId|selectionToken\.folderId|selectionToken\.folderId\s*\?\?\s*resolvedFolderId|folderId)\)[\s\S]*?reloadCurrentMedia\(\{[\s\S]*?folderId:\s*(?:selectedFolderId|selectionToken\.folderId|selectionToken\.folderId\s*\?\?\s*resolvedFolderId|folderId)/.test(
     useLibraryData
   )
 ) {

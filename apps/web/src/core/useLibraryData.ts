@@ -685,23 +685,39 @@ export function useLibraryData(): LibraryState {
       return;
     }
 
+    const rootsScope =
+      selectionToken.folderId === null
+        ? { rootId: selectionToken.rootId }
+        : { rootId: selectionToken.rootId, folderId: selectionToken.folderId };
+    const rootsResult = await loadRoots(rootsScope);
+    const root =
+      rootsResult.roots.find((item) => item.id === selectionToken.rootId) ?? rootsResult.selectedRoot;
+    const resolvedFolderId =
+      selectionToken.folderId ?? root?.rootFolderId ?? rootsResult.selectedFolderId ?? null;
+    if (resolvedFolderId !== null) {
+      setExpandedFolderIds((current) => new Set(current).add(resolvedFolderId));
+    }
+
     await loadTasks();
     if (!isCurrentScanRefreshSelection(selectionToken)) {
       return;
     }
 
-    const root = roots.find((item) => item.id === selectionToken.rootId);
-    if (selectionToken.folderId !== null) {
-      await loadFolderChildren(selectionToken.folderId);
+    if (selectionToken.folderId !== null || resolvedFolderId !== null) {
+      const folderId = selectionToken.folderId ?? resolvedFolderId;
+      if (folderId === null) {
+        return;
+      }
+      await loadFolderChildren(folderId);
       if (!isCurrentScanRefreshSelection(selectionToken)) {
         return;
       }
-      if (root?.rootFolderId && root.rootFolderId !== selectionToken.folderId) {
+      if (root?.rootFolderId && root.rootFolderId !== folderId) {
         await loadFolderChildren(root.rootFolderId);
       }
       await reloadCurrentMedia({
         rootId: selectionToken.rootId,
-        folderId: selectionToken.folderId,
+        folderId: selectionToken.folderId ?? resolvedFolderId,
         scanRefreshSelectionToken: selectionToken
       });
       return;
@@ -716,9 +732,9 @@ export function useLibraryData(): LibraryState {
     createScanRefreshSelectionToken,
     isCurrentScanRefreshSelection,
     loadFolderChildren,
+    loadRoots,
     loadTasks,
-    reloadCurrentMedia,
-    roots
+    reloadCurrentMedia
   ]);
 
   const loadLibrary = useCallback(async (scope?: LibrarySelectionScope) => {
