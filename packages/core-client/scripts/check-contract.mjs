@@ -164,6 +164,9 @@ const schemas = contract.components?.schemas ?? {};
 for (const name of [
   "AcceptedRootResponse",
   "ScanTaskRequest",
+  "InteractiveFolderScanTaskRequest",
+  "ThumbnailPriorityScopeSyncRequest",
+  "ThumbnailPriority",
   "ScanSummary",
   "RootRecord",
   "RootListResponse",
@@ -204,6 +207,8 @@ for (const name of [
 assertInterfaceMatchesSchema("ScanSummary");
 assertInterfaceMatchesSchema("AcceptedRootResponse");
 assertInterfaceMatchesSchema("ScanTaskRequest");
+assertInterfaceMatchesSchema("InteractiveFolderScanTaskRequest");
+assertInterfaceMatchesSchema("ThumbnailPriorityScopeSyncRequest");
 assertInterfaceMatchesSchema("RootRecord");
 assertInterfaceMatchesSchema("FolderRecord");
 assertInterfaceMatchesSchema("MediaRecord");
@@ -259,14 +264,17 @@ for (const [name, line] of [
 assertOperationParameters("listFolderChildren", ["folderId", "limit", "cursor"]);
 assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor", "sort", "kind"]);
 assertOperationParameters("getMedia", ["fileId"]);
-assertOperationParameters("getThumbnail", ["fileId", "target"]);
+assertOperationParameters("getThumbnail", ["fileId", "target", "priority"]);
 assertOperationParameters("getThumbnailBlob", ["fileId", "target"]);
+operation("syncThumbnailPriorityScope");
 
 for (const method of [
   "listRoots",
   "addRoot",
   "removeRoot",
   "enqueueScan",
+  "enqueueInteractiveFolderScan",
+  "syncThumbnailPriorityScope",
   "listFolderChildren",
   "listMedia",
   "getMedia",
@@ -339,6 +347,7 @@ const taskBody = interfaceBody("TaskRecord");
 for (const line of [
   "kind: TaskKind;",
   "status: TaskStatus;",
+  "folderId: number | null;",
   "itemsSeen: number;",
   "itemsTotal: number | null;",
   "foldersSeen: number;",
@@ -349,7 +358,7 @@ for (const line of [
 }
 
 for (const line of [
-  'export type TaskKind = "root_scan" | "thumbnail";',
+  'export type TaskKind = "root_scan" | "interactive_folder_scan" | "thumbnail";',
   'export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";'
 ]) {
   if (!generated.includes(line)) {
@@ -390,8 +399,29 @@ if (!/listMedia:\s*\(params:\s*ListMediaParams\s*=\s*{}\)\s*=>\s*request<Page<Me
   fail("client.ts listMedia must serialize typed query params");
 }
 
-if (!/getThumbnail:\s*\(fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320"\)\s*=>\s*request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*target\s*}\)\}`\)/.test(client)) {
-  fail("client.ts getThumbnail must request typed thumbnail state with default grid_320 target");
+if (!/export type ThumbnailPriority = "background" \| "ahead" \| "visible" \| "selected";/.test(generated)) {
+  fail("generated-contract.ts must define ThumbnailPriority as the foreground thumbnail priority vocabulary");
+}
+
+const thumbnailPriorityScopeSyncBody = interfaceBody("ThumbnailPriorityScopeSyncRequest");
+for (const line of [
+  "rootId: number;",
+  "selectedFileIds: number[];",
+  "visibleFileIds: number[];",
+  "aheadFileIds: number[];"
+]) {
+  requireLine(
+    thumbnailPriorityScopeSyncBody,
+    line,
+    "generated-contract.ts ThumbnailPriorityScopeSyncRequest"
+  );
+}
+if (
+  !/getThumbnail:\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*priority:\s*ThumbnailPriority\s*=\s*"background"\s*\)\s*=>\s*request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*target,\s*priority\s*}\)\}`\)/.test(
+    client
+  )
+) {
+  fail("client.ts getThumbnail must send typed thumbnail priority through the query string");
 }
 
 if (!/getThumbnailBlob:\s*async\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*options:\s*BlobRequestOptions\s*=\s*{}\s*\)\s*=>\s*\{[\s\S]*fetchBlob\(\s*`\/media\/\$\{fileId\}\/thumbnail\/blob\$\{query\(\{\s*target,\s*v:\s*options\.version\s*}\)\}`,\s*options\s*\)/.test(client)) {
@@ -420,6 +450,28 @@ if (!/ScanTaskRequest/.test(client)) {
 
 if (!/enqueueScan:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/scan",\s*{\s*method:\s*"POST",\s*body:\s*JSON\.stringify\([\s\S]*rootId[\s\S]*\)\s*}\)/.test(client)) {
   fail("client.ts enqueueScan must call POST /tasks/scan with typed rootId body");
+}
+
+if (!/InteractiveFolderScanTaskRequest/.test(client)) {
+  fail("client.ts enqueueInteractiveFolderScan must use the typed InteractiveFolderScanTaskRequest body");
+}
+
+if (!/enqueueInteractiveFolderScan:\s*\(folderId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/interactive-folder-scan",\s*{\s*method:\s*"POST",\s*body:\s*JSON\.stringify\([\s\S]*folderId[\s\S]*InteractiveFolderScanTaskRequest[\s\S]*\)\s*}\)/.test(client)) {
+  fail("client.ts enqueueInteractiveFolderScan must call POST /tasks/interactive-folder-scan with typed folderId body");
+}
+
+if (!/ThumbnailPriorityScopeSyncRequest/.test(client)) {
+  fail("client.ts syncThumbnailPriorityScope must use the typed ThumbnailPriorityScopeSyncRequest body");
+}
+
+if (
+  !/syncThumbnailPriorityScope:\s*\(\s*input:\s*ThumbnailPriorityScopeSyncRequest\s*\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/thumbnail-priority-scope",\s*\{\s*method:\s*"POST",\s*body:\s*JSON\.stringify\(input\)\s*\}\)/.test(
+    client
+  )
+) {
+  fail(
+    "client.ts syncThumbnailPriorityScope must call POST /tasks/thumbnail-priority-scope with the typed scope payload"
+  );
 }
 
 if (!/async function readResponseBody\(response:\s*Response\):\s*Promise<unknown>/.test(client)) {

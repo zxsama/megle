@@ -24,10 +24,13 @@ const ROOT_PATH = normalizeRootPath(
     "G:/AI_Painter/stable-diffusion/stable-diffusion-webui/outputs"
 );
 const VISIBLE_LIMIT = Number(process.env.MEGLE_REAL_LOAD_VISIBLE_LIMIT ?? 24);
+const PRIORITY_SCOPE_COUNT = Number(process.env.MEGLE_REAL_LOAD_PRIORITY_SCOPE_COUNT ?? 4);
+const PRIORITY_SCOPE_PAGE_LIMIT = 1 + PRIORITY_SCOPE_COUNT * 2;
 const SWITCH_SAMPLE_LIMIT = Number(process.env.MEGLE_REAL_LOAD_SWITCH_LIMIT ?? 24);
 const SCAN_TIMEOUT_MS = Number(process.env.MEGLE_REAL_LOAD_SCAN_TIMEOUT_MS ?? 300_000);
 const DISCLOSURE_TIMEOUT_MS = Number(process.env.MEGLE_REAL_LOAD_DISCLOSURE_TIMEOUT_MS ?? 120_000);
 const THUMBNAIL_TIMEOUT_MS = Number(process.env.MEGLE_REAL_LOAD_THUMBNAIL_TIMEOUT_MS ?? 90_000);
+const THUMBNAIL_POLL_INTERVAL_MS = Number(process.env.MEGLE_REAL_LOAD_THUMBNAIL_POLL_INTERVAL_MS ?? 100);
 const MEDIA_EXTENSIONS = new Set([
   ".avif",
   ".avi",
@@ -49,6 +52,8 @@ const MEDIA_EXTENSIONS = new Set([
 const TERMINAL_TASK_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 const TERMINAL_THUMBNAIL_STATES = new Set(["ready", "failed", "skipped_small"]);
 const closedChildren = new WeakSet<ChildProcess>();
+
+type ThumbnailPriority = "background" | "ahead" | "visible" | "selected";
 
 function log(...args: unknown[]) {
   // eslint-disable-next-line no-console
@@ -232,6 +237,7 @@ interface TaskRecord {
   kind: string;
   status: string;
   rootId: number | null;
+  folderId: number | null;
   fileId: number | null;
   itemsSeen: number;
   foldersSeen: number;
@@ -283,10 +289,23 @@ interface MediaFolder {
   media: MediaRecord[];
 }
 
-interface ThumbnailSummary {
+interface ScopeClearResult {
+  label: string;
+  itemCount: number;
+  pendingOrQueuedAtStart: number;
   ready: number;
   skipped: number;
   failed: number;
+  firstTerminalElapsedMs: number;
+  settledElapsedMs: number;
+}
+
+interface PriorityScopePlan {
+  currentFolder: MediaFolder;
+  backgroundFolder: MediaFolder;
+  selected: MediaRecord;
+  visibleScope: MediaRecord[];
+  aheadScope: MediaRecord[];
 }
 
 async function getTask(taskId: number): Promise<TaskRecord | null> {
@@ -318,20 +337,18 @@ async function pollTask(taskId: number, label: string, timeoutMs = 60_000): Prom
   throw new Error(`${label} task ${taskId} timed out in status ${last.status}`);
 }
 
-async function pollThumbnail(fileId: number, timeoutMs = THUMBNAIL_TIMEOUT_MS): Promise<ThumbnailResponse> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const response = await requestThumbnail(fileId);
-    if (TERMINAL_THUMBNAIL_STATES.has(response.state)) {
-      return response;
-    }
-    await delay(250);
-  }
-  throw new Error(`thumbnail ${fileId} never settled`);
+async function requestThumbnail(
+  fileId: number,
+  priority: ThumbnailPriority = "background"
+): Promise<ThumbnailResponse> {
+  return fetchJson<ThumbnailResponse>(`/media/${fileId}/thumbnail?target=grid_320&priority=${priority}`);
 }
 
-async function requestThumbnail(fileId: number): Promise<ThumbnailResponse> {
-  return fetchJson<ThumbnailResponse>(`/media/${fileId}/thumbnail?target=grid_320`);
+async function enqueueInteractiveFolderScan(folderId: number): Promise<AcceptedRoot> {
+  return fetchJson<AcceptedRoot>("/tasks/interactive-folder-scan", {
+    method: "POST",
+    body: JSON.stringify({ folderId })
+  });
 }
 
 async function listRoots(): Promise<RootRecord[]> {
@@ -516,21 +533,155 @@ async function verifyThumbnailBlob(fileId: number, thumb: ThumbnailResponse): Pr
   }
 }
 
-async function settleVisibleThumbnails(media: MediaRecord[]): Promise<ThumbnailSummary> {
-  const summary: ThumbnailSummary = { ready: 0, skipped: 0, failed: 0 };
-  for (const item of media) {
-    const thumb = await pollThumbnail(item.id);
-    if (thumb.state === "ready") {
-      summary.ready++;
-      await verifyThumbnailBlob(item.id, thumb);
-    } else if (thumb.state === "skipped_small") {
-      summary.skipped++;
-    } else {
-      summary.failed++;
-      log(`  ${item.name} -> failed: ${thumb.error}`);
+async function hydrateFolderMediaSamples(
+  rootId: number,
+  folders: MediaFolder[],
+  limit: number
+): Promise<MediaFolder[]> {
+  const samples = await Promise.all(
+    folders.map(async ({ folder }) => ({
+      folder,
+      media: (await listMediaPage(rootId, folder.id, limit)).items
+    }))
+  );
+  return samples.filter((sample) => sample.media.length > 0);
+}
+
+function planPriorityScopes(candidates: MediaFolder[]): PriorityScopePlan {
+  const ranked = [...candidates].sort((left, right) => right.media.length - left.media.length);
+  const currentFolder = ranked.find((candidate) => Math.floor((candidate.media.length - 1) / 2) >= 2);
+  if (!currentFolder) {
+    throw new Error(
+      `did not find a folder with enough media for selected/visible/ahead samples (need 1 + 2 scopes, saw ${ranked
+        .map((candidate) => `${candidate.folder.name}:${candidate.media.length}`)
+        .join(", ")})`
+    );
+  }
+
+  const backgroundFolder = ranked.find((candidate) => candidate.folder.id !== currentFolder.folder.id);
+  if (!backgroundFolder) {
+    throw new Error("did not find a second folder for background priority coverage");
+  }
+
+  const tierCount = Math.min(PRIORITY_SCOPE_COUNT, Math.floor((currentFolder.media.length - 1) / 2));
+  const scopedMedia = currentFolder.media.slice(0, 1 + tierCount * 2);
+  const [selected, ...remaining] = scopedMedia;
+  if (!selected) {
+    throw new Error(`current folder ${currentFolder.folder.name} produced no selected media sample`);
+  }
+
+  const visibleScope = remaining.slice(0, tierCount);
+  const aheadScope = remaining.slice(tierCount, tierCount * 2);
+  if (visibleScope.length !== tierCount || aheadScope.length !== tierCount) {
+    throw new Error(
+      `current folder ${currentFolder.folder.name} did not retain balanced visible/ahead scopes ` +
+        `(visible=${visibleScope.length}, ahead=${aheadScope.length}, tierCount=${tierCount})`
+    );
+  }
+
+  return {
+    currentFolder,
+    backgroundFolder,
+    selected,
+    visibleScope,
+    aheadScope
+  };
+}
+
+async function primeThumbnailScope(
+  media: MediaRecord[],
+  priority: ThumbnailPriority
+): Promise<Map<number, ThumbnailResponse>> {
+  const entries = await Promise.all(
+    media.map(async (item) => [item.id, await requestThumbnail(item.id, priority)] as const)
+  );
+  return new Map(entries);
+}
+
+async function settleThumbnailScope(
+  label: string,
+  media: MediaRecord[],
+  priority: ThumbnailPriority,
+  startedAt: number,
+  initialStates: Map<number, ThumbnailResponse>,
+  timeoutMs = THUMBNAIL_TIMEOUT_MS
+): Promise<ScopeClearResult> {
+  const pendingIds = new Set(media.map((item) => item.id));
+  const terminalStates = new Map<number, ThumbnailResponse>();
+  const pendingOrQueuedAtStart = [...initialStates.values()].filter(
+    (thumbnail) => !TERMINAL_THUMBNAIL_STATES.has(thumbnail.state)
+  ).length;
+  let firstTerminalElapsedMs: number | null = null;
+  const start = Date.now();
+
+  function recordTerminal(thumbnail: ThumbnailResponse): void {
+    terminalStates.set(thumbnail.fileId, thumbnail);
+    pendingIds.delete(thumbnail.fileId);
+    if (firstTerminalElapsedMs === null) {
+      firstTerminalElapsedMs = elapsedSince(startedAt);
     }
   }
-  return summary;
+
+  for (const thumbnail of initialStates.values()) {
+    if (TERMINAL_THUMBNAIL_STATES.has(thumbnail.state) && !isRetryableThumbnailFailure(thumbnail)) {
+      recordTerminal(thumbnail);
+    }
+  }
+
+  while (pendingIds.size > 0) {
+    if (Date.now() - start >= timeoutMs) {
+      throw new Error(
+        `${label} thumbnails timed out after ${timeoutMs}ms with pending ids ${[...pendingIds].join(", ")}`
+      );
+    }
+
+    const polled = await Promise.all(
+      [...pendingIds].map(async (fileId) => [fileId, await requestThumbnail(fileId, priority)] as const)
+    );
+    for (const [, thumbnail] of polled) {
+      if (TERMINAL_THUMBNAIL_STATES.has(thumbnail.state) && !isRetryableThumbnailFailure(thumbnail)) {
+        recordTerminal(thumbnail);
+      }
+    }
+
+    if (pendingIds.size > 0) {
+      await delay(THUMBNAIL_POLL_INTERVAL_MS);
+    }
+  }
+
+  const settledElapsedMs = elapsedSince(startedAt);
+  const summary = { ready: 0, skipped: 0, failed: 0 };
+  for (const thumbnail of terminalStates.values()) {
+    if (thumbnail.state === "ready") {
+      summary.ready += 1;
+    } else if (thumbnail.state === "skipped_small") {
+      summary.skipped += 1;
+    } else {
+      summary.failed += 1;
+      log(`  ${label} ${thumbnail.fileId} -> failed: ${thumbnail.error}`);
+    }
+  }
+
+  await Promise.all(
+    [...terminalStates.values()]
+      .filter((thumbnail) => thumbnail.state === "ready")
+      .map((thumbnail) => verifyThumbnailBlob(thumbnail.fileId, thumbnail))
+  );
+
+  return {
+    label,
+    itemCount: media.length,
+    pendingOrQueuedAtStart,
+    ready: summary.ready,
+    skipped: summary.skipped,
+    failed: summary.failed,
+    firstTerminalElapsedMs: firstTerminalElapsedMs ?? settledElapsedMs,
+    settledElapsedMs
+  };
+}
+
+function isRetryableThumbnailFailure(thumbnail: ThumbnailResponse): boolean {
+  return thumbnail.state === "failed" && /database is locked/i.test(thumbnail.error ?? "");
 }
 
 async function verifyOriginalPreview(media: MediaRecord): Promise<{ elapsedMs: number; contentType: string | null }> {
@@ -646,7 +797,7 @@ async function main() {
         `${formatMs(firstVisible.elapsedMs)} while scan=${firstVisible.scanStatus}`
     );
 
-    const discovered = await waitForFoldersWithMedia(root.rootId, rootRecord.rootFolderId!, root.taskId, 2);
+    const discovered = await waitForFoldersWithMedia(root.rootId, rootRecord.rootFolderId!, root.taskId, 4);
     log(
       `media folders discovered while scan=${discovered.scanStatus}: ` +
         discovered.folders.map((item) => `${item.folder.name}(${item.media.length})`).join(", ")
@@ -657,61 +808,170 @@ async function main() {
 
     const switchTimings = await verifyFolderSwitching(root.rootId, discovered.folders);
 
-    const visibleFolder = discovered.folders[0];
-    const backgroundFolder = discovered.folders[1];
-    const visibleMedia = visibleFolder.media.slice(0, VISIBLE_LIMIT);
-    if (visibleMedia.length === 0) {
-      throw new Error("visible folder sample is empty");
-    }
-
-    const initialVisibleStates = await Promise.all(visibleMedia.map((item) => requestThumbnail(item.id)));
-    const placeholderPhaseCount = initialVisibleStates.filter((thumb) => !TERMINAL_THUMBNAIL_STATES.has(thumb.state)).length;
-    if (placeholderPhaseCount === 0) {
-      throw new Error("visible thumbnail requests did not expose a pending/queued placeholder phase");
-    }
-    log(
-      `visible thumbnail placeholder phase: ${placeholderPhaseCount}/${visibleMedia.length} ` +
-        `started as pending/queued`
+    const folderSamples = await hydrateFolderMediaSamples(
+      root.rootId,
+      discovered.folders,
+      Math.max(PRIORITY_SCOPE_PAGE_LIMIT, SWITCH_SAMPLE_LIMIT)
     );
-
-    const visibleThumbStartedAt = Date.now();
-    const visibleSummary = await settleVisibleThumbnails(visibleMedia);
-    const visibleClearMs = elapsedSince(visibleThumbStartedAt);
-    if (visibleSummary.ready + visibleSummary.skipped === 0) {
-      throw new Error(`visible thumbnails did not produce any usable output: ${JSON.stringify(visibleSummary)}`);
-    }
-
-    const backgroundBefore = await listMediaPage(root.rootId, backgroundFolder.folder.id, SWITCH_SAMPLE_LIMIT);
-    const backgroundReadyBefore = backgroundBefore.items.filter((item) => item.thumbnailState === "ready").length;
-    if (backgroundReadyBefore > 0) {
-      throw new Error(`background folder already had ${backgroundReadyBefore} ready thumbnails before being requested`);
-    }
-    log(
-      `visible thumbnails settled in ${formatMs(visibleClearMs)}: ` +
-        `ready=${visibleSummary.ready} skipped=${visibleSummary.skipped} failed=${visibleSummary.failed}; ` +
-        `background ready before request=${backgroundReadyBefore}/${backgroundBefore.items.length}`
-    );
-
-    const backgroundSample = backgroundBefore.items[0];
+    const priorityPlan = planPriorityScopes(folderSamples);
+    const backgroundSample = priorityPlan.backgroundFolder.media[0];
     if (!backgroundSample) {
       throw new Error("background folder sample is empty");
     }
-    const backgroundStartedAt = Date.now();
-    const backgroundThumb = await pollThumbnail(backgroundSample.id);
-    const backgroundFirstClearMs = elapsedSince(backgroundStartedAt);
-    if (backgroundThumb.state === "ready") {
-      await verifyThumbnailBlob(backgroundSample.id, backgroundThumb);
+
+    const backgroundReadyBefore = priorityPlan.backgroundFolder.media.filter(
+      (item) => item.thumbnailState === "ready"
+    ).length;
+    if (backgroundReadyBefore > 0) {
+      throw new Error(
+        `background folder ${priorityPlan.backgroundFolder.folder.name} already had ` +
+          `${backgroundReadyBefore} ready thumbnails before being requested`
+      );
     }
+
     log(
-      `background first thumbnail after explicit request: ${backgroundThumb.state} ` +
-        `in ${formatMs(backgroundFirstClearMs)}`
+      `priority scopes: current=${priorityPlan.currentFolder.folder.name} ` +
+        `(selected=1 visible=${priorityPlan.visibleScope.length} ahead=${priorityPlan.aheadScope.length}) ` +
+        `background=${priorityPlan.backgroundFolder.folder.name}; ` +
+        `background ready before request=${backgroundReadyBefore}/${priorityPlan.backgroundFolder.media.length}`
     );
 
-    const previewResult = await verifyOriginalPreview(visibleMedia[0]);
-    log(
-      `center preview original: file=${visibleMedia[0].name}, content-type=${previewResult.contentType ?? "null"}, ` +
-        `size=${visibleMedia[0].size}, loaded headers in ${formatMs(previewResult.elapsedMs)}`
+    const interactiveScanStartedAt = Date.now();
+    const interactiveScan = await enqueueInteractiveFolderScan(priorityPlan.currentFolder.folder.id);
+    if (!interactiveScan.accepted || !interactiveScan.taskId) {
+      throw new Error(
+        `interactive folder scan was not accepted for ${priorityPlan.currentFolder.folder.name}: ` +
+          `${JSON.stringify(interactiveScan)}`
+      );
+    }
+    const interactiveTask = await pollTask(
+      interactiveScan.taskId,
+      "interactive folder scan",
+      DISCLOSURE_TIMEOUT_MS
     );
+    const interactiveTaskElapsedMs = elapsedSince(interactiveScanStartedAt);
+    if (interactiveTask.kind !== "interactive_folder_scan") {
+      throw new Error(`interactive folder scan task ${interactiveTask.id} reported kind=${interactiveTask.kind}`);
+    }
+    if (interactiveTask.folderId !== priorityPlan.currentFolder.folder.id) {
+      throw new Error(
+        `interactive folder scan task ${interactiveTask.id} targeted folder ${interactiveTask.folderId}, ` +
+          `expected ${priorityPlan.currentFolder.folder.id}`
+      );
+    }
+    if (interactiveTask.status !== "succeeded") {
+      throw new Error(`interactive folder scan failed: ${interactiveTask.error}`);
+    }
+    if (interactiveTask.mediaFilesSeen === 0 && interactiveTask.itemsSeen === 0) {
+      throw new Error("interactive folder scan did not report any current-folder work");
+    }
+
+    const priorityStartedAt = Date.now();
+    const [selectedInitial, visibleInitial, aheadInitial] = await Promise.all([
+      primeThumbnailScope([priorityPlan.selected], "selected"),
+      primeThumbnailScope(priorityPlan.visibleScope, "visible"),
+      primeThumbnailScope(priorityPlan.aheadScope, "ahead")
+    ]);
+
+    const [selectedClear, visibleClear, aheadClear] = await Promise.all([
+      settleThumbnailScope("selected", [priorityPlan.selected], "selected", priorityStartedAt, selectedInitial),
+      settleThumbnailScope("visible", priorityPlan.visibleScope, "visible", priorityStartedAt, visibleInitial),
+      settleThumbnailScope("ahead", priorityPlan.aheadScope, "ahead", priorityStartedAt, aheadInitial)
+    ]);
+
+    if (selectedClear.ready + selectedClear.skipped !== 1) {
+      throw new Error(`selected thumbnail did not settle cleanly: ${JSON.stringify(selectedClear)}`);
+    }
+    if (visibleClear.ready + visibleClear.skipped === 0) {
+      throw new Error(`visible scope did not produce usable thumbnails: ${JSON.stringify(visibleClear)}`);
+    }
+    if (aheadClear.ready + aheadClear.skipped === 0) {
+      throw new Error(`ahead scope did not produce usable thumbnails: ${JSON.stringify(aheadClear)}`);
+    }
+    if (visibleClear.pendingOrQueuedAtStart === 0) {
+      throw new Error("visible scope did not expose a pending/queued placeholder phase");
+    }
+
+    const backgroundBeforeRequest = await listMediaPage(
+      root.rootId,
+      priorityPlan.backgroundFolder.folder.id,
+      Math.max(PRIORITY_SCOPE_PAGE_LIMIT, SWITCH_SAMPLE_LIMIT)
+    );
+    const backgroundReadyBeforeRequest = backgroundBeforeRequest.items.filter(
+      (item) => item.thumbnailState === "ready"
+    ).length;
+    if (backgroundReadyBeforeRequest > 0) {
+      throw new Error(
+        `background folder ${priorityPlan.backgroundFolder.folder.name} already had ` +
+          `${backgroundReadyBeforeRequest} ready thumbnails before being requested`
+      );
+    }
+
+    const backgroundStartedAt = Date.now();
+    const backgroundInitial = await primeThumbnailScope([backgroundSample], "background");
+    const backgroundClear = await settleThumbnailScope(
+      "background",
+      [backgroundSample],
+      "background",
+      backgroundStartedAt,
+      backgroundInitial
+    );
+    if (backgroundClear.ready + backgroundClear.skipped !== 1) {
+      throw new Error(`background request did not settle cleanly: ${JSON.stringify(backgroundClear)}`);
+    }
+
+    log(
+      `selected clear: first=${formatMs(selectedClear.firstTerminalElapsedMs)} settled=${formatMs(selectedClear.settledElapsedMs)} ` +
+        `(pending=${selectedClear.pendingOrQueuedAtStart}/${selectedClear.itemCount}, ready=${selectedClear.ready}, skipped=${selectedClear.skipped})`
+    );
+    log(
+      `visible scope clear: first=${formatMs(visibleClear.firstTerminalElapsedMs)} settled=${formatMs(visibleClear.settledElapsedMs)} ` +
+        `(pending=${visibleClear.pendingOrQueuedAtStart}/${visibleClear.itemCount}, ready=${visibleClear.ready}, skipped=${visibleClear.skipped}, failed=${visibleClear.failed})`
+    );
+    log(
+      `ahead scope clear: first=${formatMs(aheadClear.firstTerminalElapsedMs)} settled=${formatMs(aheadClear.settledElapsedMs)} ` +
+        `(pending=${aheadClear.pendingOrQueuedAtStart}/${aheadClear.itemCount}, ` +
+        `ready=${aheadClear.ready}, skipped=${aheadClear.skipped}, failed=${aheadClear.failed})`
+    );
+    log(
+      `background first clear after explicit request: ${formatMs(backgroundClear.firstTerminalElapsedMs)} ` +
+        `(ready=${backgroundClear.ready}, skipped=${backgroundClear.skipped}, failed=${backgroundClear.failed})`
+    );
+    log(
+      `interactive folder scan current folder: ${priorityPlan.currentFolder.folder.name} ` +
+        `-> task ${interactiveTask.id} succeeded in ${formatMs(interactiveTaskElapsedMs)} ` +
+        `(items=${interactiveTask.itemsSeen}, media=${interactiveTask.mediaFilesSeen})`
+    );
+
+    const previewResult = await verifyOriginalPreview(priorityPlan.selected);
+    log(
+      `center preview original: file=${priorityPlan.selected.name}, content-type=${previewResult.contentType ?? "null"}, ` +
+        `size=${priorityPlan.selected.size}, loaded headers in ${formatMs(previewResult.elapsedMs)}`
+    );
+
+    const priorityOrder = {
+      selectedFirstClearBeforeVisibleFirst:
+        selectedClear.firstTerminalElapsedMs <= visibleClear.firstTerminalElapsedMs,
+      visibleFirstClearBeforeAheadFirst:
+        visibleClear.firstTerminalElapsedMs <= aheadClear.firstTerminalElapsedMs,
+      backgroundFolderStayedDeferred: backgroundReadyBeforeRequest === 0,
+      interactiveFolderScanCovered:
+        interactiveTask.folderId === priorityPlan.currentFolder.folder.id &&
+        interactiveTask.mediaFilesSeen > 0
+    };
+
+    if (!priorityOrder.selectedFirstClearBeforeVisibleFirst) {
+      throw new Error("selected first clear did not happen before visible first clear");
+    }
+    if (!priorityOrder.visibleFirstClearBeforeAheadFirst) {
+      throw new Error("visible first clear did not happen before ahead first clear");
+    }
+    if (!priorityOrder.backgroundFolderStayedDeferred) {
+      throw new Error("unrequested background folder reached ready before explicit request");
+    }
+    if (!priorityOrder.interactiveFolderScanCovered) {
+      throw new Error("interactive folder scan behavior was not covered");
+    }
 
     const scanTask = await pollTask(root.taskId, "scan", SCAN_TIMEOUT_MS);
     log(
@@ -728,7 +988,7 @@ async function main() {
       throw new Error(`indexed media ${indexedMedia.length} did not match scan media count ${scanTask.mediaFilesSeen}`);
     }
     if (expectedFiles !== indexedMedia.length) {
-      log(`WARN: on-disk media count ${expectedFiles} differs from indexed media ${indexedMedia.length}`);
+      throw new Error(`indexed media ${indexedMedia.length} did not match on-disk media count ${expectedFiles}`);
     }
 
     log("");
@@ -736,8 +996,14 @@ async function main() {
     log(`Root scanned: ${ROOT_PATH}`);
     log(`Add root -> first visible media: ${formatMs(firstVisible.elapsedMs)}`);
     log(`Folder switch timings: ${switchTimings.map(formatMs).join(", ")}`);
-    log(`Visible grid_320 clear: ${formatMs(visibleClearMs)} for ${visibleMedia.length} items`);
-    log(`Background first clear after request: ${formatMs(backgroundFirstClearMs)}`);
+    log(
+      `Foreground first clears: selected=${formatMs(selectedClear.firstTerminalElapsedMs)}, ` +
+        `visible=${formatMs(visibleClear.firstTerminalElapsedMs)}, ahead=${formatMs(aheadClear.firstTerminalElapsedMs)}`
+    );
+    log(`Selected clear settled: ${formatMs(selectedClear.settledElapsedMs)}`);
+    log(`Visible scope clear settled: ${formatMs(visibleClear.settledElapsedMs)} for ${visibleClear.itemCount} items`);
+    log(`Ahead scope clear settled: ${formatMs(aheadClear.settledElapsedMs)} for ${aheadClear.itemCount} items`);
+    log(`Background first clear after request: ${formatMs(backgroundClear.firstTerminalElapsedMs)}`);
     log(`Center preview original header load: ${formatMs(previewResult.elapsedMs)}`);
     log(`Media indexed: ${indexedMedia.length} (on disk: ${expectedFiles})`);
     log(`Data dir: ${dataDir}`);

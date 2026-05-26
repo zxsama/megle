@@ -11,8 +11,8 @@ use std::path::Path as FilePath;
 use crate::api::AppState;
 use crate::db::{
     FolderRecord, MediaPageQuery, MediaRecord, NewRoot, PluginRecord, RootRecord, SearchQuery,
-    TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailRecord, UserMetadataPatch,
-    UserMetadataRecord,
+    TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailRecord, ThumbnailTaskPriority,
+    UserMetadataPatch, UserMetadataRecord,
 };
 use crate::fsops::{
     self, DeleteRequest, FileOperationRecord, FsOpsError, FsOpsErrorCode, MoveRequest,
@@ -82,6 +82,8 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/search",
     "/api/tasks",
     "/api/tasks/scan",
+    "/api/tasks/interactive-folder-scan",
+    "/api/tasks/thumbnail-priority-scope",
     "/api/tasks/{taskId}/cancel",
     "/api/tasks/{taskId}/retry",
     "/api/file-ops/rename",
@@ -158,6 +160,24 @@ struct ScanTaskRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct InteractiveFolderScanTaskRequest {
+    #[serde(rename = "folderId")]
+    folder_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailPriorityScopeSyncRequest {
+    root_id: i64,
+    #[serde(default)]
+    selected_file_ids: Vec<i64>,
+    #[serde(default)]
+    visible_file_ids: Vec<i64>,
+    #[serde(default)]
+    ahead_file_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ListFolderChildrenQuery {
     limit: Option<i64>,
     cursor: Option<String>,
@@ -177,6 +197,7 @@ struct ListMediaQuery {
 
 #[derive(Debug, Deserialize)]
 struct ThumbnailQuery {
+    priority: Option<String>,
     target: Option<String>,
 }
 
@@ -385,6 +406,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/search", get(search_media))
         .route("/api/tasks", get(list_tasks))
         .route("/api/tasks/scan", post(enqueue_scan))
+        .route(
+            "/api/tasks/interactive-folder-scan",
+            post(enqueue_interactive_folder_scan),
+        )
+        .route(
+            "/api/tasks/thumbnail-priority-scope",
+            post(sync_thumbnail_priority_scope),
+        )
         .route("/api/tasks/:task_id/cancel", post(cancel_task))
         .route("/api/tasks/:task_id/retry", post(retry_task))
         .route("/api/file-ops/rename", post(rename_file))
@@ -532,6 +561,8 @@ async fn get_thumbnail(
 ) -> ApiResult<(StatusCode, Json<ThumbnailResponse>)> {
     let target = normalize_profile(query.target.as_deref())
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
+    let priority = ThumbnailTaskPriority::from_query_value(query.priority.as_deref())
+        .ok_or_else(|| CoreError::bad_request("unsupported thumbnail priority".to_string()))?;
     let (thumbnail, blob, queued_task) = {
         let database = state.database.lock().expect("database mutex poisoned");
         let thumbnail = database
@@ -539,7 +570,7 @@ async fn get_thumbnail(
             .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
         let (thumbnail, queued_task) = if is_pending_status(&thumbnail.state) {
             let request = database
-                .request_thumbnail_task(file_id, target)
+                .request_thumbnail_task(file_id, target, priority)
                 .map_err(map_thumbnail_request_error)?;
             let queued_task_id = if request.queued {
                 request.task_id
@@ -687,6 +718,70 @@ async fn enqueue_scan(
         Json(AcceptedResponse {
             accepted: true,
             task_id: Some(task_id),
+            root_id: Some(payload.root_id),
+            scan: None,
+        }),
+    ))
+}
+
+async fn enqueue_interactive_folder_scan(
+    State(state): State<AppState>,
+    Json(payload): Json<InteractiveFolderScanTaskRequest>,
+) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    let (task_id, attempt_generation, root_id) = {
+        let database = state.database.lock().expect("database mutex poisoned");
+        if !database.folder_exists(payload.folder_id)? {
+            return Err(CoreError::not_found(format!(
+                "folder not found: {}",
+                payload.folder_id
+            )));
+        }
+        let task_id = database.create_interactive_folder_scan_task(payload.folder_id)?;
+        let task = database
+            .get_task(task_id)?
+            .ok_or_else(|| CoreError::not_found(format!("task not found: {task_id}")))?;
+        let attempt_generation = database.current_task_attempt_generation(task_id)?;
+        let root_id = task
+            .root_id
+            .ok_or_else(|| CoreError::conflict(format!("task missing root id: {task_id}")))?;
+        (task_id, attempt_generation, root_id)
+    };
+    enqueue_task(&state, task_id, attempt_generation).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AcceptedResponse {
+            accepted: true,
+            task_id: Some(task_id),
+            root_id: Some(root_id),
+            scan: None,
+        }),
+    ))
+}
+
+async fn sync_thumbnail_priority_scope(
+    State(state): State<AppState>,
+    Json(payload): Json<ThumbnailPriorityScopeSyncRequest>,
+) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    {
+        let database = state.database.lock().expect("database mutex poisoned");
+        if database.get_root(payload.root_id)?.is_none() {
+            return Err(CoreError::not_found(format!(
+                "root not found: {}",
+                payload.root_id
+            )));
+        }
+        database.sync_thumbnail_priority_scope(
+            payload.root_id,
+            &payload.selected_file_ids,
+            &payload.visible_file_ids,
+            &payload.ahead_file_ids,
+        )?;
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AcceptedResponse {
+            accepted: true,
+            task_id: None,
             root_id: Some(payload.root_id),
             scan: None,
         }),
@@ -1213,8 +1308,10 @@ fn map_task_action_error(error: anyhow::Error) -> CoreError {
         || message.contains("not retryable")
         || message.contains("root is disabled")
         || message.contains("root not found")
+        || message.contains("folder not found")
         || message.contains("media item not found")
         || message.contains("missing root id")
+        || message.contains("missing folder id")
         || message.contains("missing file id")
     {
         return CoreError::conflict(message);
@@ -2186,6 +2283,89 @@ mod tests {
         }));
 
         wait_for_task_status(&app, task_id, "succeeded").await;
+        let _ = fs::remove_dir_all(temp_root);
+        drop(app);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn tasks_routes_enqueue_interactive_folder_scan_for_existing_folder() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(temp_root.join("selected")).expect("create selected dir");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let (database, worker_database) = test_database_pair(db_dir.join("megle.sqlite"));
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Interactive Root".to_string(),
+            })
+            .expect("add root");
+        let root_folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "interactive-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: Some(root_folder_id),
+                name: "selected".to_string(),
+                path_hash: "interactive-selected".to_string(),
+                mtime: Some(2),
+            })
+            .expect("insert selected folder");
+        let state = AppState::new_with_worker(database, worker_database);
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/interactive-folder-scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "folderId": folder_id }).to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("enqueue interactive folder scan");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_json(response).await;
+        assert_eq!(body["accepted"], true);
+        let task_id = body["taskId"].as_i64().expect("task id");
+        assert_eq!(body["rootId"], root_id);
+        assert!(body["scan"].is_null());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/tasks")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("list tasks");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let tasks = body["items"].as_array().expect("task items");
+        assert!(tasks.iter().any(|task| {
+            task["id"] == task_id
+                && task["kind"] == "interactive_folder_scan"
+                && task["rootId"] == root_id
+                && task["folderId"] == folder_id
+                && task["fileId"].is_null()
+        }));
+
         let _ = fs::remove_dir_all(temp_root);
         drop(app);
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

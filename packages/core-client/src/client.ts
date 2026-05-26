@@ -10,6 +10,7 @@ import type {
   FileOperationsResponse,
   FileTagsResponse,
   FolderRecord,
+  InteractiveFolderScanTaskRequest,
   ListFileOperationsParams,
   ListFolderChildrenParams,
   ListMediaParams,
@@ -27,6 +28,8 @@ import type {
   TagListResponse,
   TagRecord,
   TaskRecord,
+  ThumbnailPriority,
+  ThumbnailPriorityScopeSyncRequest,
   ThumbnailResponse,
   UserMetadataRecord,
   UserMetadataUpdate
@@ -55,6 +58,7 @@ export interface BlobRequestOptions {
 }
 
 type QueryParams = Partial<ListMediaParams & ListFolderChildrenParams> & {
+  priority?: ThumbnailPriority;
   target?: "grid_320";
   v?: number | string | null;
 };
@@ -114,6 +118,16 @@ export function createCoreClient(config: CoreClientConfig) {
         method: "POST",
         body: JSON.stringify({ rootId } satisfies ScanTaskRequest)
       }),
+    enqueueInteractiveFolderScan: (folderId: number) =>
+      request<AcceptedRootResponse>("/tasks/interactive-folder-scan", {
+        method: "POST",
+        body: JSON.stringify({ folderId } satisfies InteractiveFolderScanTaskRequest)
+      }),
+    syncThumbnailPriorityScope: (input: ThumbnailPriorityScopeSyncRequest) =>
+      request<AcceptedRootResponse>("/tasks/thumbnail-priority-scope", {
+        method: "POST",
+        body: JSON.stringify(input)
+      }),
     cancelTask: (taskId: number) =>
       request<AcceptedRootResponse>(`/tasks/${taskId}/cancel`, {
         method: "POST"
@@ -126,8 +140,11 @@ export function createCoreClient(config: CoreClientConfig) {
       request<Page<FolderRecord>>(`/folders/${folderId}/children${query(params)}`),
     listMedia: (params: ListMediaParams = {}) => request<Page<MediaRecord>>(`/media${query(params)}`),
     getMedia: (fileId: number) => request<MediaRecord>(`/media/${fileId}`),
-    getThumbnail: (fileId: number, target: "grid_320" = "grid_320") =>
-      request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ target })}`),
+    getThumbnail: (
+      fileId: number,
+      target: "grid_320" = "grid_320",
+      priority: ThumbnailPriority = "background"
+    ) => request<ThumbnailResponse>(`/media/${fileId}/thumbnail${query({ target, priority })}`),
     getThumbnailBlob: async (
       fileId: number,
       target: "grid_320" = "grid_320",
@@ -227,6 +244,7 @@ function query(params: QueryParams): string {
   if ("sort" in params && params.sort) search.set("sort", params.sort);
   if ("kind" in params && params.kind) search.set("kind", params.kind);
   if ("target" in params && params.target) search.set("target", params.target);
+  if ("priority" in params && params.priority) search.set("priority", params.priority);
   if ("v" in params && params.v !== null && params.v !== undefined) {
     search.set("v", String(params.v));
   }

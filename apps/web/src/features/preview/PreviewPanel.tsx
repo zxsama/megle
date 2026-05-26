@@ -29,6 +29,7 @@ export function PreviewPanel({
                 onMediaReady={undefined}
                 source="thumbnail"
                 thumbnail={thumbnail}
+                preferOriginalWhilePending
               />
             </div>
           ) : null}

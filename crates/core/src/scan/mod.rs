@@ -11,7 +11,9 @@ use crate::db::{
     TaskScanProgress,
 };
 
-pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = 10;
+pub const INTERACTIVE_SCAN_WRITE_BATCH_SIZE: usize = 1;
+pub const BACKGROUND_SCAN_WRITE_BATCH_SIZE: usize = 256;
+pub const DEFAULT_SCAN_WRITE_BATCH_SIZE: usize = BACKGROUND_SCAN_WRITE_BATCH_SIZE;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,16 +45,34 @@ pub struct TaskAttemptGuard {
     pub attempt_generation: i64,
 }
 
-impl Default for ScanOptions<'_> {
-    fn default() -> Self {
+impl<'a> ScanOptions<'a> {
+    pub fn for_priority(priority: ScanPriority) -> Self {
+        let write_batch_size = match priority {
+            ScanPriority::Interactive => INTERACTIVE_SCAN_WRITE_BATCH_SIZE,
+            ScanPriority::Background => DEFAULT_SCAN_WRITE_BATCH_SIZE,
+        };
         Self {
-            write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
+            write_batch_size,
             progress_callback: None,
             cancellation_callback: None,
             task_attempt_guard: None,
             #[cfg(test)]
             batch_observer: None,
         }
+    }
+
+    pub fn interactive() -> Self {
+        Self::for_priority(ScanPriority::Interactive)
+    }
+
+    pub fn background() -> Self {
+        Self::for_priority(ScanPriority::Background)
+    }
+}
+
+impl Default for ScanOptions<'_> {
+    fn default() -> Self {
+        Self::background()
     }
 }
 
@@ -65,7 +85,7 @@ pub struct ScanBatchStats {
 
 #[cfg(test)]
 pub fn scan_root(database: &mut Database, root: &RootRecord) -> anyhow::Result<ScanSummary> {
-    scan_root_with_options(database, root, ScanOptions::default())
+    scan_root_with_options(database, root, ScanOptions::background())
 }
 
 #[allow(dead_code)]
@@ -78,12 +98,8 @@ pub fn scan_root_with_progress(
         database,
         root,
         ScanOptions {
-            write_batch_size: DEFAULT_SCAN_WRITE_BATCH_SIZE,
             progress_callback: Some(progress_callback),
-            cancellation_callback: None,
-            task_attempt_guard: None,
-            #[cfg(test)]
-            batch_observer: None,
+            ..ScanOptions::background()
         },
     )
 }
@@ -196,7 +212,7 @@ pub fn scan_root_with_options(
             flush_scan_files(
                 database,
                 root.id,
-                scan_generation,
+                Some(scan_generation),
                 &mut options,
                 &mut pending_files,
             )?;
@@ -206,7 +222,7 @@ pub fn scan_root_with_options(
     flush_scan_files(
         database,
         root.id,
-        scan_generation,
+        Some(scan_generation),
         &mut options,
         &mut pending_files,
     )?;
@@ -234,6 +250,113 @@ pub fn scan_root_with_options(
         database.reconcile_root_scan_completion(root.id, scan_generation)?;
         database.mark_root_scanned(root.id)?;
     }
+    Ok(summary)
+}
+
+pub fn scan_folder_with_options(
+    database: &mut Database,
+    root: &RootRecord,
+    folder_id: i64,
+    folder_path: &Path,
+    mut options: ScanOptions<'_>,
+) -> anyhow::Result<ScanSummary> {
+    let root_path = PathBuf::from(&root.path);
+    check_scan_cancelled(&mut options)?;
+    ensure_root_enabled(database, root.id)?;
+    let selected_folder_id =
+        database.ensure_folder_chain_for_path(root.id, &root_path, folder_path)?;
+    if selected_folder_id != folder_id {
+        return Err(anyhow::anyhow!(
+            "folder path resolved to unexpected folder id: expected {folder_id}, got {selected_folder_id}"
+        ));
+    }
+
+    let mut folder_ids = HashMap::new();
+    folder_ids.insert(folder_path.to_path_buf(), selected_folder_id);
+    let mut pending_files = Vec::new();
+    let write_batch_size = options.write_batch_size.max(1);
+
+    let mut summary = ScanSummary {
+        folders_seen: 1,
+        media_files_seen: 0,
+        skipped_files: 0,
+    };
+    let mut items_seen = 0_i64;
+    emit_progress(&mut options, items_seen, &summary);
+    check_scan_cancelled(&mut options)?;
+
+    for entry in WalkDir::new(folder_path).min_depth(1) {
+        check_scan_cancelled(&mut options)?;
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        items_seen += 1;
+
+        if metadata.is_dir() {
+            let parent_id = parent_folder_id(path, &folder_ids)?;
+            let batch = ScanWriteBatch {
+                folders: vec![FolderUpsert {
+                    root_id: root.id,
+                    parent_id: Some(parent_id),
+                    name: file_name(path),
+                    path_hash: hash_path(path),
+                    mtime: metadata_time(Some(&metadata), TimeField::Modified),
+                }],
+                files: Vec::new(),
+                scan_generation: None,
+            };
+            observe_scan_batch(&options, batch.folders.len(), batch.files.len());
+            check_scan_cancelled(&mut options)?;
+            ensure_root_enabled(database, root.id)?;
+            let result = commit_scan_batch_with_optional_task_guard(database, batch, &options)?;
+            let nested_folder_id = result.folder_ids[0];
+            folder_ids.insert(path.to_path_buf(), nested_folder_id);
+            summary.folders_seen += 1;
+            emit_progress(&mut options, items_seen, &summary);
+            check_scan_cancelled(&mut options)?;
+            continue;
+        }
+
+        if !metadata.is_file() {
+            summary.skipped_files += 1;
+            emit_progress(&mut options, items_seen, &summary);
+            check_scan_cancelled(&mut options)?;
+            continue;
+        }
+
+        let Some(kind) = media_kind(path) else {
+            summary.skipped_files += 1;
+            emit_progress(&mut options, items_seen, &summary);
+            check_scan_cancelled(&mut options)?;
+            continue;
+        };
+
+        let parent_id = parent_folder_id(path, &folder_ids)?;
+        pending_files.push(ScanFileUpsert {
+            file: FileUpsert {
+                root_id: root.id,
+                folder_id: parent_id,
+                name: file_name(path),
+                ext: extension(path),
+                size: metadata.len() as i64,
+                mtime: metadata_time(Some(&metadata), TimeField::Modified).unwrap_or(0),
+                ctime: metadata_time(Some(&metadata), TimeField::Created),
+                file_key: None,
+            },
+            media_kind: kind.to_string(),
+        });
+        summary.media_files_seen += 1;
+        emit_progress(&mut options, items_seen, &summary);
+        check_scan_cancelled(&mut options)?;
+
+        if pending_files.len() >= write_batch_size {
+            flush_scan_files(database, root.id, None, &mut options, &mut pending_files)?;
+        }
+    }
+
+    flush_scan_files(database, root.id, None, &mut options, &mut pending_files)?;
+    check_scan_cancelled(&mut options)?;
+    ensure_root_enabled(database, root.id)?;
     Ok(summary)
 }
 
@@ -265,7 +388,7 @@ fn parent_folder_id(path: &Path, folder_ids: &HashMap<PathBuf, i64>) -> anyhow::
 fn flush_scan_files(
     database: &mut Database,
     root_id: i64,
-    scan_generation: i64,
+    scan_generation: Option<i64>,
     options: &mut ScanOptions<'_>,
     pending_files: &mut Vec<ScanFileUpsert>,
 ) -> anyhow::Result<()> {
@@ -281,7 +404,7 @@ fn flush_scan_files(
         ScanWriteBatch {
             folders: Vec::new(),
             files: std::mem::take(pending_files),
-            scan_generation: Some(scan_generation),
+            scan_generation,
         },
         options,
     )?;
@@ -379,8 +502,13 @@ mod tests {
     use crate::db::{Database, MediaPageQuery, NewRoot};
 
     #[test]
-    fn scan_options_default_uses_small_write_batch() {
-        assert_eq!(ScanOptions::default().write_batch_size, 10);
+    fn scan_options_default_uses_background_write_batch() {
+        assert_eq!(ScanOptions::default().write_batch_size, 256);
+    }
+
+    #[test]
+    fn scan_options_interactive_profile_uses_single_file_write_batch() {
+        assert_eq!(ScanOptions::interactive().write_batch_size, 1);
     }
 
     #[test]
@@ -997,6 +1125,74 @@ mod tests {
             .expect("get source")
             .expect("source exists");
         assert_eq!(source.metadata_status.as_deref(), Some("ready"));
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn scan_folder_preserves_ready_thumbnail_for_unchanged_files() {
+        let temp_root = unique_temp_dir();
+        let folder_path = temp_root.join("selected");
+        fs::create_dir_all(&folder_path).expect("create selected folder");
+        let image_path = folder_path.join("image.jpg");
+        write_test_image(&image_path, 800, 400);
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "unchanged-folder-thumb");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("initial scan");
+        let root_record = database
+            .get_root(root_id)
+            .expect("get root")
+            .expect("root exists");
+        let root_folder_id = root_record.root_folder_id.expect("root folder id");
+        let selected_folder = only_child_named(&database, root_folder_id, "selected");
+        let media = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(selected_folder.id),
+                limit: 10,
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: None,
+            })
+            .expect("list selected media");
+        let file_id = media.items[0].id;
+        let source_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get thumbnail source")
+            .expect("thumbnail source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: None,
+                width: Some(320),
+                height: Some(160),
+                byte_size: Some(42),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("seed ready thumbnail");
+
+        scan_folder_with_options(
+            &mut database,
+            &root,
+            selected_folder.id,
+            &folder_path,
+            ScanOptions::interactive(),
+        )
+        .expect("interactive folder rescan");
+
+        let thumbnail = database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "ready");
 
         fs::remove_dir_all(temp_root).expect("cleanup temp root");
     }

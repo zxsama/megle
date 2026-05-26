@@ -33,6 +33,7 @@ as a follow-up issue rather than patching during release prep.
 - [ ] Add a 1k+ file root via the sidebar input or the folder picker.
 - [ ] Scan completes; the Task Center shows succeeded scan and thumbnail tasks.
 - [ ] Browse the folder tree and the media grid; switching folders re-scopes the grid.
+- [ ] During an active scan, the current folder keeps disclosing usable rows; the clicked tile's first clear happens before the visible scope's first clear, and the visible scope's first clear happens before the ahead scope's first clear. Unopened background folders stay deferred until the explicit background request happens later.
 - [ ] Preview switching is responsive — left/right neighbors prefetch.
 - [ ] Rename / Move / Recycle work from the context menu; recent ops drawer updates.
 - [ ] Tag / rate / favorite a file; search composes filters; chips clear filters.
@@ -94,8 +95,18 @@ Expected:
   completion when the real tree is large enough for an active-scan observation.
 - Switching between media-bearing folders returns scoped media while the scan is
   still running, or logs a warning if the local scan completed too quickly.
-- Visible `grid_320` thumbnails settle after explicit current-view requests,
-  while an unrequested background folder has no ready thumbnails first.
+- The script covers `selected`, `visible`, `ahead`, and `background` thumbnail
+  priorities through `/media/:id/thumbnail?target=grid_320&priority=...` and
+  reports first-clear and settled timings for the foreground scopes.
+- The selected tile's first clear happens before the visible scope's first
+  clear, and the visible scope's first clear happens before the ahead scope's
+  first clear.
+- The background folder has no ready thumbnails before the explicit background
+  request is made, and its clear timing is measured only after that request.
+- The script enqueues `/tasks/interactive-folder-scan` for the current folder
+  and verifies that task succeeds with current-folder work recorded.
+- The indexed media count must match the on-disk media count; any mismatch is a
+  failure, not a warning.
 - `/media/:id/preview` reports original media size and private cache headers,
   not the `db_blob` thumbnail path.
 

@@ -19,14 +19,18 @@ import {
   isFreshThumbnailForMediaRecord,
   isLiveThumbnailResponseForMediaRecord,
   mediaContentSignature,
+  pickPreferredThumbnailResponse,
   readCachedThumbnailStates,
   requestThumbnailState,
+  type ThumbnailRequestPriority,
   shouldRequestThumbnailState
 } from "./mediaResources";
 
 const PAGE_LIMIT = 200;
 const SEARCH_DEBOUNCE_MS = 250;
 const SCAN_REFRESH_INTERVAL_MS = 800;
+const SELECTED_THUMBNAIL_REPOLL_MS = 150;
+const THUMBNAIL_SCOPE_SYNC_DEBOUNCE_MS = 0;
 
 export type LibrarySort =
   | "mtime_desc"
@@ -106,7 +110,7 @@ export interface LibraryState {
   setSelectedFolder: (folder: FolderRecord) => void;
   setSelectedMediaId: (mediaId: number | null) => void;
   toggleFolderExpanded: (folderId: number) => void;
-  requestThumbnailStates: (mediaIds: number[]) => void;
+  requestThumbnailStates: (mediaIds: number[], priority: ThumbnailRequestPriority) => void;
   loadMoreFolderChildren: (folderId: number) => Promise<void>;
   loadMoreMedia: () => Promise<void>;
   rescanRoot: (rootId: number) => Promise<void>;
@@ -134,6 +138,23 @@ type ScanRefreshSelectionToken = {
   rootId: number;
   folderId: number | null;
   version: number;
+};
+
+type LibrarySelectionScope = {
+  rootId?: number | null;
+  folderId?: number | null;
+};
+
+type ThumbnailPriorityScope = {
+  selected: number[];
+  visible: number[];
+  ahead: number[];
+};
+
+type PendingInteractiveScanRequest = {
+  rootId: number;
+  folderId: number;
+  knownTaskIds: Set<number>;
 };
 
 export function useLibraryData(): LibraryState {
@@ -166,6 +187,13 @@ export function useLibraryData(): LibraryState {
   const [selectedRootId, selectRoot] = useState<number | null>(null);
   const [selectedFolderId, selectFolder] = useState<number | null>(null);
   const [selectedMediaId, selectMedia] = useState<number | null>(null);
+  const selectedRootIdRef = useRef<number | null>(selectedRootId);
+  const selectedFolderIdRef = useRef<number | null>(selectedFolderId);
+  const selectedMediaIdRef = useRef<number | null>(selectedMediaId);
+  const thumbnailPriorityScopeRef = useRef<ThumbnailPriorityScope>(emptyThumbnailPriorityScope());
+  const thumbnailPriorityScopeSyncKeyRef = useRef<string | null>(null);
+  const thumbnailPriorityScopeSyncTimerRef = useRef<number | null>(null);
+  const pendingInteractiveScanRequestRef = useRef<PendingInteractiveScanRequest | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMoreMedia, setLoadingMoreMedia] = useState(false);
   const [addingRoot, setAddingRoot] = useState(false);
@@ -195,6 +223,9 @@ export function useLibraryData(): LibraryState {
   const mediaById = useMemo(() => new Map(media.map((item) => [item.id, item])), [media]);
   const mediaByIdRef = useRef(mediaById);
   mediaByIdRef.current = mediaById;
+  const tasksRef = useRef(tasks);
+  tasksRef.current = tasks;
+  const failedThumbnailRetrySignaturesRef = useRef<Set<string>>(new Set());
   const freshThumbnailStatesByMediaId = useMemo(
     () =>
       filterFreshThumbnailStates(
@@ -206,6 +237,9 @@ export function useLibraryData(): LibraryState {
   );
 
   const selectedMedia = media.find((item) => item.id === selectedMediaId) ?? null;
+  const selectedThumbnail = selectedMedia
+    ? freshThumbnailStatesByMediaId[selectedMedia.id]
+    : undefined;
   const selectedMediaThumbnailRequestKey = selectedMedia
     ? mediaContentSignature(selectedMedia)
     : null;
@@ -239,10 +273,81 @@ export function useLibraryData(): LibraryState {
   searchStateRef.current = searchState;
   const debouncedQRef = useRef(debouncedQ);
   debouncedQRef.current = debouncedQ;
+  selectedRootIdRef.current = selectedRootId;
+  selectedFolderIdRef.current = selectedFolderId;
+  selectedMediaIdRef.current = selectedMediaId;
 
-  const requestThumbnailStates = useCallback((mediaIds: number[]) => {
-    const mediaRecords = [...new Set(mediaIds)]
-      .filter((mediaId) => Number.isFinite(mediaId))
+  const flushThumbnailPriorityScopeSync = useCallback(
+    async (rootId = selectedRootIdRef.current) => {
+      if (thumbnailPriorityScopeSyncTimerRef.current !== null) {
+        window.clearTimeout(thumbnailPriorityScopeSyncTimerRef.current);
+        thumbnailPriorityScopeSyncTimerRef.current = null;
+      }
+      if (rootId === null) {
+        return;
+      }
+
+      const input = {
+        rootId,
+        selectedFileIds: thumbnailPriorityScopeRef.current.selected,
+        visibleFileIds: thumbnailPriorityScopeRef.current.visible,
+        aheadFileIds: thumbnailPriorityScopeRef.current.ahead
+      };
+      const requestKey = thumbnailPriorityScopeRequestKey(input);
+      if (thumbnailPriorityScopeSyncKeyRef.current === requestKey) {
+        return;
+      }
+
+      thumbnailPriorityScopeSyncKeyRef.current = requestKey;
+      try {
+        await client.syncThumbnailPriorityScope(input);
+      } catch (cause) {
+        thumbnailPriorityScopeSyncKeyRef.current = null;
+        throw cause;
+      }
+    },
+    [client]
+  );
+
+  const scheduleThumbnailPriorityScopeSync = useCallback(
+    (priority: ThumbnailRequestPriority, mediaIds: number[]) => {
+      if (priority === "background") {
+        return;
+      }
+
+      thumbnailPriorityScopeRef.current = nextThumbnailPriorityScope(
+        thumbnailPriorityScopeRef.current,
+        priority,
+        mediaIds,
+        selectedMediaIdRef.current
+      );
+      if (thumbnailPriorityScopeSyncTimerRef.current !== null) {
+        window.clearTimeout(thumbnailPriorityScopeSyncTimerRef.current);
+      }
+      if (selectedRootIdRef.current === null) {
+        return;
+      }
+      thumbnailPriorityScopeSyncTimerRef.current = window.setTimeout(() => {
+        void flushThumbnailPriorityScopeSync().catch((cause) => {
+          setError(errorMessage(cause));
+        });
+      }, THUMBNAIL_SCOPE_SYNC_DEBOUNCE_MS);
+    },
+    [flushThumbnailPriorityScopeSync]
+  );
+
+  const requestThumbnailStates = useCallback((
+    mediaIds: number[],
+    priority: ThumbnailRequestPriority
+  ) => {
+    scheduleThumbnailPriorityScopeSync(priority, mediaIds);
+
+    const normalizedMediaIds = normalizeThumbnailScopeMediaIds(
+      mediaIds,
+      priority,
+      selectedMediaIdRef.current
+    );
+    const mediaRecords = normalizedMediaIds
       .map((mediaId) => mediaByIdRef.current.get(mediaId))
       .filter((mediaRecord): mediaRecord is MediaRecord => Boolean(mediaRecord));
     if (mediaRecords.length === 0) {
@@ -260,12 +365,56 @@ export function useLibraryData(): LibraryState {
     }
 
     for (const mediaRecord of mediaRecords) {
-      if (!shouldRequestThumbnailState(mediaRecord)) {
+      const currentThumbnail = freshThumbnailStatesByMediaId[mediaRecord.id];
+      const currentMediaSignature = mediaContentSignature(mediaRecord);
+      const effectiveState =
+        currentThumbnail?.state ?? explicitMediaThumbnailState(mediaRecord.thumbnailState);
+      if (
+        effectiveState === "failed" &&
+        priority !== "background" &&
+        !failedThumbnailRetrySignaturesRef.current.has(currentMediaSignature)
+      ) {
+        const failedTask = latestFailedThumbnailTaskForFile(tasksRef.current, mediaRecord.id);
+        if (failedTask) {
+          failedThumbnailRetrySignaturesRef.current.add(currentMediaSignature);
+          thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id] = currentMediaSignature;
+          setThumbnailStatesByMediaId((current) => ({
+            ...current,
+            [mediaRecord.id]: optimisticQueuedThumbnail(mediaRecord.id)
+          }));
+          void client
+            .retryTask(failedTask.id)
+            .then(() => client.listTasks())
+            .then((response) => {
+              setTasks(response.items);
+              setTaskPollFailures(0);
+            })
+            .then(() => requestThumbnailState(mediaRecord, priority))
+            .then((thumbnail) => {
+              setThumbnailStatesByMediaId((current) => ({
+                ...current,
+                [mediaRecord.id]: pickPreferredThumbnailResponse(
+                  current[mediaRecord.id],
+                  thumbnail
+                )
+              }));
+            })
+            .catch((cause) => {
+              setError(errorMessage(cause));
+            });
+          continue;
+        }
+      }
+      const shouldFetchThumbnail =
+        currentThumbnail?.state === "pending" ||
+        currentThumbnail?.state === "queued" ||
+        shouldRequestThumbnailState(mediaRecord);
+      if (!shouldFetchThumbnail) {
         continue;
       }
 
-      const requestedMediaSignature = mediaContentSignature(mediaRecord);
-      void requestThumbnailState(mediaRecord)
+      const requestedMediaSignature = currentMediaSignature;
+      void requestThumbnailState(mediaRecord, priority)
         .then((thumbnail) => {
           setThumbnailStatesByMediaId((current) => {
             const currentMediaRecord = mediaByIdRef.current.get(mediaRecord.id);
@@ -283,12 +432,16 @@ export function useLibraryData(): LibraryState {
 
             thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id] =
               currentMediaSignature;
-            if (current[mediaRecord.id] === thumbnail) {
+            const mergedThumbnail = pickPreferredThumbnailResponse(
+              current[mediaRecord.id],
+              thumbnail
+            );
+            if (current[mediaRecord.id] === mergedThumbnail) {
               return current;
             }
             return {
               ...current,
-              [mediaRecord.id]: thumbnail
+              [mediaRecord.id]: mergedThumbnail
             };
           });
         })
@@ -302,16 +455,15 @@ export function useLibraryData(): LibraryState {
               delete thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id];
               return removeThumbnailState(current, mediaRecord.id);
             }
-            thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id] =
-              currentMediaSignature;
-            return {
-              ...current,
-              [mediaRecord.id]: failedThumbnailState(mediaRecord.id, cause)
-            };
+            if (cause instanceof Error && cause.name === "AbortError") {
+              return current;
+            }
+            delete thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id];
+            return removeThumbnailState(current, mediaRecord.id);
           });
         });
     }
-  }, []);
+  }, [client, freshThumbnailStatesByMediaId, scheduleThumbnailPriorityScopeSync]);
 
   const loadFolderChildren = useCallback(
     async (folderId: number) => {
@@ -388,15 +540,23 @@ export function useLibraryData(): LibraryState {
     [client, folderChildNextCursorByParent, loadingMoreFolderIds]
   );
 
-  const loadRoots = useCallback(async () => {
+  const loadRoots = useCallback(async (scope?: LibrarySelectionScope) => {
     const response = await client.listRoots();
     setRoots(response.items);
-    const nextRootId = selectedRootId ?? response.items[0]?.id ?? null;
+    const requestedRootId =
+      scope && "rootId" in scope ? scope.rootId ?? null : selectedRootIdRef.current;
+    const nextRootId = requestedRootId ?? response.items[0]?.id ?? null;
     selectRoot(nextRootId);
     const nextRoot = response.items.find((root) => root.id === nextRootId) ?? response.items[0];
-    selectFolder((current) => current ?? nextRoot?.rootFolderId ?? null);
-    return { roots: response.items, selectedRoot: nextRoot ?? null };
-  }, [client, selectedRootId]);
+    const nextFolderId =
+      scope && "folderId" in scope
+        ? scope.folderId ?? null
+        : selectedFolderIdRef.current ?? nextRoot?.rootFolderId ?? null;
+    selectedRootIdRef.current = nextRootId;
+    selectedFolderIdRef.current = nextFolderId;
+    selectFolder(nextFolderId);
+    return { roots: response.items, selectedRoot: nextRoot ?? null, selectedFolderId: nextFolderId };
+  }, [client]);
 
   const loadTasks = useCallback(async () => {
     const response = await client.listTasks();
@@ -430,9 +590,18 @@ export function useLibraryData(): LibraryState {
       rootId?: number;
       folderId?: number | null;
       scanRefreshSelectionToken?: ScanRefreshSelectionToken;
+      setLoadingState?: boolean;
     }) => {
+      const requestGeneration = ++mediaPageGeneration.current;
       const rootId = scope?.rootId ?? selectedRootId;
+      const setLoadingState = scope?.setLoadingState ?? false;
+      if (setLoadingState) {
+        setLoading(true);
+      }
       if (rootId === null) {
+        if (setLoadingState) {
+          setLoading(false);
+        }
         return;
       }
 
@@ -446,6 +615,9 @@ export function useLibraryData(): LibraryState {
 
       const root = roots.find((item) => item.id === rootId);
       if (!root) {
+        if (setLoadingState) {
+          setLoading(false);
+        }
         return;
       }
 
@@ -454,7 +626,6 @@ export function useLibraryData(): LibraryState {
         folderId !== null && folderId !== undefined && folderId !== root.rootFolderId
           ? folderId
           : undefined;
-      const requestGeneration = ++mediaPageGeneration.current;
       inFlightMediaPageKeys.current.clear();
       loadedMediaPageKeys.current.clear();
       setError(null);
@@ -493,6 +664,15 @@ export function useLibraryData(): LibraryState {
       } catch (cause) {
         setError(errorMessage(cause));
         throw cause;
+      } finally {
+        if (
+          setLoadingState &&
+          requestGeneration === mediaPageGeneration.current &&
+          (!scanRefreshSelectionToken ||
+            isCurrentScanRefreshSelection(scanRefreshSelectionToken))
+        ) {
+          setLoading(false);
+        }
       }
     },
     [client, isCurrentScanRefreshSelection, roots, selectedFolderId, selectedRootId]
@@ -540,18 +720,21 @@ export function useLibraryData(): LibraryState {
     roots
   ]);
 
-  const loadLibrary = useCallback(async () => {
+  const loadLibrary = useCallback(async (scope?: LibrarySelectionScope) => {
     const requestGeneration = ++mediaPageGeneration.current;
     inFlightMediaPageKeys.current.clear();
     loadedMediaPageKeys.current.clear();
     setLoading(true);
     setError(null);
     try {
-      const result = await loadRoots();
+      const result = await loadRoots(scope);
       await loadTasks();
       const root =
-        result.roots.find((item) => item.id === selectedRootId) ?? result.selectedRoot;
-      const folderId = selectedFolderId ?? root?.rootFolderId ?? null;
+        result.roots.find((item) => item.id === selectedRootIdRef.current) ?? result.selectedRoot;
+      const folderId =
+        scope && "folderId" in scope
+          ? scope.folderId ?? null
+          : result.selectedFolderId ?? root?.rootFolderId ?? null;
 
       if (folderId) {
         setExpandedFolderIds((current) => new Set(current).add(folderId));
@@ -563,7 +746,7 @@ export function useLibraryData(): LibraryState {
 
       if (root) {
         const folderFilter =
-          selectedFolderId && selectedFolderId !== root.rootFolderId ? selectedFolderId : undefined;
+          folderId && folderId !== root.rootFolderId ? folderId : undefined;
         const cursor = null;
         const sort = searchStateRef.current.sort;
         const mediaPage = searchActiveRef.current
@@ -600,11 +783,20 @@ export function useLibraryData(): LibraryState {
     } finally {
       setLoading(false);
     }
-  }, [client, loadFolderChildren, loadRoots, loadTasks, selectedFolderId, selectedRootId]);
+  }, [client, loadFolderChildren, loadRoots, loadTasks]);
 
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary]);
+
+  useEffect(() => {
+    return () => {
+      if (thumbnailPriorityScopeSyncTimerRef.current !== null) {
+        window.clearTimeout(thumbnailPriorityScopeSyncTimerRef.current);
+        thumbnailPriorityScopeSyncTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Debounce the search query input
   useEffect(() => {
@@ -676,32 +868,120 @@ export function useLibraryData(): LibraryState {
 
   useEffect(() => {
     if (!selectedMedia) {
+      scheduleThumbnailPriorityScopeSync("selected", []);
       return;
     }
-    requestThumbnailStates([selectedMedia.id]);
-  }, [requestThumbnailStates, selectedMedia, selectedMediaThumbnailRequestKey]);
+    requestThumbnailStates([selectedMedia.id], "selected");
+  }, [
+    requestThumbnailStates,
+    scheduleThumbnailPriorityScopeSync,
+    selectedMedia,
+    selectedMediaThumbnailRequestKey
+  ]);
+
+  useEffect(() => {
+    if (!selectedMedia || !shouldRepollThumbnailState(selectedMedia, selectedThumbnail)) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      requestThumbnailStates([selectedMedia.id], "selected");
+    }, SELECTED_THUMBNAIL_REPOLL_MS);
+    return () => window.clearInterval(timer);
+  }, [
+    requestThumbnailStates,
+    selectedMedia,
+    selectedMediaThumbnailRequestKey,
+    selectedThumbnail?.state,
+    selectedThumbnail?.updatedAt
+  ]);
+
+  useEffect(() => {
+    if (selectedFolderId === null) {
+      pendingInteractiveScanRequestRef.current = null;
+      return;
+    }
+
+    const rootId = selectedRootIdRef.current;
+    if (rootId === null) {
+      pendingInteractiveScanRequestRef.current = null;
+      return;
+    }
+
+    pendingInteractiveScanRequestRef.current = {
+      rootId,
+      folderId: selectedFolderId,
+      knownTaskIds: new Set(
+        tasksRef.current
+          .filter(
+            (task) =>
+              task.kind === "interactive_folder_scan" &&
+              task.rootId === rootId &&
+              task.folderId === selectedFolderId
+          )
+          .map((task) => task.id)
+      )
+    };
+
+    let cancelled = false;
+    void client.enqueueInteractiveFolderScan(selectedFolderId).catch((cause) => {
+      if (!cancelled) {
+        pendingInteractiveScanRequestRef.current = null;
+        setError(errorMessage(cause));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, selectedFolderId]);
 
   const previousTaskStatusRef = useRef<Map<number, TaskRecord["status"]>>(new Map());
   useEffect(() => {
     const previous = previousTaskStatusRef.current;
-    let scanCompleted = false;
+    let shouldReloadLibrary = false;
+    let interactiveRefreshScope: { rootId: number; folderId: number | null } | null = null;
+    const pendingInteractiveScan = pendingInteractiveScanRequestRef.current;
     for (const task of tasks) {
       const prior = previous.get(task.id);
-      if (
-        prior &&
-        prior !== task.status &&
-        task.status === "succeeded" &&
-        (task.kind === "root_scan" || task.kind === "thumbnail")
-      ) {
-        scanCompleted = true;
+      const transitionedToSucceeded =
+        Boolean(prior) && prior !== task.status && task.status === "succeeded";
+      if (transitionedToSucceeded && task.kind === "root_scan" && task.rootId === selectedRootId) {
+        shouldReloadLibrary = true;
         break;
+      }
+      if (
+        pendingInteractiveScan &&
+        task.kind === "interactive_folder_scan" &&
+        task.rootId !== null &&
+        task.status === "succeeded" &&
+        task.rootId === pendingInteractiveScan.rootId &&
+        task.folderId === pendingInteractiveScan.folderId
+      ) {
+        const firstObservedSucceeded =
+          !prior && !pendingInteractiveScan.knownTaskIds.has(task.id);
+        if (transitionedToSucceeded || firstObservedSucceeded) {
+          interactiveRefreshScope = {
+            rootId: task.rootId,
+            folderId: task.folderId
+          };
+          pendingInteractiveScanRequestRef.current = null;
+        }
       }
     }
     previousTaskStatusRef.current = new Map(tasks.map((task) => [task.id, task.status]));
-    if (scanCompleted) {
+    if (shouldReloadLibrary) {
       void loadLibrary();
+      return;
     }
-  }, [tasks, loadLibrary]);
+    if (interactiveRefreshScope) {
+      void reloadCurrentMedia({
+        rootId: interactiveRefreshScope.rootId,
+        folderId: interactiveRefreshScope.folderId
+      }).catch((cause) => {
+        setError(errorMessage(cause));
+      });
+    }
+  }, [loadLibrary, reloadCurrentMedia, selectedFolderId, selectedRootId, tasks]);
 
   useEffect(() => {
     if (!scanActive || taskPollFailures >= 3) {
@@ -758,6 +1038,23 @@ export function useLibraryData(): LibraryState {
     await loadLibrary();
   }, [loadLibrary]);
 
+  const prepareNavigationMediaReload = useCallback(() => {
+    mediaPageGeneration.current += 1;
+    scanRefreshSelectionVersionRef.current += 1;
+    setScanRefreshFailures(0);
+    setLoading(true);
+    setLoadingMoreMedia(false);
+    setError(null);
+    setMedia([]);
+    setMediaNextCursor(null);
+    selectMedia(null);
+    thumbnailPriorityScopeRef.current = emptyThumbnailPriorityScope();
+    thumbnailPriorityScopeSyncKeyRef.current = null;
+    void flushThumbnailPriorityScopeSync().catch((cause) => {
+      setError(errorMessage(cause));
+    });
+  }, [flushThumbnailPriorityScopeSync]);
+
   const addRoot = useCallback(
     async (path: string) => {
       const trimmedPath = path.trim();
@@ -769,15 +1066,17 @@ export function useLibraryData(): LibraryState {
         const response = await client.addRoot(trimmedPath);
         setLastScan(response.scan);
         if (response.rootId) {
-          mediaPageGeneration.current += 1;
           scanRefreshSelectionVersionRef.current += 1;
+          setScanRefreshFailures(0);
+          selectedRootIdRef.current = response.rootId;
+          selectedFolderIdRef.current = null;
           selectRoot(response.rootId);
           selectFolder(null);
           setExpandedFolderIds(new Set());
           setFolderChildNextCursorByParent({});
         }
         await loadTasks();
-        await loadLibrary();
+        await loadLibrary(response.rootId ? { rootId: response.rootId, folderId: null } : undefined);
       } catch (cause) {
         setError(errorMessage(cause));
       } finally {
@@ -1338,27 +1637,35 @@ export function useLibraryData(): LibraryState {
     deleteItems,
     setSelectedRootId: (rootId: number) => {
       const root = roots.find((item) => item.id === rootId);
-      mediaPageGeneration.current += 1;
-      scanRefreshSelectionVersionRef.current += 1;
-      setScanRefreshFailures(0);
+      const rootFolderId = root?.rootFolderId ?? null;
+      prepareNavigationMediaReload();
+      selectedRootIdRef.current = rootId;
+      selectedFolderIdRef.current = rootFolderId;
       selectRoot(rootId);
-      selectFolder(root?.rootFolderId ?? null);
-      if (root?.rootFolderId) {
-        const rootFolderId = root.rootFolderId;
+      selectFolder(rootFolderId);
+      if (rootFolderId) {
         setExpandedFolderIds((current) => new Set(current).add(rootFolderId));
         void loadFolderChildren(rootFolderId);
       }
-      void reloadCurrentMedia({ rootId, folderId: root?.rootFolderId ?? null }).catch((cause) => {
+      void reloadCurrentMedia({
+        rootId,
+        folderId: rootFolderId,
+        setLoadingState: true
+      }).catch((cause) => {
         setError(errorMessage(cause));
       });
     },
     setSelectedFolder: (folder: FolderRecord) => {
-      mediaPageGeneration.current += 1;
-      scanRefreshSelectionVersionRef.current += 1;
-      setScanRefreshFailures(0);
+      prepareNavigationMediaReload();
+      selectedRootIdRef.current = folder.rootId;
+      selectedFolderIdRef.current = folder.id;
       selectRoot(folder.rootId);
       selectFolder(folder.id);
-      void reloadCurrentMedia({ rootId: folder.rootId, folderId: folder.id }).catch((cause) => {
+      void reloadCurrentMedia({
+        rootId: folder.rootId,
+        folderId: folder.id,
+        setLoadingState: true
+      }).catch((cause) => {
         setError(errorMessage(cause));
       });
     },
@@ -1421,21 +1728,46 @@ function clearFolderChildPageKeys(keys: Set<string>, folderId: number): void {
   }
 }
 
-function failedThumbnailState(mediaId: number, cause: unknown): ThumbnailResponse {
+function emptyThumbnailPriorityScope(): ThumbnailPriorityScope {
   return {
-    fileId: mediaId,
-    target: "grid_320",
-    state: "failed",
-    shortSidePx: 320,
-    outputFormat: "image/webp",
-    width: null,
-    height: null,
-    byteSize: null,
-    servedBy: null,
-    asset: null,
-    error: errorMessage(cause),
-    updatedAt: null
+    selected: [],
+    visible: [],
+    ahead: []
   };
+}
+
+function normalizeThumbnailScopeMediaIds(
+  mediaIds: number[],
+  priority: ThumbnailRequestPriority,
+  selectedMediaId: number | null
+): number[] {
+  return [...new Set(mediaIds)]
+    .filter((mediaId) => Number.isFinite(mediaId))
+    .filter((mediaId) => priority === "selected" || mediaId !== selectedMediaId);
+}
+
+function nextThumbnailPriorityScope(
+  current: ThumbnailPriorityScope,
+  priority: ThumbnailRequestPriority,
+  mediaIds: number[],
+  selectedMediaId: number | null
+): ThumbnailPriorityScope {
+  if (priority === "background") {
+    return current;
+  }
+  return {
+    ...current,
+    [priority]: normalizeThumbnailScopeMediaIds(mediaIds, priority, selectedMediaId)
+  };
+}
+
+function thumbnailPriorityScopeRequestKey(input: {
+  rootId: number;
+  selectedFileIds: number[];
+  visibleFileIds: number[];
+  aheadFileIds: number[];
+}): string {
+  return JSON.stringify(input);
 }
 
 function mergeThumbnailStates(
@@ -1446,8 +1778,9 @@ function mergeThumbnailStates(
   const next = { ...current };
   for (const [mediaId, thumbnail] of Object.entries(nextStates)) {
     const key = Number(mediaId);
-    if (current[key] !== thumbnail) {
-      next[key] = thumbnail;
+    const mergedThumbnail = pickPreferredThumbnailResponse(current[key], thumbnail);
+    if (current[key] !== mergedThumbnail) {
+      next[key] = mergedThumbnail;
       changed = true;
     }
   }
@@ -1501,6 +1834,58 @@ function removeThumbnailState(
   const next = { ...current };
   delete next[mediaId];
   return next;
+}
+
+function latestFailedThumbnailTaskForFile(tasks: TaskRecord[], fileId: number): TaskRecord | null {
+  return (
+    tasks
+      .filter(
+        (task) => task.kind === "thumbnail" && task.fileId === fileId && task.status === "failed"
+      )
+      .sort((left, right) => right.id - left.id)[0] ?? null
+  );
+}
+
+function optimisticQueuedThumbnail(fileId: number): ThumbnailResponse {
+  return {
+    fileId,
+    target: "grid_320",
+    state: "queued",
+    shortSidePx: 320,
+    outputFormat: "image/webp",
+    width: null,
+    height: null,
+    byteSize: null,
+    servedBy: null,
+    asset: null,
+    error: null,
+    updatedAt: null
+  };
+}
+
+function explicitMediaThumbnailState(
+  value: string | null | undefined
+): ThumbnailResponse["state"] | null {
+  if (
+    value === "pending" ||
+    value === "queued" ||
+    value === "ready" ||
+    value === "failed" ||
+    value === "skipped_small"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function shouldRepollThumbnailState(
+  mediaRecord: MediaRecord,
+  thumbnail: ThumbnailResponse | undefined
+): boolean {
+  if (!shouldRequestThumbnailState(mediaRecord)) {
+    return false;
+  }
+  return thumbnail?.state === undefined || thumbnail.state === "pending" || thumbnail.state === "queued";
 }
 
 function listMediaSort(sort: LibrarySort): "mtime_desc" | "mtime_asc" | "name_asc" | "name_desc" {

@@ -64,6 +64,7 @@ pub enum ThumbnailStatus {
 
 pub const GRID_320_PROFILE: &str = "grid_320";
 pub const GRID_320_SHORT_SIDE_PX: i64 = 320;
+pub const GRID_320_MAX_SIDE_PX: u32 = 4096;
 pub const GENERATED_FORMAT: &str = "image/webp";
 #[allow(dead_code)]
 pub const PREVIEW_PLACEHOLDER_SHORT_SIDE_PX: u32 = 20;
@@ -210,7 +211,15 @@ pub fn generate_image_thumbnail(
     Ok(generated)
 }
 
+#[allow(dead_code)]
 pub fn generate_image_thumbnail_bytes(source_path: &Path) -> anyhow::Result<GeneratedThumbnail> {
+    generate_image_thumbnail_bytes_with_checkpoint(source_path, || Ok(()))
+}
+
+pub fn generate_image_thumbnail_bytes_with_checkpoint(
+    source_path: &Path,
+    mut checkpoint: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<GeneratedThumbnail> {
     let reader = ImageReader::open(source_path)
         .map_err(|error| anyhow::anyhow!("thumbnail decode failed: {error}"))?
         .with_guessed_format()
@@ -218,6 +227,7 @@ pub fn generate_image_thumbnail_bytes(source_path: &Path) -> anyhow::Result<Gene
     let decoded = reader
         .decode()
         .map_err(|error| anyhow::anyhow!("thumbnail decode failed: {error}"))?;
+    checkpoint()?;
 
     let source_width = decoded.width();
     let source_height = decoded.height();
@@ -230,6 +240,7 @@ pub fn generate_image_thumbnail_bytes(source_path: &Path) -> anyhow::Result<Gene
         target_dimensions(source_width, source_height, GRID_320_SHORT_SIDE_PX as u32);
 
     let resized = decoded.resize_exact(target_width, target_height, FilterType::Triangle);
+    checkpoint()?;
     // `webp::Encoder::from_image` only accepts RGB8/RGBA8. Convert through
     // `to_rgba8` so paletted, grayscale, and 16-bit decodes still encode.
     let rgba = resized.to_rgba8();
@@ -402,15 +413,7 @@ fn target_dimensions(width: u32, height: u32, short_side_px: u32) -> (u32, u32) 
     if width <= short_side_px && height <= short_side_px {
         return (width.max(1), height.max(1));
     }
-    if width <= height {
-        let target_width = short_side_px.max(1);
-        let target_height = ((height as u64 * target_width as u64) / width.max(1) as u64) as u32;
-        (target_width, target_height.max(1))
-    } else {
-        let target_height = short_side_px.max(1);
-        let target_width = ((width as u64 * target_height as u64) / height.max(1) as u64) as u32;
-        (target_width.max(1), target_height)
-    }
+    bounded_dimensions(width, height, short_side_px, GRID_320_MAX_SIDE_PX)
 }
 
 #[allow(dead_code)]
@@ -420,6 +423,10 @@ fn placeholder_dimensions(
     short_side_px: u32,
     max_side_px: u32,
 ) -> (u32, u32) {
+    bounded_dimensions(width, height, short_side_px, max_side_px)
+}
+
+fn bounded_dimensions(width: u32, height: u32, short_side_px: u32, max_side_px: u32) -> (u32, u32) {
     let width = width.max(1);
     let height = height.max(1);
     let short_side = width.min(height) as f64;
@@ -597,6 +604,12 @@ mod tests {
         // Sources already at or under the short side stay unchanged so
         // skipped_small can short-circuit the pipeline before we touch them.
         assert_eq!(target_dimensions(200, 100, 320), (200, 100));
+    }
+
+    #[test]
+    fn target_dimensions_caps_extreme_aspect_ratio_to_safe_max_side() {
+        assert_eq!(target_dimensions(1, 100_000, 320), (1, GRID_320_MAX_SIDE_PX));
+        assert_eq!(target_dimensions(100_000, 1, 320), (GRID_320_MAX_SIDE_PX, 1));
     }
 
     #[test]

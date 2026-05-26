@@ -166,7 +166,33 @@ describe("createCoreClient", () => {
     });
     await client().getThumbnail(42);
     assert.equal(recorded[0].method, "GET");
-    assert.equal(recorded[0].url, `${BASE_URL}/media/42/thumbnail?target=grid_320`);
+    assert.equal(
+      recorded[0].url,
+      `${BASE_URL}/media/42/thumbnail?target=grid_320&priority=background`
+    );
+  });
+
+  test("getThumbnail forwards explicit thumbnail priority", async () => {
+    mockFetch({
+      fileId: 42,
+      target: "grid_320",
+      state: "queued",
+      shortSidePx: 320,
+      outputFormat: "image/webp",
+      width: null,
+      height: null,
+      byteSize: null,
+      servedBy: null,
+      asset: null,
+      error: null,
+      updatedAt: 1
+    });
+    await client().getThumbnail(42, "grid_320", "selected");
+    assert.equal(recorded[0].method, "GET");
+    assert.equal(
+      recorded[0].url,
+      `${BASE_URL}/media/42/thumbnail?target=grid_320&priority=selected`
+    );
   });
 
   test("getThumbnailBlob requests the default grid target", async () => {

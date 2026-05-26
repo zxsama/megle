@@ -147,6 +147,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/fileId"
         - $ref: "#/components/parameters/target"
+        - $ref: "#/components/parameters/thumbnailPriority"
       responses:
         "200":
           description: Thumbnail state is ready or terminal.
@@ -256,6 +257,56 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: Root is disabled and cannot be scanned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tasks/interactive-folder-scan:
+    post:
+      operationId: enqueueInteractiveFolderScan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InteractiveFolderScanTaskRequest"
+      responses:
+        "202":
+          description: Interactive folder scan task queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedRootResponse"
+        "404":
+          description: Folder not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Folder cannot be scanned from its current source state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tasks/thumbnail-priority-scope:
+    post:
+      operationId: syncThumbnailPriorityScope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ThumbnailPriorityScopeSyncRequest"
+      responses:
+        "202":
+          description: Pending thumbnail priorities rebalanced for the current root scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedRootResponse"
+        "404":
+          description: Root not found.
           content:
             application/json:
               schema:
@@ -846,6 +897,11 @@ components:
         type: string
         enum: [grid_320]
         default: grid_320
+    thumbnailPriority:
+      name: priority
+      in: query
+      schema:
+        $ref: "#/components/schemas/ThumbnailPriority"
   schemas:
     ErrorResponse:
       type: object
@@ -897,9 +953,41 @@ components:
         rootId:
           type: integer
           minimum: 1
+    InteractiveFolderScanTaskRequest:
+      type: object
+      required: [folderId]
+      properties:
+        folderId:
+          type: integer
+          minimum: 1
+    ThumbnailPriorityScopeSyncRequest:
+      type: object
+      required: [rootId, selectedFileIds, visibleFileIds, aheadFileIds]
+      properties:
+        rootId:
+          type: integer
+          minimum: 1
+        selectedFileIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+        visibleFileIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+        aheadFileIds:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+    ThumbnailPriority:
+      type: string
+      enum: [background, ahead, visible, selected]
     TaskKind:
       type: string
-      enum: [root_scan, thumbnail]
+      enum: [root_scan, interactive_folder_scan, thumbnail]
     TaskStatus:
       type: string
       enum: [pending, running, succeeded, failed, cancelled]
@@ -912,6 +1000,7 @@ components:
           priority,
           status,
           rootId,
+          folderId,
           fileId,
           createdAt,
           updatedAt,
@@ -932,6 +1021,9 @@ components:
         status:
           $ref: "#/components/schemas/TaskStatus"
         rootId:
+          type: integer
+          nullable: true
+        folderId:
           type: integer
           nullable: true
         fileId:

@@ -2,6 +2,7 @@ import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { createCoreClient } from "./client";
 
 export type ThumbnailStateByMediaId = Record<number, ThumbnailResponse>;
+export type ThumbnailRequestPriority = "background" | "ahead" | "visible" | "selected";
 type CachedThumbnailEntry = {
   mediaSignature: string;
   thumbnail: ThumbnailResponse;
@@ -24,9 +25,12 @@ export const originalPreviewBlobCache = new Map<number, CachedOriginalPreviewEnt
 export const inFlightOriginalPreviewRequests = new Map<string, Promise<Blob>>();
 const ORIGINAL_PREVIEW_CACHE_LIMIT = 5;
 
-export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<ThumbnailResponse> {
+export async function requestThumbnailState(
+  mediaRecord: MediaRecord,
+  priority: ThumbnailRequestPriority = "background"
+): Promise<ThumbnailResponse> {
   const mediaId = mediaRecord.id;
-  const requestKey = thumbnailRequestKey(mediaRecord);
+  const requestKey = thumbnailRequestKey(mediaRecord, priority);
   const cached = thumbnailResourceCache.get(mediaId);
   if (cached) {
     if (isFreshCachedThumbnailForMediaRecord(mediaRecord, cached)) {
@@ -44,12 +48,17 @@ export async function requestThumbnailState(mediaRecord: MediaRecord): Promise<T
   }
 
   const request = thumbnailClient
-    .getThumbnail(mediaId, GRID_THUMBNAIL_TARGET)
+    .getThumbnail(mediaId, GRID_THUMBNAIL_TARGET, priority)
     .then((thumbnail) => {
       if (isLiveThumbnailResponseForMediaRecord(mediaRecord, thumbnail)) {
+        const mediaSignature = mediaContentSignature(mediaRecord);
+        const cachedEntry = thumbnailResourceCache.get(mediaId);
         thumbnailResourceCache.set(mediaId, {
-          mediaSignature: mediaContentSignature(mediaRecord),
-          thumbnail
+          mediaSignature,
+          thumbnail:
+            cachedEntry?.mediaSignature === mediaSignature
+              ? pickPreferredThumbnailResponse(cachedEntry.thumbnail, thumbnail)
+              : thumbnail
         });
       } else {
         thumbnailResourceCache.delete(mediaId);
@@ -163,6 +172,37 @@ export function isFreshThumbnailForMediaRecord(
   return isFreshThumbnailResponseForMediaRecord(mediaRecord, thumbnail);
 }
 
+export function pickPreferredThumbnailResponse(
+  current: ThumbnailResponse | undefined,
+  next: ThumbnailResponse
+): ThumbnailResponse {
+  if (!current) {
+    return next;
+  }
+
+  const currentRank = thumbnailStateRank(current.state);
+  const nextRank = thumbnailStateRank(next.state);
+  if (nextRank > currentRank) {
+    return next;
+  }
+  if (nextRank < currentRank) {
+    return current;
+  }
+
+  if (next.state === "ready" && current.state === "ready") {
+    const currentUpdatedAt = current.updatedAt ?? -1;
+    const nextUpdatedAt = next.updatedAt ?? -1;
+    if (nextUpdatedAt > currentUpdatedAt) {
+      return next;
+    }
+    if (nextUpdatedAt < currentUpdatedAt) {
+      return current;
+    }
+  }
+
+  return next;
+}
+
 export function isFreshCachedThumbnailForMediaRecord(
   mediaRecord: MediaRecord,
   entry: CachedThumbnailEntry
@@ -184,19 +224,9 @@ function isFreshThumbnailResponseForMediaRecord(
     return false;
   }
   const mediaState = explicitMediaThumbnailState(mediaRecord.thumbnailState);
-  if (
-    isTerminalThumbnailState(thumbnail.state) &&
-    mediaState !== null &&
-    mediaState !== thumbnail.state
-  ) {
+  if (mediaState === "ready" && thumbnail.state !== "ready") {
     return false;
   }
-
-  // Trust the thumbnail response state directly. The /media listing
-  // endpoint may omit per-row thumbnailState during paging for
-  // performance, so we cannot cross-validate against the media row.
-  // Pending/queued states are short-lived and are simply re-requested
-  // on the next poll.
   return true;
 }
 
@@ -248,8 +278,11 @@ function normalizeMediaThumbnailState(value: string | null | undefined): Thumbna
   return "pending";
 }
 
-function thumbnailRequestKey(mediaRecord: MediaRecord): string {
-  return [mediaContentSignature(mediaRecord), GRID_THUMBNAIL_TARGET].join(":");
+function thumbnailRequestKey(
+  mediaRecord: MediaRecord,
+  priority: ThumbnailRequestPriority
+): string {
+  return [mediaContentSignature(mediaRecord), GRID_THUMBNAIL_TARGET, priority].join(":");
 }
 
 function originalPreviewRequestKey(mediaRecord: MediaRecord): string {
@@ -290,6 +323,22 @@ export function mediaContentSignature(mediaRecord: MediaRecord): string {
     mediaRecord.size,
     normalizeMediaThumbnailState(mediaRecord.thumbnailState)
   ].join(":");
+}
+
+function thumbnailStateRank(state: ThumbnailResponse["state"]): number {
+  switch (state) {
+    case "ready":
+      return 4;
+    case "failed":
+      return 3;
+    case "skipped_small":
+      return 2;
+    case "queued":
+      return 1;
+    case "pending":
+    default:
+      return 0;
+  }
 }
 
 function bytesToBase64(bytes: number[]): string {

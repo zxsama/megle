@@ -41,6 +41,13 @@ const refreshCurrentScanViewBlock = sourceMatch(
   useLibraryData,
   /const\s+refreshCurrentScanView\s*=\s*useCallback\([\s\S]*?\n\s*\]\);\n\n\s*const\s+loadLibrary/
 );
+const loadLibraryBlock = sourceMatch(
+  useLibraryData,
+  /const\s+loadLibrary\s*=\s*useCallback\([\s\S]*?\n\s*\]\);/
+);
+const loadLibraryDependenciesBlock =
+  useLibraryData.match(/const\s+loadLibrary\s*=\s*useCallback\([\s\S]*?\},\s*(\[[^\]]*\])\);/)?.[1] ??
+  "";
 const scanRefreshEffectBlock = sourceMatch(
   useLibraryData,
   /useEffect\(\(\)\s*=>\s*\{\s*if\s*\(\s*!scanActiveRootTask[\s\S]*?\},\s*\[refreshCurrentScanView,\s*scanActiveRootTask,\s*(?:taskPollFailures|scanRefreshFailures)\]\);/
@@ -52,6 +59,10 @@ const selectedRootHandlerBlock = sourceMatch(
 const selectedFolderHandlerBlock = sourceMatch(
   useLibraryData,
   /setSelectedFolder:\s*\(folder:\s*FolderRecord\)\s*=>\s*\{[\s\S]*?\n\s*\},\n\s*setSelectedMediaId:/
+);
+const initialLoadEffectBlock = sourceMatch(
+  useLibraryData,
+  /useEffect\(\(\)\s*=>\s*\{\s*void\s+loadLibrary\(\);\s*\},\s*\[loadLibrary\]\);/
 );
 const mediaResourcesPath = "apps/web/src/core/mediaResources.ts";
 const mediaResources = existsSync(path.join(root, mediaResourcesPath))
@@ -114,7 +125,11 @@ if (webPackageJson.dependencies?.["@megle/core-client"] !== "*") {
   fail("apps/web must depend on @megle/core-client through the root workspace");
 }
 
-if (!/getThumbnail:\s*\(fileId:\s*number,\s*target:\s*"grid_320"/.test(coreClient)) {
+if (
+  !/getThumbnail:\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*priority:\s*ThumbnailPriority/.test(
+    coreClient
+  )
+) {
   fail("core-client getThumbnail must expose the target query vocabulary");
 }
 if (!/getThumbnailBlob:\s*async\s*\([\s\S]*?fileId:\s*number,[\s\S]*?target:\s*"grid_320"/.test(coreClient)) {
@@ -188,6 +203,27 @@ if (!mediaGrid.includes("scrollToIndex")) {
 if (!mediaGrid.includes('role="row"')) {
   fail("MediaGrid role=grid must expose row roles around grid cells");
 }
+if (
+  !/onRequestThumbnailStates\(visible(?:Priority)?MediaIds,\s*"visible"\)/.test(mediaGrid) ||
+  !/onRequestThumbnailStates\(ahead(?:Priority)?MediaIds,\s*"ahead"\)/.test(mediaGrid)
+) {
+  fail("MediaGrid must request visible and ahead thumbnail scopes separately");
+}
+if (
+  !/const\s+AHEAD_THUMBNAIL_(?:ROW|VIEWPORT)_COUNT\s*=/.test(mediaGrid) &&
+  !/ahead(?:Row|Viewport)Count/.test(mediaGrid)
+) {
+  fail("MediaGrid must keep ahead-of-viewport thumbnail scope configurable");
+}
+if (!/const\s+visibleMedia\s*=\s*useMemo/.test(mediaGrid) || !/const\s+aheadMedia\s*=\s*useMemo/.test(mediaGrid)) {
+  fail("MediaGrid must derive distinct visible and ahead media scopes");
+}
+if (
+  !/VISIBLE_THUMBNAIL_REPOLL_MS|FOREGROUND_THUMBNAIL_REPOLL_MS/.test(mediaGrid) ||
+  /1500/.test(mediaGrid)
+) {
+  fail("MediaGrid foreground thumbnail repoll must be explicit and much faster than 1500ms");
+}
 
 for (const value of ["listRoots", "listFolderChildren", "listMedia", "addRoot", "listTasks", "enqueueScan"]) {
   if (!useLibraryData.includes(value)) {
@@ -196,6 +232,38 @@ for (const value of ["listRoots", "listFolderChildren", "listMedia", "addRoot", 
 }
 if (!/setSelectedFolder:\s*\(folder:\s*FolderRecord\)\s*=>\s*void/.test(useLibraryData)) {
   fail("useLibraryData must select folders by FolderRecord so rootId and folderId stay in sync");
+}
+if (!/enqueueInteractiveFolderScan/.test(useLibraryData)) {
+  fail("useLibraryData must call enqueueInteractiveFolderScan for the active folder");
+}
+if (!/syncThumbnailPriorityScope/.test(coreClient) || !/syncThumbnailPriorityScope/.test(useLibraryData)) {
+  fail("thumbnail scope sync must be exposed by core-client and used from useLibraryData");
+}
+if (
+  !/requestThumbnailStates:\s*\(mediaIds:\s*number\[\],\s*priority:\s*ThumbnailRequestPriority\)\s*=>\s*void/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData must expose explicit thumbnail priority when requesting states");
+}
+if (
+  !/thumbnailPriorityScopeRef/.test(useLibraryData) ||
+  !/scheduleThumbnailPriorityScopeSync/.test(useLibraryData) ||
+  !/requestThumbnailStates[\s\S]*scheduleThumbnailPriorityScopeSync\(\s*priority,\s*mediaIds\s*\)/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData requestThumbnailStates must coalesce current selected/visible/ahead scope into a thumbnail scope sync call");
+}
+if (!/requestThumbnailStates\(\[selectedMedia\.id\],\s*"selected"\)/.test(useLibraryData)) {
+  fail("useLibraryData must request selected media thumbnails through the selected priority path");
+}
+if (
+  !/useEffect\(\(\)\s*=>\s*\{[\s\S]*?selectedFolderId[\s\S]*?enqueueInteractiveFolderScan\(\s*selectedFolderId\s*\)/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData must enqueue interactive folder scan when the current folder becomes active");
 }
 if (!/setSelectedFolder\(folder\)/.test(librarySidebar)) {
   fail("LibrarySidebar must pass the full FolderRecord when selecting folders");
@@ -223,8 +291,35 @@ if (!/cursor:\s*cursor\s*\?\?\s*undefined/.test(useLibraryData)) {
 if (!/requestGeneration\s*!==\s*mediaPageGeneration\.current/.test(useLibraryData)) {
   fail("loadMoreMedia must discard stale page responses after media context changes");
 }
-if (!/const loadLibrary = useCallback\(async \(\) => \{\s*const requestGeneration = \+\+mediaPageGeneration\.current;[\s\S]*?await loadRoots/.test(useLibraryData)) {
+if (!/const\s+loadLibrary\s*=\s*useCallback\(async\s*\(scope\?:\s*LibrarySelectionScope\)\s*=>\s*\{\s*const requestGeneration = \+\+mediaPageGeneration\.current;[\s\S]*?await loadRoots\(scope\)/.test(useLibraryData)) {
   fail("loadLibrary must invalidate media page generation before awaited reload work starts");
+}
+if (
+  !/const\s+loadRoots\s*=\s*useCallback\(async\s*\(scope\?:\s*LibrarySelectionScope\)\s*=>/.test(
+    useLibraryData
+  ) ||
+  !/selectedRootIdRef\.current/.test(useLibraryData) ||
+  !/selectedFolderIdRef\.current/.test(useLibraryData)
+) {
+  fail("useLibraryData loadRoots must resolve selection through explicit scope or selection refs, not captured navigation state");
+}
+if (
+  !/const\s+loadLibrary\s*=\s*useCallback\(async\s*\(scope\?:\s*LibrarySelectionScope\)\s*=>/.test(
+    useLibraryData
+  ) ||
+  !loadLibraryBlock ||
+  !loadLibraryDependenciesBlock ||
+  /\bselectedRootId\b/.test(loadLibraryDependenciesBlock) ||
+  /\bselectedFolderId\b/.test(loadLibraryDependenciesBlock)
+) {
+  fail("useLibraryData loadLibrary must not capture selectedRootId/selectedFolderId and re-run the full load chain on navigation");
+}
+if (
+  !initialLoadEffectBlock ||
+  /selectedRootId/.test(initialLoadEffectBlock) ||
+  /selectedFolderId/.test(initialLoadEffectBlock)
+) {
+  fail("useLibraryData initial load effect must stay isolated from root/folder navigation changes");
 }
 if (!/SCAN_REFRESH_INTERVAL_MS/.test(useLibraryData)) {
   fail("useLibraryData must define a scan-time current-view refresh interval");
@@ -292,10 +387,15 @@ if (
   fail("useLibraryData navigation-triggered media reloads must catch rethrown failures");
 }
 if (
-  !/setScanRefreshFailures\(0\)/.test(selectedRootHandlerBlock) ||
-  !/setScanRefreshFailures\(0\)/.test(selectedFolderHandlerBlock)
+  !/const\s+prepareNavigationMediaReload\s*=\s*useCallback\(\(\)\s*=>\s*\{[\s\S]*?scanRefreshSelectionVersionRef\.current\s*\+=\s*1[\s\S]*?setScanRefreshFailures\(0\)/.test(
+    useLibraryData
+  ) ||
+  !/setLoadingMoreMedia\(false\)/.test(useLibraryData) ||
+  !/flushThumbnailPriorityScopeSync\(\)/.test(useLibraryData) ||
+  !/prepareNavigationMediaReload\(\)/.test(selectedRootHandlerBlock) ||
+  !/prepareNavigationMediaReload\(\)/.test(selectedFolderHandlerBlock)
 ) {
-  fail("useLibraryData must reset scan refresh failures when root or folder navigation changes context");
+  fail("useLibraryData navigation changes must clear load-more state, flush thumbnail scope sync, and reset scan refresh failures");
 }
 if (
   !/scanRefreshActiveRootIdRef\s*=\s*useRef<number\s*\|\s*null>\(null\)/.test(useLibraryData) ||
@@ -360,15 +460,28 @@ if (
 if (
   !/selectedMediaThumbnailRequestKey/.test(useLibraryData) ||
   !/mediaContentSignature\(selectedMedia\)/.test(useLibraryData) ||
-  !/requestThumbnailStates\(\[selectedMedia\.id\]\)/.test(useLibraryData)
+  !/requestThumbnailStates\(\[selectedMedia\.id\],\s*"selected"\)/.test(useLibraryData)
 ) {
   fail("useLibraryData selected thumbnail requests must be keyed by selected media signature");
+}
+if (
+  !/task\.kind === "root_scan"/.test(useLibraryData) ||
+  !(
+    /interactiveRefreshScope/.test(useLibraryData) &&
+    /task\.kind === "interactive_folder_scan"/.test(useLibraryData) &&
+    /reloadCurrentMedia\(\{[\s\S]*?folderId:\s*interactiveRefreshScope\.folderId/.test(useLibraryData)
+  )
+) {
+  fail("useLibraryData task success handling must avoid full reload churn for thumbnail success and keep interactive refresh scoped");
 }
 if (!/MediaRecord/.test(mediaResources) || !/isFreshThumbnailForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must validate cached thumbnail responses against the media record thumbnail summary");
 }
-if (!/explicitMediaThumbnailState/.test(mediaResources) || !/isTerminalThumbnailState/.test(mediaResources) || !/mediaState\s*!==\s*thumbnail\.state/.test(mediaResources)) {
-  fail("mediaResources must invalidate cached terminal thumbnails when the current media row explicitly disagrees");
+if (
+  !/explicitMediaThumbnailState/.test(mediaResources) ||
+  !/const\s+mediaState\s*=\s*explicitMediaThumbnailState\(mediaRecord\.thumbnailState\);/.test(mediaResources)
+) {
+  fail("mediaResources must evaluate media-row thumbnail state when deciding whether local thumbnail state is still fresh");
 }
 if (!/isFreshCachedThumbnailForMediaRecord/.test(mediaResources) || !/isLiveThumbnailResponseForMediaRecord/.test(mediaResources)) {
   fail("mediaResources must separate cached thumbnail freshness from live response acceptance");
@@ -385,10 +498,30 @@ if (!/thumbnailResourceCache\.delete/.test(mediaResources) || !/thumbnail\.targe
 if (!/readCachedThumbnailStates\(\s*mediaRecords:\s*MediaRecord\[\]\s*\)/.test(mediaResources)) {
   fail("mediaResources must read cached thumbnail state through media records, not bare media ids");
 }
-if (!/thumbnailRequestKey\(mediaRecord\)/.test(mediaResources) || !/inFlightThumbnailRequests\.get\(requestKey\)/.test(mediaResources)) {
+if (
+  !/const\s+mediaState\s*=\s*explicitMediaThumbnailState\(mediaRecord\.thumbnailState\);[\s\S]*?if\s*\(\s*mediaState\s*===\s*"ready"\s*&&\s*thumbnail\.state\s*!==\s*"ready"\s*\)\s*\{\s*return\s+false;?\s*\}/.test(
+    mediaResources
+  )
+) {
+  fail("mediaResources must drop stale local non-ready thumbnail state once the media row itself is already ready");
+}
+if (
+  !/thumbnailRequestKey\(mediaRecord,\s*priority\)/.test(mediaResources) ||
+  !/inFlightThumbnailRequests\.get\(requestKey\)/.test(mediaResources)
+) {
   fail("mediaResources must key in-flight thumbnail coalescing by media id plus thumbnail summary");
 }
-if (!/requestThumbnailStates:\s*\(mediaIds:\s*number\[\]\)\s*=>\s*void/.test(useLibraryData)) {
+if (
+  /failedThumbnailState\(mediaRecord\.id,\s*cause\)/.test(useLibraryData) ||
+  /state === "failed"\s*\|\|/.test(mediaResources)
+) {
+  fail("transient thumbnail request failures must not synthesize a local failed state that blocks retry");
+}
+if (
+  !/requestThumbnailStates:\s*\(mediaIds:\s*number\[\],\s*priority:\s*ThumbnailRequestPriority\)\s*=>\s*void/.test(
+    useLibraryData
+  )
+) {
   fail("useLibraryData must expose visible-range thumbnail state requests");
 }
 if (!/thumbnailStatesByMediaId:\s*Record<number,\s*ThumbnailResponse>/.test(useLibraryData)) {
@@ -403,7 +536,19 @@ if (!/inFlightFolderChildPageKeys/.test(useLibraryData) || !/folderChildPageRequ
 if (!/onRequestThumbnailStates/.test(mediaGrid) || !/visibleMediaIds/.test(mediaGrid)) {
   fail("MediaGrid must report visible/near-visible media ids for incremental thumbnail requests");
 }
-if (!/visibleMedia(?:Id)?Key/.test(mediaGrid)) {
+if (
+  !/selectedMediaId/.test(mediaGrid) ||
+  !/excludeMediaId:\s*selectedMediaId/.test(mediaGrid) ||
+  !(
+    /priority === "selected"[\s\S]*selectedMediaIdRef\.current/.test(useLibraryData) ||
+    /normalizeThumbnailScopeMediaIds[\s\S]*priority === "selected"[\s\S]*selectedMediaId/.test(
+      useLibraryData
+    )
+  )
+) {
+  fail("selected media must be deduped out of visible/ahead thumbnail polling paths");
+}
+if (!/visible(?:Priority)?Media(?:Id)?Key/.test(mediaGrid)) {
   fail("MediaGrid immediate thumbnail requests must be keyed by the stable visible media id set");
 }
 if (!/mediaContentSignature/.test(mediaGrid) || !/visibleMediaSignatureKey/.test(mediaGrid)) {
@@ -486,6 +631,20 @@ if (!/previewPlaceholderDataUrl\(media\)/.test(mediaPreview) || /usePreviewPlace
 if (!mediaPreview.includes('source = "thumbnail"') || !mediaPreview.includes('source === "original"')) {
   fail("MediaPreview must require explicit original-source mode for central preview rendering");
 }
+if (
+  !/preferOriginalWhilePending\??:\s*boolean/.test(mediaPreview) ||
+  !/preferOriginalWhilePending\s*=\s*false/.test(mediaPreview)
+) {
+  fail("MediaPreview must expose an opt-in preferOriginalWhilePending flag for inspector fallback only");
+}
+if (
+  !/source\s*===\s*"thumbnail"[\s\S]*preferOriginalWhilePending[\s\S]*media\.kind\s*===\s*"image"[\s\S]*thumbnail\?\.state\s*!==\s*"failed"[\s\S]*thumbnail\?\.state\s*!==\s*"skipped_small"/.test(
+    mediaPreview
+  ) ||
+  !/source="original"[\s\S]*versionKey=\{originalVersionKey\}/.test(mediaPreview)
+) {
+  fail("MediaPreview thumbnail mode must only use original-preview fallback for pending image inspector previews");
+}
 if (!centralPreviewStage.includes('source="original"')) {
   fail("CentralPreviewStage must request original media bytes through MediaPreview");
 }
@@ -523,6 +682,9 @@ if (!/MediaPreview[\s\S]{0,140}thumbnail=\{thumbnail\}/.test(previewPanel)) {
 }
 if (!/MediaPreview[\s\S]{0,180}source="thumbnail"[\s\S]{0,180}thumbnail=\{thumbnail\}/.test(previewPanel)) {
   fail("PreviewPanel must use the light thumbnail preview path, not original media");
+}
+if (!/MediaPreview[\s\S]{0,220}source="thumbnail"[\s\S]{0,220}preferOriginalWhilePending/.test(previewPanel)) {
+  fail("PreviewPanel must opt into the inspector-only original fallback while thumbnail state is pending");
 }
 if (
   !/prefetchOriginalPreview/.test(app) ||

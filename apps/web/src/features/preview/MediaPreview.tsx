@@ -10,24 +10,34 @@ import {
 export function MediaPreview({
   media,
   onMediaReady,
+  preferOriginalWhilePending = false,
   source = "thumbnail",
   thumbnail
 }: {
   media: MediaRecord;
   onMediaReady?: () => void;
+  preferOriginalWhilePending?: boolean;
   source?: "thumbnail" | "original";
   thumbnail?: ThumbnailResponse;
 }) {
   const previewPlaceholderUrl = previewPlaceholderDataUrl(media);
   const originalVersionKey = mediaContentSignature(media);
+  const rowThumbnailReady = normalizeMediaThumbnailState(media.thumbnailState) === "ready";
   const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
+  const shouldUseOriginalWhilePending =
+    source === "thumbnail" &&
+    preferOriginalWhilePending &&
+    media.kind === "image" &&
+    thumbnail?.state !== "failed" &&
+    thumbnail?.state !== "skipped_small" &&
+    !hasLiveReadyThumbnail;
   const fallbackThumbnail = useThumbnailFallbackUrl(
-    source === "original" && hasLiveReadyThumbnail ? thumbnail.fileId : null,
-    thumbnail?.updatedAt ?? null
+    source === "original" && (hasLiveReadyThumbnail || rowThumbnailReady) ? media.id : null,
+    hasLiveReadyThumbnail ? thumbnail.updatedAt : null
   );
   const fallbackUrl = fallbackThumbnail ?? previewPlaceholderUrl;
 
-  if (source === "original") {
+  if (source === "original" || shouldUseOriginalWhilePending) {
     return (
       <ReadyPreviewMedia
         alt={media.name}
@@ -41,7 +51,7 @@ export function MediaPreview({
     );
   }
 
-  if (hasLiveReadyThumbnail) {
+  if (hasLiveReadyThumbnail || rowThumbnailReady) {
     return (
       <ReadyPreviewMedia
         alt={media.name}
@@ -50,7 +60,7 @@ export function MediaPreview({
         media={media}
         onMediaReady={onMediaReady}
         source="thumbnail"
-        versionKey={thumbnail.updatedAt}
+        versionKey={hasLiveReadyThumbnail ? thumbnail.updatedAt : null}
       />
     );
   }
@@ -83,6 +93,19 @@ export function MediaPreview({
       <span>{thumbnail?.state ?? media.thumbnailState ?? "pending"}</span>
     </div>
   );
+}
+
+function normalizeMediaThumbnailState(value: string | null | undefined): ThumbnailResponse["state"] {
+  if (
+    value === "pending" ||
+    value === "queued" ||
+    value === "ready" ||
+    value === "failed" ||
+    value === "skipped_small"
+  ) {
+    return value;
+  }
+  return "pending";
 }
 
 function useThumbnailFallbackUrl(fileId: number | null, versionKey: number | null): string | null {

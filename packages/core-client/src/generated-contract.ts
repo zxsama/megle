@@ -23,6 +23,18 @@ export interface ScanTaskRequest {
   rootId: number;
 }
 
+export interface InteractiveFolderScanTaskRequest {
+  folderId: number;
+}
+
+export interface ThumbnailPriorityScopeSyncRequest {
+  rootId: number;
+  selectedFileIds: number[];
+  visibleFileIds: number[];
+  aheadFileIds: number[];
+}
+
+export type ThumbnailPriority = "background" | "ahead" | "visible" | "selected";
 export interface RootRecord {
   id: number;
   path: string;
@@ -33,7 +45,7 @@ export interface RootRecord {
   rootFolderId: number | null;
 }
 
-export type TaskKind = "root_scan" | "thumbnail";
+export type TaskKind = "root_scan" | "interactive_folder_scan" | "thumbnail";
 export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface TaskRecord {
@@ -42,6 +54,7 @@ export interface TaskRecord {
   priority: number;
   status: TaskStatus;
   rootId: number | null;
+  folderId: number | null;
   fileId: number | null;
   createdAt: number;
   updatedAt: number;
