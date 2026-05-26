@@ -1,15 +1,23 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { KeyboardEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import {
   mediaContentSignature,
   previewPlaceholderDataUrl,
-  requestThumbnailBlob
+  requestThumbnailBlob,
+  type ThumbnailRequestPriority
 } from "../../core/mediaResources";
 import { workbenchLayout } from "../../design/tokens";
 
+const AHEAD_THUMBNAIL_ROW_COUNT = 4;
+const FOREGROUND_THUMBNAIL_REPOLL_MS = 250;
+const VISIBLE_PRIORITY_ITEM_LIMIT = 10;
+const AHEAD_PRIORITY_ITEM_LIMIT = 10;
+const scrollPositionByKey = new Map<string, number>();
+
 interface MediaGridProps {
+  aheadRowCount?: number;
   items: MediaRecord[];
   selectedMediaId: number | null;
   loading: boolean;
@@ -18,12 +26,14 @@ interface MediaGridProps {
   onSelect: (mediaId: number) => void;
   onOpenPreview: (mediaId: number) => void;
   onRequestMore: () => void;
-  onRequestThumbnailStates: (mediaIds: number[]) => void;
+  onRequestThumbnailStates: (mediaIds: number[], priority: ThumbnailRequestPriority) => void;
+  scrollPositionKey?: string;
   thumbnailStatesByMediaId: Record<number, ThumbnailResponse>;
   onContextMenu?: (event: { item: MediaRecord; x: number; y: number; shiftKey: boolean }) => void;
 }
 
 export function MediaGrid({
+  aheadRowCount = AHEAD_THUMBNAIL_ROW_COUNT,
   items,
   selectedMediaId,
   loading,
@@ -33,34 +43,71 @@ export function MediaGrid({
   onRequestThumbnailStates,
   onOpenPreview,
   onSelect,
+  scrollPositionKey,
   thumbnailStatesByMediaId,
   onContextMenu
 }: MediaGridProps) {
+  const savedScrollTop = scrollPositionKey ? (scrollPositionByKey.get(scrollPositionKey) ?? 0) : 0;
   const parentRef = useRef<HTMLDivElement | null>(null);
-  const [viewportWidth, setViewportWidth] = useState(0);
+  const scrollPersistenceUnlockedRef = useRef(false);
+  const restoringScrollRef = useRef(false);
+  const [viewportSize, setViewportSize] = useState({ height: 0, width: 0 });
+  const [scrollTop, setScrollTop] = useState(savedScrollTop);
 
   useEffect(() => {
     const element = parentRef.current;
     if (!element) return;
+    scrollPersistenceUnlockedRef.current = false;
 
     const observer = new ResizeObserver(([entry]) => {
-      setViewportWidth(entry.contentRect.width);
+      setViewportSize({
+        height: entry.contentRect.height,
+        width: entry.contentRect.width
+      });
     });
     observer.observe(element);
-    setViewportWidth(element.clientWidth);
-    return () => observer.disconnect();
-  }, []);
+    const unlockScrollPersistence = () => {
+      scrollPersistenceUnlockedRef.current = true;
+    };
+    const updateScrollTop = () => {
+      const nextScrollTop = element.scrollTop;
+      setScrollTop(nextScrollTop);
+      if (
+        scrollPositionKey &&
+        !restoringScrollRef.current &&
+        scrollPersistenceUnlockedRef.current
+      ) {
+        scrollPositionByKey.set(scrollPositionKey, nextScrollTop);
+      }
+    };
+    element.addEventListener("scroll", updateScrollTop, { passive: true });
+    element.addEventListener("wheel", unlockScrollPersistence, { passive: true });
+    element.addEventListener("pointerdown", unlockScrollPersistence, { passive: true });
+    element.addEventListener("keydown", unlockScrollPersistence);
+    setViewportSize({ height: element.clientHeight, width: element.clientWidth });
+    setScrollTop(savedScrollTop);
+    if (scrollPositionKey) {
+      scrollPositionByKey.set(scrollPositionKey, savedScrollTop);
+    }
+    return () => {
+      element.removeEventListener("scroll", updateScrollTop);
+      element.removeEventListener("wheel", unlockScrollPersistence);
+      element.removeEventListener("pointerdown", unlockScrollPersistence);
+      element.removeEventListener("keydown", unlockScrollPersistence);
+      observer.disconnect();
+    };
+  }, [savedScrollTop, scrollPositionKey]);
 
   const columnCount = Math.max(
     1,
     Math.floor(
-      (viewportWidth + workbenchLayout.tileGap) /
+      (viewportSize.width + workbenchLayout.tileGap) /
         (workbenchLayout.tileMinWidth + workbenchLayout.tileGap)
     )
   );
   const tileWidth = Math.max(
     workbenchLayout.tileMinWidth,
-    Math.floor((viewportWidth - workbenchLayout.tileGap * (columnCount - 1)) / columnCount)
+    Math.floor((viewportSize.width - workbenchLayout.tileGap * (columnCount - 1)) / columnCount)
   );
   const rowHeight = tileWidth + workbenchLayout.tileLabelHeight + workbenchLayout.tileGap;
   const rows = useMemo(() => chunk(items, columnCount), [columnCount, items]);
@@ -68,9 +115,36 @@ export function MediaGrid({
     count: loading && items.length === 0 ? 4 : rows.length + (hasMore ? 1 : 0),
     getScrollElement: () => parentRef.current,
     estimateSize: () => rowHeight,
+    initialOffset: savedScrollTop,
     overscan: 4
   });
   const virtualItems = virtualRows.getVirtualItems();
+
+  useLayoutEffect(() => {
+    const element = parentRef.current;
+    if (!element) return;
+    if (savedScrollTop > 0 && items.length === 0) {
+      return;
+    }
+    restoringScrollRef.current = true;
+    if (element.scrollTop === savedScrollTop) {
+      setScrollTop(savedScrollTop);
+    } else {
+      element.scrollTop = savedScrollTop;
+      virtualRows.scrollToOffset(savedScrollTop);
+      setScrollTop(savedScrollTop);
+    }
+    if (scrollPositionKey) {
+      scrollPositionByKey.set(scrollPositionKey, savedScrollTop);
+    }
+    const restoreFrame = window.requestAnimationFrame(() => {
+      restoringScrollRef.current = false;
+    });
+    return () => {
+      window.cancelAnimationFrame(restoreFrame);
+      restoringScrollRef.current = false;
+    };
+  }, [items.length, savedScrollTop, scrollPositionKey, virtualRows]);
 
   useEffect(() => {
     const lastRow = virtualItems.at(-1);
@@ -82,52 +156,119 @@ export function MediaGrid({
     }
   }, [hasMore, loadingMore, onRequestMore, rows.length, virtualItems]);
 
-  const visibleMedia = useMemo(() => {
-    const mediaIdSet = new Set<number>();
-    const mediaSignatureSet = new Set<string>();
-    for (const virtualRow of virtualItems) {
-      if (virtualRow.index >= rows.length) continue;
-      for (const item of rows[virtualRow.index] ?? []) {
-        mediaIdSet.add(item.id);
-        mediaSignatureSet.add(mediaContentSignature(item));
-      }
+  const visibleRowRange = useMemo(() => {
+    if (rows.length === 0) {
+      return null;
     }
-    const mediaIds = [...mediaIdSet].sort((left, right) => left - right);
-    const mediaSignatures = [...mediaSignatureSet].sort();
-    return {
-      ids: mediaIds,
-      key: mediaIds.join(":"),
-      signatureKey: mediaSignatures.join("|")
-    };
-  }, [rows, virtualItems]);
-  const visibleMediaIds = visibleMedia.ids;
-  const visibleMediaKey = visibleMedia.key;
-  const visibleMediaSignatureKey = visibleMedia.signatureKey;
-
-  useEffect(() => {
-    onRequestThumbnailStates(visibleMediaIds);
-  }, [onRequestThumbnailStates, visibleMediaKey, visibleMediaSignatureKey]);
-
-  useEffect(() => {
-    const hasPendingThumbnail = virtualItems.some((virtualRow) =>
-      (rows[virtualRow.index] ?? []).some((item) =>
-        shouldRefreshThumbnailState(item, thumbnailStatesByMediaId[item.id])
+    const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight));
+    const endIndex = Math.min(
+      rows.length - 1,
+      Math.max(
+        startIndex,
+        Math.ceil((scrollTop + Math.max(viewportSize.height, rowHeight)) / rowHeight) - 1
       )
     );
-    if (!hasPendingThumbnail) {
+    return { endIndex, startIndex };
+  }, [rowHeight, rows.length, scrollTop, viewportSize.height]);
+
+  const visibleMedia = useMemo(
+    () =>
+      collectScopedMedia(rows, visibleRowRange?.startIndex ?? 0, visibleRowRange?.endIndex ?? -1, {
+        excludeMediaId: selectedMediaId
+      }),
+    [rows, selectedMediaId, visibleRowRange]
+  );
+  const aheadMedia = useMemo(() => {
+    if (!visibleRowRange) {
+      return emptyScopedMedia();
+    }
+    return collectScopedMedia(
+      rows,
+      visibleRowRange.endIndex + 1,
+      Math.min(rows.length - 1, visibleRowRange.endIndex + aheadRowCount),
+      { excludeMediaId: selectedMediaId }
+    );
+  }, [aheadRowCount, rows, selectedMediaId, visibleRowRange]);
+  const visibleMediaIds = visibleMedia.ids;
+  const visibleMediaSignatureKey = visibleMedia.signatureKey;
+  const aheadMediaIds = aheadMedia.ids;
+  const aheadMediaSignatureKey = aheadMedia.signatureKey;
+  const visiblePriorityMediaIds = useMemo(
+    () => visibleMediaIds.slice(0, VISIBLE_PRIORITY_ITEM_LIMIT),
+    [visibleMediaIds]
+  );
+  const visibleOverflowMediaIds = useMemo(
+    () => visibleMediaIds.slice(VISIBLE_PRIORITY_ITEM_LIMIT),
+    [visibleMediaIds]
+  );
+  const aheadPriorityMediaIds = useMemo(
+    () =>
+      [...new Set([...visibleOverflowMediaIds, ...aheadMediaIds])].slice(0, AHEAD_PRIORITY_ITEM_LIMIT),
+    [aheadMediaIds, visibleOverflowMediaIds]
+  );
+  const visiblePriorityMediaKey = visiblePriorityMediaIds.join(":");
+  const aheadPriorityMediaKey = aheadPriorityMediaIds.join(":");
+  const hasVisiblePending = useMemo(
+    () =>
+      visiblePriorityMediaIds.some((mediaId) => {
+        const item = items.find((candidate) => candidate.id === mediaId);
+        return item ? shouldRefreshThumbnailState(item, thumbnailStatesByMediaId[item.id]) : false;
+      }),
+    [items, thumbnailStatesByMediaId, visiblePriorityMediaIds]
+  );
+  const hasAheadPending = useMemo(
+    () =>
+      aheadPriorityMediaIds.some((mediaId) => {
+        const item = items.find((candidate) => candidate.id === mediaId);
+        return item ? shouldRefreshThumbnailState(item, thumbnailStatesByMediaId[item.id]) : false;
+      }),
+    [aheadPriorityMediaIds, items, thumbnailStatesByMediaId]
+  );
+
+  useEffect(() => {
+    onRequestThumbnailStates(visiblePriorityMediaIds, "visible");
+  }, [
+    onRequestThumbnailStates,
+    visiblePriorityMediaIds,
+    visiblePriorityMediaKey,
+    visibleMediaSignatureKey
+  ]);
+
+  useEffect(() => {
+    if (aheadPriorityMediaIds.length === 0) {
+      return;
+    }
+    onRequestThumbnailStates(aheadPriorityMediaIds, "ahead");
+  }, [
+    aheadPriorityMediaIds,
+    aheadPriorityMediaKey,
+    aheadMediaSignatureKey,
+    onRequestThumbnailStates
+  ]);
+
+  useEffect(() => {
+    if (!hasVisiblePending && !hasAheadPending) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      onRequestThumbnailStates(visibleMediaIds);
-    }, 1500);
+      if (hasVisiblePending) {
+        onRequestThumbnailStates(visiblePriorityMediaIds, "visible");
+      }
+      if (hasAheadPending) {
+        onRequestThumbnailStates(aheadPriorityMediaIds, "ahead");
+      }
+    }, FOREGROUND_THUMBNAIL_REPOLL_MS);
     return () => window.clearTimeout(timer);
   }, [
+    aheadPriorityMediaIds,
+    aheadPriorityMediaKey,
+    aheadMediaSignatureKey,
+    hasAheadPending,
+    hasVisiblePending,
     onRequestThumbnailStates,
-    rows,
-    thumbnailStatesByMediaId,
-    virtualItems,
-    visibleMediaKey,
+    visiblePriorityMediaIds,
+    visiblePriorityMediaKey,
     visibleMediaSignatureKey
   ]);
 
@@ -251,6 +392,49 @@ export function MediaGrid({
   );
 }
 
+function emptyScopedMedia() {
+  return {
+    ids: [] as number[],
+    key: "",
+    signatureKey: ""
+  };
+}
+
+function collectScopedMedia(
+  rows: MediaRecord[][],
+  startIndex: number,
+  endIndex: number,
+  options: {
+    excludeMediaId?: number | null;
+  } = {}
+) {
+  if (startIndex > endIndex || rows.length === 0) {
+    return emptyScopedMedia();
+  }
+
+  const mediaIdSet = new Set<number>();
+  const mediaSignatures: string[] = [];
+  const mediaIds: number[] = [];
+  for (let rowIndex = startIndex; rowIndex <= endIndex; rowIndex += 1) {
+    for (const item of rows[rowIndex] ?? []) {
+      if (options.excludeMediaId === item.id) {
+        continue;
+      }
+      if (mediaIdSet.has(item.id)) {
+        continue;
+      }
+      mediaIdSet.add(item.id);
+      mediaIds.push(item.id);
+      mediaSignatures.push(mediaContentSignature(item));
+    }
+  }
+  return {
+    ids: mediaIds,
+    key: mediaIds.join(":"),
+    signatureKey: mediaSignatures.join("|")
+  };
+}
+
 function MediaTile({
   item,
   onSelect,
@@ -320,20 +504,17 @@ function ThumbnailStateView({
   const state = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
   const previewPlaceholderUrl = previewPlaceholderDataUrl(item);
   const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
+  const canLoadCurrentThumbnailBlob = state === "ready";
 
-  if (hasLiveReadyThumbnail) {
+  if (canLoadCurrentThumbnailBlob) {
     return (
       <ReadyThumbnail
         fileId={item.id}
         alt={item.name}
         previewPlaceholderUrl={previewPlaceholderUrl}
-        thumbnailUpdatedAt={thumbnail.updatedAt}
+        thumbnailUpdatedAt={hasLiveReadyThumbnail ? thumbnail.updatedAt : null}
       />
     );
-  }
-
-  if (state === "ready" && previewPlaceholderUrl) {
-    return <PlaceholderThumbnail alt={item.name} src={previewPlaceholderUrl} />;
   }
 
   if (state === "failed") {

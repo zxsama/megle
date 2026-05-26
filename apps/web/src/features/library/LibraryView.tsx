@@ -7,6 +7,8 @@ import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
 
+const AHEAD_THUMBNAIL_ROW_COUNT = 4;
+
 interface LibraryViewProps {
   library: LibraryState;
   previewOpen: boolean;
@@ -70,6 +72,7 @@ export function LibraryCenterPane({
   const selectedRoot = library.roots.find((root) => root.id === library.selectedRootId) ?? null;
   const selectedMedia = library.selectedMedia;
   const previewMedia = previewOpen && selectedMedia ? selectedMedia : null;
+  const mediaScrollKey = mediaScrollPositionKey(library.selectedRootId, library.selectedFolderId);
 
   useEffect(() => {
     if (previewOpen && !selectedMedia) {
@@ -102,6 +105,7 @@ export function LibraryCenterPane({
           ) : (
             renderEmptyState({ library, selectedRoot }) ?? (
               <MediaGrid
+                aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
                 hasMore={library.mediaHasMore}
                 items={library.media}
                 loading={library.loading}
@@ -111,6 +115,7 @@ export function LibraryCenterPane({
                 onRequestMore={library.loadMoreMedia}
                 onRequestThumbnailStates={library.requestThumbnailStates}
                 onSelect={library.setSelectedMediaId}
+                scrollPositionKey={mediaScrollKey}
                 selectedMediaId={library.selectedMediaId}
                 thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
               />
@@ -197,4 +202,8 @@ function renderEmptyState({
   }
 
   return null;
+}
+
+function mediaScrollPositionKey(rootId: number | null, folderId: number | null): string {
+  return `${rootId ?? "root"}:${folderId ?? "folder"}`;
 }
