@@ -1,13 +1,16 @@
 import { Folder, FolderOpen } from "lucide-react";
-import type { FolderRecord } from "@megle/core-client";
+import type { FolderRecord, MediaRecord } from "@megle/core-client";
+import { previewPlaceholderDataUrl } from "../../core/mediaResources";
 
 interface SubfolderContentGalleryProps {
+  coverMediaByFolderId: Map<number, MediaRecord | null>;
   folders: FolderRecord[];
   selectedFolderId: number | null;
   onSelectFolder: (folder: FolderRecord) => void;
 }
 
 export function SubfolderContentGallery({
+  coverMediaByFolderId,
   folders,
   onSelectFolder,
   selectedFolderId
@@ -27,6 +30,8 @@ export function SubfolderContentGallery({
       <div className="subfolder-content-gallery-grid" role="list">
         {folders.map((folder) => {
           const selected = folder.id === selectedFolderId;
+          const coverMedia = coverMediaByFolderId.get(folder.id) ?? null;
+          const coverUrl = coverMedia ? previewPlaceholderDataUrl(coverMedia) : null;
           return (
             <button
               aria-pressed={selected}
@@ -37,13 +42,18 @@ export function SubfolderContentGallery({
               type="button"
             >
               <div className="subfolder-content-card-thumb" aria-hidden="true">
-                {selected ? <FolderOpen size={28} /> : <Folder size={28} />}
+                {coverUrl ? (
+                  <img alt="" className="subfolder-content-card-thumb-image" src={coverUrl} />
+                ) : selected ? (
+                  <FolderOpen size={28} />
+                ) : (
+                  <Folder size={28} />
+                )}
               </div>
               <div className="subfolder-content-card-copy">
                 <div className="subfolder-content-card-name" title={folder.name}>
                   {folder.name}
                 </div>
-                <div className="subfolder-content-card-status">{folder.status}</div>
               </div>
             </button>
           );

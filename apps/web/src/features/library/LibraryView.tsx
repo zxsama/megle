@@ -9,9 +9,11 @@ import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
 import { SubfolderContentGallery } from "./SubfolderContentGallery";
 import { SubfolderStrip } from "./SubfolderStrip";
+import { useFolderCovers } from "./useFolderCovers";
 
 const AHEAD_THUMBNAIL_ROW_COUNT = 4;
 const SUBFOLDER_CONTENT_STORAGE_KEY = "megle.library.subfolder-content-open";
+const SUBFOLDER_STRIP_COLLAPSED_STORAGE_KEY = "megle.library.subfolder-strip-collapsed";
 
 interface LibraryViewProps {
   library: LibraryState;
@@ -88,10 +90,14 @@ export function LibraryCenterPane({
   const [showChildFolderContents, setShowChildFolderContents] = useState<boolean>(() =>
     readStoredSubfolderContentOpen()
   );
+  const [subfolderStripCollapsed, setSubfolderStripCollapsed] = useState<boolean>(() =>
+    readStoredSubfolderStripCollapsed()
+  );
   const currentFolderId = library.selectedFolderId ?? selectedRoot?.rootFolderId ?? null;
   const childFolders = currentFolderId ? library.folderChildrenByParent[currentFolderId] ?? [] : [];
   const childFoldersLoading = currentFolderId ? library.loadingFolderIds.has(currentFolderId) : false;
   const showSubfolderStrip = !previewMedia && (childFolders.length > 0 || childFoldersLoading);
+  const coverMediaByFolderId = useFolderCovers(childFolders);
 
   useEffect(() => {
     if (previewOpen && !selectedMedia) {
@@ -109,6 +115,17 @@ export function LibraryCenterPane({
       // Ignore storage failures.
     }
   }, [showChildFolderContents]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        SUBFOLDER_STRIP_COLLAPSED_STORAGE_KEY,
+        subfolderStripCollapsed ? "1" : "0"
+      );
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [subfolderStripCollapsed]);
 
   function handleOpenPreview(mediaId: number) {
     onOpenPreview(mediaId);
@@ -136,23 +153,36 @@ export function LibraryCenterPane({
             <div className="library-browser-layout">
               {showSubfolderStrip ? (
                 <SubfolderStrip
+                  collapsed={subfolderStripCollapsed}
+                  coverMediaByFolderId={coverMediaByFolderId}
                   folders={childFolders}
                   loading={childFoldersLoading}
                   showChildContents={showChildFolderContents}
+                  onToggleCollapsed={() => setSubfolderStripCollapsed((current) => !current)}
                   onSelectFolder={library.setSelectedFolder}
                   onToggleShowChildContents={() => setShowChildFolderContents((current) => !current)}
                   selectedFolderId={library.selectedFolderId}
                 />
               ) : null}
               <div className="library-browser-content">
-                {showSubfolderStrip && showChildFolderContents ? (
+                <div className="library-browser-content-header">
+                  <div className="library-browser-content-title">
+                    {showChildFolderContents ? "Child folder contents" : "Contents"}
+                  </div>
+                  <div className="library-browser-content-subtitle">
+                    {showChildFolderContents
+                      ? `${childFolders.length} folder${childFolders.length === 1 ? "" : "s"}`
+                      : `${library.media.length} item${library.media.length === 1 ? "" : "s"}`}
+                  </div>
+                </div>
+                {showChildFolderContents ? (
                   <SubfolderContentGallery
+                    coverMediaByFolderId={coverMediaByFolderId}
                     folders={childFolders}
                     onSelectFolder={library.setSelectedFolder}
                     selectedFolderId={library.selectedFolderId}
                   />
-                ) : null}
-                {renderEmptyState({ library, selectedRoot }) ?? (
+                ) : renderEmptyState({ library, selectedRoot }) ?? (
                   <MediaGrid
                     aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
                     hasMore={library.mediaHasMore}
@@ -269,5 +299,13 @@ function readStoredSubfolderContentOpen(): boolean {
     return window.localStorage.getItem(SUBFOLDER_CONTENT_STORAGE_KEY) !== "0";
   } catch {
     return true;
+  }
+}
+
+function readStoredSubfolderStripCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SUBFOLDER_STRIP_COLLAPSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
   }
 }
