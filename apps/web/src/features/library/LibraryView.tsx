@@ -7,10 +7,11 @@ import type { LibraryLayoutMode } from "../media-grid/layoutMode";
 import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
+import { SubfolderContentGallery } from "./SubfolderContentGallery";
 import { SubfolderStrip } from "./SubfolderStrip";
 
 const AHEAD_THUMBNAIL_ROW_COUNT = 4;
-const SUBFOLDER_STRIP_STORAGE_KEY = "megle.library.subfolder-strip-open";
+const SUBFOLDER_CONTENT_STORAGE_KEY = "megle.library.subfolder-content-open";
 
 interface LibraryViewProps {
   library: LibraryState;
@@ -84,8 +85,8 @@ export function LibraryCenterPane({
     library.selectedRootId,
     library.selectedFolderId
   );
-  const [subfolderStripOpen, setSubfolderStripOpen] = useState<boolean>(() =>
-    readStoredSubfolderStripOpen()
+  const [showChildFolderContents, setShowChildFolderContents] = useState<boolean>(() =>
+    readStoredSubfolderContentOpen()
   );
   const currentFolderId = library.selectedFolderId ?? selectedRoot?.rootFolderId ?? null;
   const childFolders = currentFolderId ? library.folderChildrenByParent[currentFolderId] ?? [] : [];
@@ -101,13 +102,13 @@ export function LibraryCenterPane({
   useEffect(() => {
     try {
       window.localStorage.setItem(
-        SUBFOLDER_STRIP_STORAGE_KEY,
-        subfolderStripOpen ? "1" : "0"
+        SUBFOLDER_CONTENT_STORAGE_KEY,
+        showChildFolderContents ? "1" : "0"
       );
     } catch {
       // Ignore storage failures.
     }
-  }, [subfolderStripOpen]);
+  }, [showChildFolderContents]);
 
   function handleOpenPreview(mediaId: number) {
     onOpenPreview(mediaId);
@@ -137,13 +138,20 @@ export function LibraryCenterPane({
                 <SubfolderStrip
                   folders={childFolders}
                   loading={childFoldersLoading}
-                  open={subfolderStripOpen}
+                  showChildContents={showChildFolderContents}
                   onSelectFolder={library.setSelectedFolder}
-                  onToggleOpen={() => setSubfolderStripOpen((current) => !current)}
+                  onToggleShowChildContents={() => setShowChildFolderContents((current) => !current)}
                   selectedFolderId={library.selectedFolderId}
                 />
               ) : null}
               <div className="library-browser-content">
+                {showSubfolderStrip && showChildFolderContents ? (
+                  <SubfolderContentGallery
+                    folders={childFolders}
+                    onSelectFolder={library.setSelectedFolder}
+                    selectedFolderId={library.selectedFolderId}
+                  />
+                ) : null}
                 {renderEmptyState({ library, selectedRoot }) ?? (
                   <MediaGrid
                     aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
@@ -256,9 +264,9 @@ function mediaScrollPositionKey(
   return `${layoutMode}:${rootId ?? "root"}:${folderId ?? "folder"}`;
 }
 
-function readStoredSubfolderStripOpen(): boolean {
+function readStoredSubfolderContentOpen(): boolean {
   try {
-    return window.localStorage.getItem(SUBFOLDER_STRIP_STORAGE_KEY) !== "0";
+    return window.localStorage.getItem(SUBFOLDER_CONTENT_STORAGE_KEY) !== "0";
   } catch {
     return true;
   }

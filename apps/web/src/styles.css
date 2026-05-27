@@ -31,6 +31,9 @@
   --glass-dialog-fill: rgba(8, 12, 16, 0.5);
   --dialog-blur: 18px;
   --dialog-backdrop-dim: rgba(2, 5, 8, 0.52);
+  --scrollbar-thumb: rgba(151, 219, 226, 0.34);
+  --scrollbar-thumb-hover: rgba(151, 219, 226, 0.56);
+  --scrollbar-size: 8px;
   --glass-blur: 26px;
   --glass-elevated-blur: 34px;
   --glass-control-blur: 18px;
@@ -109,6 +112,34 @@ body {
   overflow: hidden;
 }
 
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+  background: transparent;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .liquid-glass-defs {
   position: absolute;
   width: 0;
@@ -165,7 +196,7 @@ body {
   flex-direction: inherit;
   justify-content: inherit;
   gap: inherit;
-  scrollbar-color: rgba(151, 219, 226, 0.34) rgba(255, 255, 255, 0.04);
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
@@ -443,8 +474,7 @@ body {
 .liquid-glass.plugins-detail-pane,
 .liquid-glass.settings-section,
 .liquid-glass.task-card,
-.liquid-glass.plugin-card,
-.liquid-glass.onboarding-hero-card {
+.liquid-glass.plugin-card {
   --glass-fill: var(--glass-center-fill);
   --glass-blur-current: var(--glass-center-blur);
   --glass-border-current: var(--glass-center-stroke);
@@ -615,7 +645,7 @@ body {
   grid-template-rows: var(--shell-titlebar-height) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  overflow: visible;
+  overflow: hidden;
   background: transparent;
   border-radius: 0;
   box-shadow: none;
@@ -781,7 +811,7 @@ body {
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  scrollbar-color: rgba(151, 219, 226, 0.34) rgba(255, 255, 255, 0.04);
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
@@ -1011,7 +1041,7 @@ button:disabled {
   gap: 12px;
   width: 100%;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .titlebar-workspace-controls {
@@ -1153,6 +1183,8 @@ button:disabled {
 }
 
 .library-browser-content {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -1194,18 +1226,25 @@ button:disabled {
   font-size: 12px;
 }
 
-.subfolder-strip-toggle {
-  width: 34px;
-  height: 34px;
-  padding: 0;
-}
-
 .subfolder-strip-scroller {
   display: flex;
   gap: 10px;
   min-width: 0;
   overflow: auto;
   padding-bottom: 4px;
+}
+
+.subfolder-strip-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.subfolder-strip-toggle {
+  min-height: 34px;
+  padding: 0 12px;
+  white-space: nowrap;
 }
 
 .subfolder-strip-empty {
@@ -1277,6 +1316,106 @@ button:disabled {
 .subfolder-card-status {
   color: var(--text-muted);
   font-size: 11.5px;
+  text-transform: capitalize;
+}
+
+.subfolder-content-gallery {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 4px;
+}
+
+.subfolder-content-gallery-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.subfolder-content-gallery-title {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.subfolder-content-gallery-subtitle {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.subfolder-content-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 10px;
+}
+
+.subfolder-content-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-surface);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015)),
+    var(--glass-readable-surface);
+  color: var(--text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.subfolder-content-card:hover {
+  border-color: var(--line-strong);
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.14), rgba(143, 211, 162, 0.06)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.subfolder-content-card.selected {
+  border-color: var(--line-strong);
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.18), rgba(143, 211, 162, 0.08)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.subfolder-content-card-thumb {
+  display: grid;
+  aspect-ratio: 1 / 1;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 38% 28%, rgba(255, 255, 255, 0.12), transparent 54%),
+    linear-gradient(135deg, rgba(151, 219, 226, 0.16), rgba(239, 141, 127, 0.08)),
+    rgba(8, 12, 16, 0.94);
+  color: var(--text-muted);
+}
+
+.subfolder-content-card-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.subfolder-content-card-name,
+.subfolder-content-card-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subfolder-content-card-name {
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 560;
+}
+
+.subfolder-content-card-status {
+  color: var(--text-muted);
+  font-size: 11px;
   text-transform: capitalize;
 }
 
@@ -1491,7 +1630,7 @@ button:disabled {
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  scrollbar-color: rgba(151, 219, 226, 0.34) rgba(255, 255, 255, 0.04);
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
@@ -4063,32 +4202,16 @@ button:disabled {
 
 .onboarding-hero {
   display: grid;
-  grid-template-rows: 56px minmax(0, 1fr);
+  place-items: center;
+  padding: 32px;
 }
 
-.onboarding-hero .toolbar {
-  border-bottom: 1px solid var(--line);
-}
-
-.onboarding-hero-card {
+.onboarding-hero-content {
   display: grid;
-  align-content: center;
   justify-items: center;
   gap: 12px;
-  padding: 32px;
+  width: min(460px, 100%);
   text-align: center;
-  min-height: 0;
-}
-
-.onboarding-hero-icon {
-  display: grid;
-  width: 56px;
-  height: 56px;
-  place-items: center;
-  border-radius: 14px;
-  background: rgba(142, 199, 208, 0.16);
-  color: var(--accent);
-  border: 1px solid rgba(142, 199, 208, 0.32);
 }
 
 .onboarding-hero-title {
@@ -4481,7 +4604,7 @@ button:disabled {
 
 .virtual-grid {
   border-radius: 0;
-  scrollbar-color: rgba(151, 219, 226, 0.34) rgba(255, 255, 255, 0.04);
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
@@ -4737,8 +4860,7 @@ button:disabled {
 .liquid-glass.plugins-detail-pane,
 .liquid-glass.settings-section,
 .liquid-glass.task-card,
-.liquid-glass.plugin-card,
-.liquid-glass.onboarding-hero-card {
+.liquid-glass.plugin-card {
   background: transparent;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -4793,8 +4915,7 @@ button:disabled {
 .plugin-card,
 .plugins-empty,
 .grid-empty-search,
-.grid-empty-folder,
-.onboarding-hero-card {
+.grid-empty-folder {
   border-radius: var(--radius-panel);
 }
 
@@ -4808,8 +4929,7 @@ button:disabled {
 .recent-op-row,
 .plugins-error,
 .plugins-discovery-errors,
-.plugin-detail-error,
-.onboarding-hero-icon {
+.plugin-detail-error {
   border-radius: var(--radius-surface);
 }
 
