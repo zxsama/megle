@@ -131,7 +131,7 @@ export function LayoutMenu({
           <div aria-hidden="true" className="sort-menu-backdrop" onClick={closeAndReturnFocus} />
           <LiquidGlassSurface
             as="div"
-            className="floating-popover sort-menu-list sort-menu-popover layout-menu-popover"
+            className="floating-popover sort-menu-list sort-menu-popover layout-menu-popover popup-surface"
             interactive
             role="listbox"
             aria-label="Layout options"

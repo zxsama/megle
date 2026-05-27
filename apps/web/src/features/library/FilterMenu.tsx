@@ -115,7 +115,7 @@ export function FilterMenu({
           <LiquidGlassSurface
             as="div"
             aria-label="Filters"
-            className="floating-popover filter-menu-popover"
+            className="floating-popover filter-menu-popover popup-surface"
             data-compact-popover="filter"
             data-compact-popover-root="filter"
             interactive

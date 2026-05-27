@@ -1686,6 +1686,7 @@ export function useLibraryData(): LibraryState {
       selectedFolderIdRef.current = folder.id;
       selectRoot(folder.rootId);
       selectFolder(folder.id);
+      void loadFolderChildren(folder.id);
       void reloadCurrentMedia({
         rootId: folder.rootId,
         folderId: folder.id,

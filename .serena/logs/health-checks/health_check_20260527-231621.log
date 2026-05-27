@@ -1,0 +1,94 @@
+INFO  2026-05-27 23:16:21,396 serena.cli:health_check:939 - Starting health check for project: D:\Megle
+INFO  2026-05-27 23:16:21,396 serena.cli:health_check:943 - Creating SerenaAgent with disabled dashboard...
+INFO  2026-05-27 23:16:21,405 serena.util.file_system:stop:336 - Loading of .gitignore files completed in 0.020 seconds
+INFO  2026-05-27 23:16:21,405 serena.project:stop:336 - Gathering ignore spec for project Megle completed in 0.020 seconds
+INFO  2026-05-27 23:16:21,510 serena.agent:__init__:610 - Will record tool usage statistics with token count estimator: CHAR_COUNT.
+INFO  2026-05-27 23:16:21,545 serena.agent:__init__:614 - Starting Serena server (version=1.5.3, process id=97896, parent process id=78416; language backend=LSP); Python version=3.13.3, platform=Windows-11-10.0.26200-SP0
+INFO  2026-05-27 23:16:21,545 serena.agent:__init__:618 - Configuration file: C:\Users\84460\.serena\serena_config.yml
+INFO  2026-05-27 23:16:21,545 serena.agent:__init__:619 - Available projects: Megle
+INFO  2026-05-27 23:16:21,545 serena.agent:__init__:620 - Loaded tools (51): create_text_file, replace_content, delete_lines, replace_lines, insert_at_line, replace_symbol_body, insert_after_symbol, insert_before_symbol, read_file, list_dir, find_file, search_for_pattern, restart_language_server, get_symbols_overview, find_symbol, find_referencing_symbols, find_implementations, find_declaration, get_diagnostics_for_file, get_diagnostics_for_symbol, rename_symbol, safe_delete_symbol, write_memory, read_memory, list_memories, delete_memory, rename_memory, edit_memory, execute_shell_command, open_dashboard, activate_project, remove_project, get_current_config, onboarding, initial_instructions, serena_info, jet_brains_find_symbol, jet_brains_move, jet_brains_safe_delete, jet_brains_inline_symbol, jet_brains_find_referencing_symbols, jet_brains_get_symbols_overview, jet_brains_type_hierarchy, jet_brains_find_declaration, jet_brains_find_implementations, jet_brains_rename, jet_brains_debug, jet_brains_run_inspections, jet_brains_list_inspections, list_queryable_projects, query_project
+INFO  2026-05-27 23:16:21,545 serena.agent:__init__:632 - Using language backend from global configuration: LSP
+INFO  2026-05-27 23:16:21,562 serena.config.serena_config:start:329 - Loading project instance for RegisteredProject[project_root=D:\Megle, project_config=ProjectConfig[project_name=Megle]] starting ...
+INFO  2026-05-27 23:16:21,562 serena.project:__init__:43 - Serena project data folder: D:\Megle\.serena
+INFO  2026-05-27 23:16:21,562 serena.project:start:329 - Gathering ignore spec for project Megle starting ...
+INFO  2026-05-27 23:16:21,562 serena.util.file_system:start:329 - Loading of .gitignore files starting ...
+INFO  2026-05-27 23:16:21,562 serena.config.serena_config:stop:336 - Loading project instance for RegisteredProject[project_root=D:\Megle, project_config=ProjectConfig[project_name=Megle]] completed in 0.001 seconds
+INFO  2026-05-27 23:16:21,562 serena.agent:activate_project_from_path_or_name:1152 - Found registered project 'Megle' at path D:\Megle
+INFO  2026-05-27 23:16:21,562 serena.agent:_activate_project:1089 - Activating Megle at D:\Megle
+INFO  2026-05-27 23:16:21,562 serena.task_executor:issue_task:192 - Scheduling Task-1:init_language_server_manager
+INFO  2026-05-27 23:16:21,563 serena.agent:_update_active_modes:1018 - Active modes (2): editing, interactive
+INFO  2026-05-27 23:16:21,563 serena.util.file_system:_load_gitignore_files:152 - Processing .gitignore file: D:\Megle\.gitignore
+INFO  2026-05-27 23:16:21,564 serena.util.file_system:_load_gitignore_files:152 - Processing .gitignore file: D:\Megle\.serena\.gitignore
+INFO  2026-05-27 23:16:21,565 serena.agent:_create_base_toolset:777 - Number of exposed tools: 28
+INFO  2026-05-27 23:16:21,566 serena.agent:__init__:656 - Number of exposed tools: 28. Exposed tools: ['activate_project', 'create_text_file', 'delete_memory', 'edit_memory', 'execute_shell_command', 'find_declaration', 'find_file', 'find_implementations', 'find_referencing_symbols', 'find_symbol', 'get_current_config', 'get_diagnostics_for_file', 'get_symbols_overview', 'initial_instructions', 'insert_after_symbol', 'insert_before_symbol', 'list_dir', 'list_memories', 'onboarding', 'read_file', 'read_memory', 'rename_memory', 'rename_symbol', 'replace_content', 'replace_symbol_body', 'safe_delete_symbol', 'search_for_pattern', 'write_memory']
+INFO  2026-05-27 23:16:21,567 serena.agent:_update_active_tools:1036 - Active tools (28): activate_project, create_text_file, delete_memory, edit_memory, execute_shell_command, find_declaration, find_file, find_implementations, find_referencing_symbols, find_symbol, get_current_config, get_diagnostics_for_file, get_symbols_overview, initial_instructions, insert_after_symbol, insert_before_symbol, list_dir, list_memories, onboarding, read_file, read_memory, rename_memory, rename_symbol, replace_content, replace_symbol_body, safe_delete_symbol, search_for_pattern, write_memory
+INFO  2026-05-27 23:16:21,579 serena.util.file_system:stop:336 - Loading of .gitignore files completed in 0.017 seconds
+INFO  2026-05-27 23:16:21,579 serena.project:stop:336 - Gathering ignore spec for project Megle completed in 0.017 seconds
+INFO  2026-05-27 23:16:21,646 serena.task_executor:_process_task_queue:123 - Starting execution of Task-1:init_language_server_manager
+INFO  2026-05-27 23:16:21,647 serena.task_executor:start:329 - Task-1:init_language_server_manager starting ...
+INFO  2026-05-27 23:16:21,647 serena.agent:start:329 - Language server initialization starting ...
+INFO  2026-05-27 23:16:21,647 serena.project:create_language_server_manager:420 - Creating language server manager for D:\Megle
+INFO  2026-05-27 23:16:21,647 sensai.util.logging:start:329 - Language server startup (language=typescript) starting ...
+INFO  2026-05-27 23:16:21,647 serena.ls_manager:create_language_server:50 - Creating language server instance for D:\Megle, language=typescript.
+INFO  2026-05-27 23:16:21,648 sensai.util.logging:start:329 - Language server startup (language=rust) starting ...
+INFO  2026-05-27 23:16:21,648 serena.ls_manager:create_language_server:50 - Creating language server instance for D:\Megle, language=rust.
+INFO  2026-05-27 23:16:21,769 solidlsp.language_servers.typescript_language_server:_get_or_install_core_dependency:204 - Typescript Language Server executable not found at C:\Users\84460\.serena\language_servers\static\TypeScriptLanguageServer\ts-lsp\node_modules\.bin\typescript-language-server. Installing...
+INFO  2026-05-27 23:16:21,769 solidlsp.language_servers.typescript_language_server:start:329 - Installation of TypeScript language server dependencies starting ...
+INFO  2026-05-27 23:16:21,769 solidlsp.language_servers.common:_run_command:116 - Running command ['npm', 'install', '--prefix', './', 'typescript@5.9.3'] in 'C:\Users\84460\.serena\language_servers\static\TypeScriptLanguageServer\ts-lsp'
+INFO  2026-05-27 23:16:23,358 solidlsp.language_servers.common:_run_command:132 - Command completed successfully
+INFO  2026-05-27 23:16:23,358 solidlsp.language_servers.common:_run_command:116 - Running command ['npm', 'install', '--prefix', './', 'typescript-language-server@5.1.3'] in 'C:\Users\84460\.serena\language_servers\static\TypeScriptLanguageServer\ts-lsp'
+INFO  2026-05-27 23:16:23,409 serena.cli:health_check:946 - SerenaAgent created successfully
+INFO  2026-05-27 23:16:23,409 serena.cli:health_check:949 - Searching for analyzable files...
+INFO  2026-05-27 23:16:23,455 serena.cli:health_check:958 - Found analyzable file: apps\desktop\src\core-process.ts
+INFO  2026-05-27 23:16:23,455 serena.cli:health_check:976 - Testing GetSymbolsOverviewTool on file: apps\desktop\src\core-process.ts
+INFO  2026-05-27 23:16:23,455 serena.task_executor:issue_task:192 - Scheduling Task-2:<lambda>
+INFO  2026-05-27 23:16:25,413 solidlsp.language_servers.common:_run_command:132 - Command completed successfully
+INFO  2026-05-27 23:16:25,413 solidlsp.language_servers.typescript_language_server:stop:336 - Installation of TypeScript language server dependencies completed in 3.645 seconds
+INFO  2026-05-27 23:16:25,414 solidlsp.language_servers.typescript_language_server:_get_or_install_core_dependency:207 - TypeScript language server dependencies installed successfully
+INFO  2026-05-27 23:16:25,414 solidlsp.ls:start:3123 - Starting language server with language typescript for D:\Megle
+INFO  2026-05-27 23:16:25,414 solidlsp.language_servers.typescript_language_server:_start_server:367 - Starting TypeScript server process
+INFO  2026-05-27 23:16:25,414 solidlsp.ls_process:_start:468 - Starting language server process via command: ['C:\\Users\\84460\\.serena\\language_servers\\static\\TypeScriptLanguageServer\\ts-lsp\\node_modules\\.bin\\typescript-language-server', '--stdio']
+INFO  2026-05-27 23:16:25,422 solidlsp.language_servers.typescript_language_server:_start_server:371 - Sending initialize request from LSP client to LSP server and awaiting response
+INFO  2026-05-27 23:16:25,595 solidlsp.language_servers.typescript_language_server:window_log_message:304 - LSP: window/logMessage: {'type': 3, 'message': 'Using Typescript version (workspace) 5.9.3 from path "d:\\Megle\\node_modules\\typescript\\lib\\tsserver.js"'}
+INFO  2026-05-27 23:16:25,596 solidlsp.language_servers.typescript_language_server:handle_typescript_version:312 - TypeScript server version notification received: {'version': '5.9.3', 'source': 'workspace'}
+INFO  2026-05-27 23:16:25,597 solidlsp.language_servers.typescript_language_server:_start_server:386 - TypeScript server is ready
+INFO  2026-05-27 23:16:25,597 solidlsp.language_servers.typescript_language_server:_start_server:396 - Waiting for TypeScript project indexing to complete (if async)...
+INFO  2026-05-27 23:16:25,597 solidlsp.language_servers.typescript_language_server:_start_server:398 - TypeScript project indexing complete
+INFO  2026-05-27 23:16:25,597 sensai.util.logging:stop:336 - Language server startup (language=typescript) completed in 3.949 seconds
+INFO  2026-05-27 23:16:27,098 solidlsp.ls:start:3123 - Starting language server with language rust for D:\Megle
+INFO  2026-05-27 23:16:27,098 solidlsp.language_servers.rust_analyzer:_start_server:729 - Starting RustAnalyzer server process
+INFO  2026-05-27 23:16:27,099 solidlsp.ls_process:_start:468 - Starting language server process via command: ['C:\\Users\\84460\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\rust-analyzer.exe']
+INFO  2026-05-27 23:16:27,105 solidlsp.language_servers.rust_analyzer:_start_server:733 - Sending initialize request from LSP client to LSP server and awaiting response
+INFO  2026-05-27 23:16:44,448 sensai.util.logging:stop:336 - Language server startup (language=rust) completed in 22.801 seconds
+INFO  2026-05-27 23:16:44,449 serena.agent:stop:336 - Language server initialization completed in 22.802 seconds
+INFO  2026-05-27 23:16:44,449 serena.task_executor:stop:336 - Task-1:init_language_server_manager completed in 22.802 seconds
+INFO  2026-05-27 23:16:44,449 serena.task_executor:_process_task_queue:123 - Starting execution of Task-2:<lambda>
+INFO  2026-05-27 23:16:44,449 serena.task_executor:start:329 - Task-2:<lambda> starting ...
+INFO  2026-05-27 23:16:44,482 solidlsp.language_servers.typescript_language_server:progress_handler:341 - TypeScript LSP progress [8ed76266-35ab-4e25-be78-314ee0620e92]: started - Initializing JS/TS language features…
+INFO  2026-05-27 23:16:44,794 serena.task_executor:stop:336 - Task-2:<lambda> completed in 0.345 seconds
+INFO  2026-05-27 23:16:44,795 serena.cli:health_check:978 - GetSymbolsOverviewTool returned: [{'name': 'coreBinaryPath', 'kind': 'Function'}, {'name': 'CoreProcessHandle', 'kind': 'Interface'}, {'name': 'delay', 'kind': 'Function'}, {'name': 'ensureTrailingSlash', 'kind': 'Function'}, {'name': 'repoRoot', 'kind': 'Function'}, {'name': 'startCoreProcess', 'kind': 'Function'}, {'name': 'stopCoreProcessTree', 'kind': 'Function'}, {'name': 'waitForCoreHealth', 'kind': 'Function'}]
+INFO  2026-05-27 23:16:44,795 serena.cli:health_check:1001 - Using symbol for testing: coreBinaryPath (kind: Function)
+INFO  2026-05-27 23:16:44,795 serena.cli:health_check:1004 - Testing FindSymbolTool for symbol: coreBinaryPath
+INFO  2026-05-27 23:16:44,795 serena.task_executor:issue_task:192 - Scheduling Task-3:<lambda>
+INFO  2026-05-27 23:16:44,895 serena.task_executor:_process_task_queue:123 - Starting execution of Task-3:<lambda>
+INFO  2026-05-27 23:16:44,896 serena.task_executor:start:329 - Task-3:<lambda> starting ...
+INFO  2026-05-27 23:16:44,897 serena.task_executor:stop:336 - Task-3:<lambda> completed in 0.001 seconds
+INFO  2026-05-27 23:16:44,897 serena.cli:health_check:1009 - FindSymbolTool found 1 matches for symbol coreBinaryPath
+INFO  2026-05-27 23:16:44,898 serena.cli:health_check:1012 - Testing FindReferencingSymbolsTool for symbol: coreBinaryPath
+INFO  2026-05-27 23:16:44,898 serena.task_executor:issue_task:192 - Scheduling Task-4:<lambda>
+INFO  2026-05-27 23:16:44,998 serena.task_executor:_process_task_queue:123 - Starting execution of Task-4:<lambda>
+INFO  2026-05-27 23:16:44,998 serena.task_executor:start:329 - Task-4:<lambda> starting ...
+INFO  2026-05-27 23:16:45,474 solidlsp.language_servers.typescript_language_server:progress_handler:352 - TypeScript LSP progress [8ed76266-35ab-4e25-be78-314ee0620e92]: ended - 
+INFO  2026-05-27 23:16:45,486 solidlsp.language_servers.typescript_language_server:progress_handler:341 - TypeScript LSP progress [1d0ddd62-1b21-41e9-b37e-61dfc9e70665]: started - Initializing JS/TS language features…
+INFO  2026-05-27 23:16:45,486 solidlsp.language_servers.typescript_language_server:progress_handler:352 - TypeScript LSP progress [1d0ddd62-1b21-41e9-b37e-61dfc9e70665]: ended - 
+INFO  2026-05-27 23:16:47,019 serena.task_executor:stop:336 - Task-4:<lambda> completed in 2.021 seconds
+INFO  2026-05-27 23:16:47,019 serena.cli:health_check:1016 - FindReferencingSymbolsTool found 1 references for symbol coreBinaryPath
+INFO  2026-05-27 23:16:47,019 serena.cli:health_check:1022 - Testing SearchForPatternTool for pattern: coreBinaryPath
+INFO  2026-05-27 23:16:47,019 serena.task_executor:issue_task:192 - Scheduling Task-5:<lambda>
+INFO  2026-05-27 23:16:47,119 serena.task_executor:_process_task_queue:123 - Starting execution of Task-5:<lambda>
+INFO  2026-05-27 23:16:47,120 serena.task_executor:start:329 - Task-5:<lambda> starting ...
+INFO  2026-05-27 23:16:47,161 serena.util.text_utils:search_files:366 - Processing 94 files.
+INFO  2026-05-27 23:16:47,217 serena.util.text_utils:search_files:408 - Found 3 total matches across 94 files
+INFO  2026-05-27 23:16:47,217 serena.task_executor:stop:336 - Task-5:<lambda> completed in 0.097 seconds
+INFO  2026-05-27 23:16:47,217 serena.cli:health_check:1029 - SearchForPatternTool found 3 pattern matches for coreBinaryPath
+INFO  2026-05-27 23:16:47,218 serena.cli:health_check:1043 - Health check completed successfully

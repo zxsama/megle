@@ -615,7 +615,7 @@ body {
   grid-template-rows: var(--shell-titlebar-height) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
   background: transparent;
   border-radius: 0;
   box-shadow: none;
@@ -666,6 +666,8 @@ body {
 
 .shell-titlebar {
   display: flex;
+  position: relative;
+  z-index: 20;
   align-items: center;
   min-width: 0;
   min-height: 0;
@@ -673,6 +675,7 @@ body {
   background: transparent;
   border: 0;
   box-shadow: none;
+  overflow: visible;
 }
 
 .shell-titlebar-left {
@@ -947,6 +950,21 @@ button:disabled {
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 
+.task-overlay-window {
+  z-index: 241;
+}
+
+.task-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 230;
+  background:
+    radial-gradient(circle at 50% 35%, rgba(151, 219, 226, 0.08), transparent 34%),
+    var(--dialog-backdrop-dim);
+  -webkit-backdrop-filter: blur(var(--dialog-blur)) saturate(1.24);
+  backdrop-filter: blur(var(--dialog-blur)) saturate(1.24);
+}
+
 .toolbar {
   grid-column: 1 / -1;
   display: flex;
@@ -1124,6 +1142,142 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.library-browser-layout {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.library-browser-content {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.subfolder-strip {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(6, 10, 14, 0.28);
+}
+
+.subfolder-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.subfolder-strip-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.subfolder-strip-title {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.subfolder-strip-subtitle {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.subfolder-strip-toggle {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+
+.subfolder-strip-scroller {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  overflow: auto;
+  padding-bottom: 4px;
+}
+
+.subfolder-strip-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.subfolder-card {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: min(240px, 34vw);
+  max-width: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-surface);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    var(--glass-readable-surface);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: var(--text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.subfolder-card:hover {
+  border-color: var(--line-strong);
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.14), rgba(143, 211, 162, 0.06)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.subfolder-card.selected {
+  border-color: var(--line-strong);
+  background:
+    linear-gradient(135deg, rgba(151, 219, 226, 0.18), rgba(143, 211, 162, 0.08)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.subfolder-card-icon {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--text-muted);
+}
+
+.subfolder-card-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.subfolder-card-name,
+.subfolder-card-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subfolder-card-name {
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.subfolder-card-status {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-transform: capitalize;
 }
 
 .grid-surface-preview .library-grid-content {
@@ -2297,6 +2451,10 @@ button:disabled {
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
+.popup-surface {
+  z-index: 240;
+}
+
 .filter-menu-trigger {
   position: relative;
   width: 34px;
@@ -2444,7 +2602,7 @@ button:disabled {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
-  z-index: 81;
+  z-index: 241;
   list-style: none;
   margin: 0;
   padding: 4px;
@@ -3148,13 +3306,13 @@ button:disabled {
   position: fixed;
   top: 60px;
   right: 12px;
-  z-index: 130;
+  z-index: 241;
   width: min(380px, 92vw);
   max-height: calc(100vh - 80px);
   display: flex;
   flex-direction: column;
-  background: rgba(23, 27, 32, 0.98);
-  border: 1px solid var(--line);
+  background: transparent;
+  border: 1px solid var(--glass-border);
   border-radius: 12px;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
   overflow: hidden;
@@ -4575,11 +4733,6 @@ button:disabled {
 .liquid-glass.inspector-panel,
 .liquid-glass.context-menu,
 .liquid-glass.dialog,
-.liquid-glass.floating-popover,
-.liquid-glass.recent-ops-drawer,
-.liquid-glass.filter-menu-popover,
-.liquid-glass.sort-menu-list,
-.liquid-glass.sort-menu-popover,
 .liquid-glass.inspector-tag-suggestions,
 .liquid-glass.plugins-detail-pane,
 .liquid-glass.settings-section,
@@ -4589,6 +4742,14 @@ button:disabled {
   background: transparent;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
+}
+
+.liquid-glass.popup-surface {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.035)),
+    var(--glass-elevated);
+  -webkit-backdrop-filter: blur(var(--glass-elevated-blur)) saturate(1.5);
+  backdrop-filter: blur(var(--glass-elevated-blur)) saturate(1.5);
 }
 
 /* Design contract: radius tokens for visible chrome, overlays, controls, and content surfaces. */

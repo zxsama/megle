@@ -154,7 +154,7 @@ export function SortMenu({
           ) : null}
           <LiquidGlassSurface
             as="div"
-            className="floating-popover sort-menu-list sort-menu-popover"
+            className="floating-popover sort-menu-list sort-menu-popover popup-surface"
             data-compact-popover="sort"
             data-compact-popover-root="sort"
             interactive

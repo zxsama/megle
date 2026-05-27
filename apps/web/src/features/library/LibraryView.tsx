@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassButton } from "../../design/liquid-glass";
@@ -7,8 +7,10 @@ import type { LibraryLayoutMode } from "../media-grid/layoutMode";
 import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
+import { SubfolderStrip } from "./SubfolderStrip";
 
 const AHEAD_THUMBNAIL_ROW_COUNT = 4;
+const SUBFOLDER_STRIP_STORAGE_KEY = "megle.library.subfolder-strip-open";
 
 interface LibraryViewProps {
   library: LibraryState;
@@ -82,12 +84,30 @@ export function LibraryCenterPane({
     library.selectedRootId,
     library.selectedFolderId
   );
+  const [subfolderStripOpen, setSubfolderStripOpen] = useState<boolean>(() =>
+    readStoredSubfolderStripOpen()
+  );
+  const currentFolderId = library.selectedFolderId ?? selectedRoot?.rootFolderId ?? null;
+  const childFolders = currentFolderId ? library.folderChildrenByParent[currentFolderId] ?? [] : [];
+  const childFoldersLoading = currentFolderId ? library.loadingFolderIds.has(currentFolderId) : false;
+  const showSubfolderStrip = !previewMedia && (childFolders.length > 0 || childFoldersLoading);
 
   useEffect(() => {
     if (previewOpen && !selectedMedia) {
       onClosePreview();
     }
   }, [onClosePreview, previewOpen, selectedMedia]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        SUBFOLDER_STRIP_STORAGE_KEY,
+        subfolderStripOpen ? "1" : "0"
+      );
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [subfolderStripOpen]);
 
   function handleOpenPreview(mediaId: number) {
     onOpenPreview(mediaId);
@@ -112,24 +132,38 @@ export function LibraryCenterPane({
               onViewStateChange={onPreviewViewStateChange}
             />
           ) : (
-            renderEmptyState({ library, selectedRoot }) ?? (
-              <MediaGrid
-                aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
-                hasMore={library.mediaHasMore}
-                items={library.media}
-                layoutMode={layoutMode}
-                loading={library.loading}
-                loadingMore={library.loadingMoreMedia}
-                onContextMenu={onMediaContextMenu}
-                onOpenPreview={handleOpenPreview}
-                onRequestMore={library.loadMoreMedia}
-                onRequestThumbnailStates={library.requestThumbnailStates}
-                onSelect={library.setSelectedMediaId}
-                scrollPositionKey={mediaScrollKey}
-                selectedMediaId={library.selectedMediaId}
-                thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
-              />
-            )
+            <div className="library-browser-layout">
+              {showSubfolderStrip ? (
+                <SubfolderStrip
+                  folders={childFolders}
+                  loading={childFoldersLoading}
+                  open={subfolderStripOpen}
+                  onSelectFolder={library.setSelectedFolder}
+                  onToggleOpen={() => setSubfolderStripOpen((current) => !current)}
+                  selectedFolderId={library.selectedFolderId}
+                />
+              ) : null}
+              <div className="library-browser-content">
+                {renderEmptyState({ library, selectedRoot }) ?? (
+                  <MediaGrid
+                    aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
+                    hasMore={library.mediaHasMore}
+                    items={library.media}
+                    layoutMode={layoutMode}
+                    loading={library.loading}
+                    loadingMore={library.loadingMoreMedia}
+                    onContextMenu={onMediaContextMenu}
+                    onOpenPreview={handleOpenPreview}
+                    onRequestMore={library.loadMoreMedia}
+                    onRequestThumbnailStates={library.requestThumbnailStates}
+                    onSelect={library.setSelectedMediaId}
+                    scrollPositionKey={mediaScrollKey}
+                    selectedMediaId={library.selectedMediaId}
+                    thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
+                  />
+                )}
+              </div>
+            </div>
           )}
         </div>
       </section>
@@ -220,4 +254,12 @@ function mediaScrollPositionKey(
   folderId: number | null
 ): string {
   return `${layoutMode}:${rootId ?? "root"}:${folderId ?? "folder"}`;
+}
+
+function readStoredSubfolderStripOpen(): boolean {
+  try {
+    return window.localStorage.getItem(SUBFOLDER_STRIP_STORAGE_KEY) !== "0";
+  } catch {
+    return true;
+  }
 }

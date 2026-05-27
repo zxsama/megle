@@ -81,7 +81,7 @@ export function ShellOverlayHost({
       {recentOpsOpen ? (
         <LiquidGlassSurface
           as="div"
-          className="floating-popover recent-ops-drawer"
+          className="floating-popover recent-ops-drawer popup-surface"
           data-compact-popover="recent"
           data-compact-popover-root="recent"
           interactive

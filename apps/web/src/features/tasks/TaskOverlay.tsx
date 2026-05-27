@@ -51,8 +51,8 @@ export function TaskOverlay({ mode, open, onClose, children }: TaskOverlayProps)
         aria-modal={mode === "center" ? "true" : undefined}
         className={
           mode === "center"
-            ? "task-center-overlay task-overlay-window"
-            : "floating-popover task-panel task-drawer-panel task-overlay-window"
+            ? "task-center-overlay task-overlay-window popup-surface"
+            : "floating-popover task-panel task-drawer-panel task-overlay-window popup-surface"
         }
         data-compact-popover={mode === "compact" ? "tasks" : undefined}
         data-compact-popover-root={mode === "compact" ? "tasks" : undefined}
