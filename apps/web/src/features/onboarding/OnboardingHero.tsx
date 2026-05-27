@@ -1,6 +1,5 @@
-import { FolderPlus } from "lucide-react";
 import { canPickNativeFolder, pickNativeFolder } from "../../core/desktop";
-import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
+import { LiquidGlassButton } from "../../design/liquid-glass";
 
 export interface OnboardingHeroProps {
   rootCount: number;
@@ -36,21 +35,7 @@ export function OnboardingHero({ rootCount, loading, onAddRoot }: OnboardingHero
 
   return (
     <section className="workspace simple-workspace onboarding-hero" aria-label="Onboarding">
-      <LiquidGlassSurface as="header" className="toolbar" interactive tone="chrome">
-        <div>
-          <div className="toolbar-title">Welcome to Megle</div>
-          <div className="toolbar-meta">No roots yet</div>
-        </div>
-      </LiquidGlassSurface>
-      <LiquidGlassSurface
-        as="div"
-        className="onboarding-hero-card"
-        interactive
-        tone="elevated"
-      >
-        <div className="onboarding-hero-icon" aria-hidden="true">
-          <FolderPlus size={28} />
-        </div>
+      <div className="onboarding-hero-content">
         <h2 className="onboarding-hero-title">Add a folder to get started</h2>
         <p className="onboarding-hero-copy">
           Megle indexes existing folders without copying their contents. Point it at a
@@ -64,7 +49,7 @@ export function OnboardingHero({ rootCount, loading, onAddRoot }: OnboardingHero
         >
           Choose folder
         </LiquidGlassButton>
-      </LiquidGlassSurface>
+      </div>
     </section>
   );
 }

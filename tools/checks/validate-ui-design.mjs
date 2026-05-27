@@ -1889,6 +1889,18 @@ for (const [label, source, tones] of ctaFiles) {
   }
 }
 
+if (onboardingHero.includes("Welcome to Megle")) {
+  fail("Onboarding empty state must not render the boxed Welcome to Megle header");
+}
+
+if (onboardingHero.includes("LiquidGlassSurface") || onboardingHero.includes("onboarding-hero-card")) {
+  fail("Onboarding empty state must be direct center content, not a boxed LiquidGlassSurface card");
+}
+
+if (!onboardingHero.includes("Add a folder to get started")) {
+  fail("Onboarding empty state must keep the Add a folder to get started prompt");
+}
+
 for (const selector of [
   ".app-shell",
   ".workspace",
