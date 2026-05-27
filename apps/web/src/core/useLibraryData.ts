@@ -31,6 +31,7 @@ const SEARCH_DEBOUNCE_MS = 250;
 const SCAN_REFRESH_INTERVAL_MS = 800;
 const SELECTED_THUMBNAIL_REPOLL_MS = 150;
 const THUMBNAIL_SCOPE_SYNC_DEBOUNCE_MS = 0;
+const SHOW_SUBFOLDER_CONTENTS_STORAGE_KEY = "megle.library.subfolder-content-open";
 
 export type LibrarySort =
   | "mtime_desc"
@@ -63,6 +64,7 @@ export interface LibraryState {
   roots: RootRecord[];
   folders: FolderRecord[];
   media: MediaRecord[];
+  showChildFolderContents: boolean;
   selectedRootId: number | null;
   selectedFolderId: number | null;
   selectedMediaId: number | null;
@@ -108,6 +110,7 @@ export interface LibraryState {
   }) => Promise<FileOpResult>;
   setSelectedRootId: (rootId: number) => void;
   setSelectedFolder: (folder: FolderRecord) => void;
+  toggleShowChildFolderContents: () => void;
   setSelectedMediaId: (mediaId: number | null) => void;
   toggleFolderExpanded: (folderId: number) => void;
   requestThumbnailStates: (mediaIds: number[], priority: ThumbnailRequestPriority) => void;
@@ -184,6 +187,9 @@ export function useLibraryData(): LibraryState {
   const thumbnailStateSignaturesByMediaIdRef = useRef<Record<number, string>>({});
   const [mediaNextCursor, setMediaNextCursor] = useState<string | null>(null);
   const mediaHasMore = mediaNextCursor !== null;
+  const [showChildFolderContents, setShowChildFolderContents] = useState<boolean>(() =>
+    readStoredShowChildFolderContents()
+  );
   const [selectedRootId, selectRoot] = useState<number | null>(null);
   const [selectedFolderId, selectFolder] = useState<number | null>(null);
   const [selectedMediaId, selectMedia] = useState<number | null>(null);
@@ -270,6 +276,8 @@ export function useLibraryData(): LibraryState {
   );
   const searchActiveRef = useRef(searchActive);
   searchActiveRef.current = searchActive;
+  const showChildFolderContentsRef = useRef(showChildFolderContents);
+  showChildFolderContentsRef.current = showChildFolderContents;
   const searchStateRef = useRef(searchState);
   searchStateRef.current = searchState;
   const debouncedQRef = useRef(debouncedQ);
@@ -590,6 +598,7 @@ export function useLibraryData(): LibraryState {
     async (scope?: {
       rootId?: number;
       folderId?: number | null;
+      includeDescendants?: boolean;
       scanRefreshSelectionToken?: ScanRefreshSelectionToken;
       setLoadingState?: boolean;
     }) => {
@@ -623,6 +632,8 @@ export function useLibraryData(): LibraryState {
       }
 
       const folderId = scope && "folderId" in scope ? scope.folderId : selectedFolderId;
+      const includeDescendants =
+        scope?.includeDescendants ?? showChildFolderContentsRef.current;
       const folderFilter =
         folderId !== null && folderId !== undefined && folderId !== root.rootFolderId
           ? folderId
@@ -636,18 +647,20 @@ export function useLibraryData(): LibraryState {
         const sort = searchStateRef.current.sort;
         const mediaPage = searchActiveRef.current
           ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
+              includeDescendants,
               rootId: root.id,
               folderId: folderFilter,
               cursor: cursor ?? undefined,
               limit: PAGE_LIMIT
             }))
           : await client.listMedia({
-              cursor: cursor ?? undefined,
-              folderId: folderFilter,
-              limit: PAGE_LIMIT,
-              rootId: root.id,
-              sort: listMediaSort(sort)
-            });
+            cursor: cursor ?? undefined,
+            folderId: folderFilter,
+            includeDescendants,
+            limit: PAGE_LIMIT,
+            rootId: root.id,
+            sort: listMediaSort(sort)
+          });
         if (
           requestGeneration !== mediaPageGeneration.current ||
           (scanRefreshSelectionToken &&
@@ -752,6 +765,7 @@ export function useLibraryData(): LibraryState {
         scope && "folderId" in scope
           ? scope.folderId ?? null
           : result.selectedFolderId ?? root?.rootFolderId ?? null;
+      const includeDescendants = showChildFolderContentsRef.current;
 
       if (folderId) {
         setExpandedFolderIds((current) => new Set(current).add(folderId));
@@ -768,6 +782,7 @@ export function useLibraryData(): LibraryState {
         const sort = searchStateRef.current.sort;
         const mediaPage = searchActiveRef.current
           ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
+              includeDescendants,
               rootId: root.id,
               folderId: folderFilter,
               cursor: cursor ?? undefined,
@@ -776,6 +791,7 @@ export function useLibraryData(): LibraryState {
           : await client.listMedia({
               cursor: cursor ?? undefined,
               folderId: folderFilter,
+              includeDescendants,
               limit: PAGE_LIMIT,
               rootId: root.id,
               sort: listMediaSort(sort)
@@ -825,6 +841,17 @@ export function useLibraryData(): LibraryState {
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
   }, [searchState.q, debouncedQ]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        SHOW_SUBFOLDER_CONTENTS_STORAGE_KEY,
+        showChildFolderContents ? "1" : "0"
+      );
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [showChildFolderContents]);
 
   // Reload media when filters/sort/debounced-q change
   useEffect(() => {
@@ -1123,6 +1150,7 @@ export function useLibraryData(): LibraryState {
 
     const folderFilter =
       selectedFolderId && selectedFolderId !== root.rootFolderId ? selectedFolderId : undefined;
+    const includeDescendants = showChildFolderContentsRef.current;
     const cursor = mediaNextCursor;
     const requestGeneration = mediaPageGeneration.current;
     const requestKey = mediaPageRequestKey(root.id, folderFilter, cursor);
@@ -1140,6 +1168,7 @@ export function useLibraryData(): LibraryState {
       const sort = searchStateRef.current.sort;
       const mediaPage = searchActiveRef.current
         ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
+            includeDescendants,
             rootId: root.id,
             folderId: folderFilter,
             cursor: cursor ?? undefined,
@@ -1148,6 +1177,7 @@ export function useLibraryData(): LibraryState {
         : await client.listMedia({
             cursor: cursor ?? undefined,
             folderId: folderFilter,
+            includeDescendants,
             limit: PAGE_LIMIT,
             rootId: root.id,
             sort: listMediaSort(sort)
@@ -1625,6 +1655,7 @@ export function useLibraryData(): LibraryState {
     roots,
     folders,
     media,
+    showChildFolderContents,
     selectedRootId,
     selectedFolderId,
     selectedMediaId,
@@ -1690,6 +1721,20 @@ export function useLibraryData(): LibraryState {
       void reloadCurrentMedia({
         rootId: folder.rootId,
         folderId: folder.id,
+        setLoadingState: true
+      }).catch((cause) => {
+        setError(errorMessage(cause));
+      });
+    },
+    toggleShowChildFolderContents: () => {
+      const nextShowChildFolderContents = !showChildFolderContentsRef.current;
+      showChildFolderContentsRef.current = nextShowChildFolderContents;
+      setShowChildFolderContents(nextShowChildFolderContents);
+      prepareNavigationMediaReload();
+      void reloadCurrentMedia({
+        rootId: selectedRootIdRef.current ?? undefined,
+        folderId: selectedFolderIdRef.current,
+        includeDescendants: nextShowChildFolderContents,
         setLoadingState: true
       }).catch((cause) => {
         setError(errorMessage(cause));
@@ -1932,7 +1977,13 @@ function isTaskActive(task: TaskRecord): boolean {
 function buildSearchParams(
   state: SearchState,
   debouncedQ: string,
-  scope: { rootId: number; folderId: number | undefined; cursor?: string; limit: number }
+  scope: {
+    rootId: number;
+    folderId: number | undefined;
+    includeDescendants: boolean;
+    cursor?: string;
+    limit: number;
+  }
 ): SearchParams {
   const params: SearchParams = {
     rootId: scope.rootId,
@@ -1940,7 +1991,10 @@ function buildSearchParams(
     sort: state.sort
   };
   if (scope.cursor) params.cursor = scope.cursor;
-  if (scope.folderId !== undefined) params.folderId = scope.folderId;
+  if (scope.folderId !== undefined) {
+    params.folderId = scope.folderId;
+    params.includeDescendants = scope.includeDescendants;
+  }
   const q = debouncedQ.trim();
   if (q) params.q = q;
   if (state.kind) params.kind = state.kind;
@@ -1978,4 +2032,12 @@ function fileOpFailure(cause: unknown): FileOpResult {
     ok: false,
     message: errorMessage(cause)
   };
+}
+
+function readStoredShowChildFolderContents(): boolean {
+  try {
+    return window.localStorage.getItem(SHOW_SUBFOLDER_CONTENTS_STORAGE_KEY) !== "0";
+  } catch {
+    return true;
+  }
 }

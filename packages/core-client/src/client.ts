@@ -239,6 +239,9 @@ function query(params: QueryParams): string {
   const search = new URLSearchParams();
   if ("rootId" in params && params.rootId) search.set("rootId", String(params.rootId));
   if ("folderId" in params && params.folderId) search.set("folderId", String(params.folderId));
+  if ("includeDescendants" in params && typeof params.includeDescendants === "boolean") {
+    search.set("includeDescendants", params.includeDescendants ? "true" : "false");
+  }
   if (params.limit) search.set("limit", String(params.limit));
   if (params.cursor) search.set("cursor", params.cursor);
   if ("sort" in params && params.sort) search.set("sort", params.sort);
@@ -257,6 +260,9 @@ function searchQuery(params: SearchParams): string {
   if (params.q) search.set("q", params.q);
   if (params.rootId) search.set("rootId", String(params.rootId));
   if (params.folderId) search.set("folderId", String(params.folderId));
+  if (typeof params.includeDescendants === "boolean") {
+    search.set("includeDescendants", params.includeDescendants ? "true" : "false");
+  }
   if (params.kind) search.set("kind", params.kind);
   if (typeof params.minRating === "number") search.set("minRating", String(params.minRating));
   if (typeof params.favorite === "boolean") search.set("favorite", params.favorite ? "true" : "false");

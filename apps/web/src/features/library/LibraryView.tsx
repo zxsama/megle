@@ -1,21 +1,22 @@
 import { useEffect, useState } from "react";
 import type { MediaRecord, RootRecord } from "@megle/core-client";
+import { Check } from "lucide-react";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassButton } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
+import type { LibraryGridPreferences } from "../media-grid/gridPreferences";
 import type { LibraryLayoutMode } from "../media-grid/layoutMode";
 import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
-import { SubfolderContentGallery } from "./SubfolderContentGallery";
 import { SubfolderStrip } from "./SubfolderStrip";
 import { useFolderCovers } from "./useFolderCovers";
 
 const AHEAD_THUMBNAIL_ROW_COUNT = 4;
-const SUBFOLDER_CONTENT_STORAGE_KEY = "megle.library.subfolder-content-open";
 const SUBFOLDER_STRIP_COLLAPSED_STORAGE_KEY = "megle.library.subfolder-strip-collapsed";
 
 interface LibraryViewProps {
+  gridPreferences: LibraryGridPreferences;
   library: LibraryState;
   layoutMode: LibraryLayoutMode;
   previewOpen: boolean;
@@ -37,6 +38,7 @@ interface LibraryViewProps {
 }
 
 export function LibraryView({
+  gridPreferences,
   library,
   layoutMode,
   onClosePreview,
@@ -51,6 +53,7 @@ export function LibraryView({
   return (
     <>
       <LibraryCenterPane
+        gridPreferences={gridPreferences}
         library={library}
         layoutMode={layoutMode}
         onClosePreview={onClosePreview}
@@ -68,6 +71,7 @@ export function LibraryView({
 }
 
 export function LibraryCenterPane({
+  gridPreferences,
   library,
   layoutMode,
   onClosePreview,
@@ -87,9 +91,6 @@ export function LibraryCenterPane({
     library.selectedRootId,
     library.selectedFolderId
   );
-  const [showChildFolderContents, setShowChildFolderContents] = useState<boolean>(() =>
-    readStoredSubfolderContentOpen()
-  );
   const [subfolderStripCollapsed, setSubfolderStripCollapsed] = useState<boolean>(() =>
     readStoredSubfolderStripCollapsed()
   );
@@ -98,23 +99,13 @@ export function LibraryCenterPane({
   const childFoldersLoading = currentFolderId ? library.loadingFolderIds.has(currentFolderId) : false;
   const showSubfolderStrip = !previewMedia && (childFolders.length > 0 || childFoldersLoading);
   const coverMediaByFolderId = useFolderCovers(childFolders);
+  const contentCountLabel = `${library.media.length}${library.mediaHasMore ? "+" : ""}`;
 
   useEffect(() => {
     if (previewOpen && !selectedMedia) {
       onClosePreview();
     }
   }, [onClosePreview, previewOpen, selectedMedia]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        SUBFOLDER_CONTENT_STORAGE_KEY,
-        showChildFolderContents ? "1" : "0"
-      );
-    } catch {
-      // Ignore storage failures.
-    }
-  }, [showChildFolderContents]);
 
   useEffect(() => {
     try {
@@ -157,34 +148,34 @@ export function LibraryCenterPane({
                   coverMediaByFolderId={coverMediaByFolderId}
                   folders={childFolders}
                   loading={childFoldersLoading}
-                  showChildContents={showChildFolderContents}
                   onToggleCollapsed={() => setSubfolderStripCollapsed((current) => !current)}
                   onSelectFolder={library.setSelectedFolder}
-                  onToggleShowChildContents={() => setShowChildFolderContents((current) => !current)}
                   selectedFolderId={library.selectedFolderId}
                 />
               ) : null}
               <div className="library-browser-content">
                 <div className="library-browser-content-header">
-                  <div className="library-browser-content-title">
-                    {showChildFolderContents ? "Child folder contents" : "Contents"}
-                  </div>
-                  <div className="library-browser-content-subtitle">
-                    {showChildFolderContents
-                      ? `${childFolders.length} folder${childFolders.length === 1 ? "" : "s"}`
-                      : `${library.media.length} item${library.media.length === 1 ? "" : "s"}`}
-                  </div>
+                  <div className="library-browser-content-title">{`Contents (${contentCountLabel})`}</div>
+                  {showSubfolderStrip ? (
+                    <label className="library-browser-content-toggle">
+                      <input
+                        checked={library.showChildFolderContents}
+                        onChange={() => library.toggleShowChildFolderContents()}
+                        type="checkbox"
+                      />
+                      <span className="library-browser-content-toggle-indicator" aria-hidden="true">
+                        <Check size={12} />
+                      </span>
+                      <span className="library-browser-content-toggle-label">
+                        Show child folder contents
+                      </span>
+                    </label>
+                  ) : null}
                 </div>
-                {showChildFolderContents ? (
-                  <SubfolderContentGallery
-                    coverMediaByFolderId={coverMediaByFolderId}
-                    folders={childFolders}
-                    onSelectFolder={library.setSelectedFolder}
-                    selectedFolderId={library.selectedFolderId}
-                  />
-                ) : renderEmptyState({ library, selectedRoot }) ?? (
+                {renderEmptyState({ library, selectedRoot }) ?? (
                   <MediaGrid
                     aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
+                    gridPreferences={gridPreferences}
                     hasMore={library.mediaHasMore}
                     items={library.media}
                     layoutMode={layoutMode}
@@ -276,8 +267,10 @@ function renderEmptyState({
           Add image or video files in{" "}
           <code className="grid-empty-path" title={selectedRoot.path}>
             {selectedRoot.path}
-          </code>{" "}
-          and they&rsquo;ll appear here.
+          </code>
+          {library.showChildFolderContents
+            ? " or its child folders and they\u2019ll appear here."
+            : " and they\u2019ll appear here."}
         </p>
       </div>
     );
@@ -292,14 +285,6 @@ function mediaScrollPositionKey(
   folderId: number | null
 ): string {
   return `${layoutMode}:${rootId ?? "root"}:${folderId ?? "folder"}`;
-}
-
-function readStoredSubfolderContentOpen(): boolean {
-  try {
-    return window.localStorage.getItem(SUBFOLDER_CONTENT_STORAGE_KEY) !== "0";
-  } catch {
-    return true;
-  }
 }
 
 function readStoredSubfolderStripCollapsed(): boolean {

@@ -42,6 +42,7 @@ pub struct RootRecord {
 pub struct MediaPageQuery {
     pub root_id: Option<i64>,
     pub folder_id: Option<i64>,
+    pub include_descendants: bool,
     pub limit: i64,
     pub cursor: Option<String>,
     pub sort: String,
@@ -364,6 +365,7 @@ pub struct SearchQuery {
     pub q: Option<String>,
     pub root_id: Option<i64>,
     pub folder_id: Option<i64>,
+    pub include_descendants: bool,
     pub kind: Option<String>,
     pub min_rating: Option<i64>,
     pub favorite: Option<bool>,
@@ -1830,7 +1832,23 @@ impl Database {
             parameters.push(Value::Integer(root_id));
         }
         if let Some(folder_id) = query.folder_id {
-            predicates.push("files.folder_id = ?".to_string());
+            if query.include_descendants {
+                predicates.push(
+                    r#"files.folder_id IN (
+                        WITH RECURSIVE descendant_folders(id) AS (
+                            SELECT id FROM folders WHERE id = ?
+                            UNION ALL
+                            SELECT folders.id
+                            FROM folders
+                            JOIN descendant_folders ON folders.parent_id = descendant_folders.id
+                        )
+                        SELECT id FROM descendant_folders
+                    )"#
+                    .to_string(),
+                );
+            } else {
+                predicates.push("files.folder_id = ?".to_string());
+            }
             parameters.push(Value::Integer(folder_id));
         }
         if let Some(kind) = query.kind.as_deref() {
@@ -3620,7 +3638,23 @@ impl Database {
             parameters.push(Value::Integer(root_id));
         }
         if let Some(folder_id) = query.folder_id {
-            predicates.push("files.folder_id = ?".to_string());
+            if query.include_descendants {
+                predicates.push(
+                    r#"files.folder_id IN (
+                        WITH RECURSIVE descendant_folders(id) AS (
+                            SELECT id FROM folders WHERE id = ?
+                            UNION ALL
+                            SELECT folders.id
+                            FROM folders
+                            JOIN descendant_folders ON folders.parent_id = descendant_folders.id
+                        )
+                        SELECT id FROM descendant_folders
+                    )"#
+                    .to_string(),
+                );
+            } else {
+                predicates.push("files.folder_id = ?".to_string());
+            }
             parameters.push(Value::Integer(folder_id));
         }
         if let Some(kind) = query.kind.as_deref() {
@@ -6487,6 +6521,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 200,
                 cursor: None,
                 sort: "mtime_desc".to_string(),
@@ -6591,6 +6626,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -6709,6 +6745,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 100,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -6883,6 +6920,7 @@ mod tests {
                 .list_media_page(MediaPageQuery {
                     root_id: Some(root_id),
                     folder_id: Some(folder_id),
+                    include_descendants: false,
                     limit: 2,
                     cursor: None,
                     sort: sort.to_string(),
@@ -6896,6 +6934,7 @@ mod tests {
                 .list_media_page(MediaPageQuery {
                     root_id: Some(root_id),
                     folder_id: Some(folder_id),
+                    include_descendants: false,
                     limit: 2,
                     cursor: Some(cursor),
                     sort: sort.to_string(),
@@ -6951,6 +6990,95 @@ mod tests {
     }
 
     #[test]
+    fn list_media_page_optionally_includes_descendant_folder_media() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let root_folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "root-hash".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let child_folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: Some(root_folder_id),
+                name: "child".to_string(),
+                path_hash: "child-hash".to_string(),
+                mtime: Some(2),
+            })
+            .expect("insert child folder");
+        let grandchild_folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: Some(child_folder_id),
+                name: "grandchild".to_string(),
+                path_hash: "grandchild-hash".to_string(),
+                mtime: Some(3),
+            })
+            .expect("insert grandchild folder");
+
+        for (folder_id, name, mtime) in [
+            (root_folder_id, "root.jpg", 10),
+            (child_folder_id, "child.jpg", 20),
+            (grandchild_folder_id, "grandchild.jpg", 30),
+        ] {
+            let file_id = database
+                .upsert_file(FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: name.to_string(),
+                    ext: ".jpg".to_string(),
+                    size: 1024,
+                    mtime,
+                    ctime: None,
+                    file_key: None,
+                })
+                .expect("insert descendant test file");
+            database
+                .upsert_media_kind(file_id, "image")
+                .expect("insert descendant test media");
+        }
+
+        let direct_page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(child_folder_id),
+                include_descendants: false,
+                limit: 10,
+                cursor: None,
+                sort: "mtime_desc".to_string(),
+                kind: Some("image".to_string()),
+            })
+            .expect("list direct folder media");
+        assert_eq!(media_names(&direct_page.items), vec!["child.jpg"]);
+
+        let descendant_page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(child_folder_id),
+                include_descendants: true,
+                limit: 10,
+                cursor: None,
+                sort: "mtime_desc".to_string(),
+                kind: Some("image".to_string()),
+            })
+            .expect("list descendant folder media");
+        assert_eq!(
+            media_names(&descendant_page.items),
+            vec!["grandchild.jpg", "child.jpg"]
+        );
+    }
+
+    #[test]
     fn disabled_root_is_hidden_from_roots_and_media_and_rejects_scan_tasks() {
         let database = migrated_database();
         let (root_id, _folder_id) = seed_media_page_fixture(&database);
@@ -6961,6 +7089,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -6999,6 +7128,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -7226,6 +7356,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -8066,8 +8197,8 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_task_attempt_state_update_waits_for_concurrent_writer_instead_of_returning_locked(
-    ) {
+    fn thumbnail_task_attempt_state_update_waits_for_concurrent_writer_instead_of_returning_locked()
+    {
         let db_dir = unique_db_temp_dir("thumbnail-attempt-lock");
         std::fs::create_dir_all(&db_dir).expect("create temp db dir");
         let db_path = db_dir.join("megle.sqlite");
@@ -8133,8 +8264,8 @@ mod tests {
         let updater = Database::open(&db_path).expect("open updater database");
         let (update_sender, update_receiver) = std::sync::mpsc::channel();
         let update_thread = std::thread::spawn(move || {
-            let result =
-                updater.upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
+            let result = updater
+                .upsert_thumbnail_state_if_source_fingerprint_and_task_attempt_current(
                     ThumbnailStateUpsert {
                         file_id,
                         profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
@@ -8654,14 +8785,20 @@ mod tests {
         assert_eq!(second.task_id, Some(task_id));
         assert!(!second.queued);
         assert_eq!(second.thumbnail.state, "pending");
-        assert_eq!(second.thumbnail.source_fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(
+            second.thumbnail.source_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
 
         let stored = database
             .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("get thumbnail")
             .expect("thumbnail exists");
         assert_eq!(stored.state, "pending");
-        assert_eq!(stored.source_fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(
+            stored.source_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
 
         let task = database
             .get_task(task_id)
@@ -8732,14 +8869,20 @@ mod tests {
         assert_eq!(second.task_id, Some(task_id));
         assert!(!second.queued);
         assert_eq!(second.thumbnail.state, "pending");
-        assert_eq!(second.thumbnail.source_fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(
+            second.thumbnail.source_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
 
         let stored = database
             .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("get thumbnail")
             .expect("thumbnail exists");
         assert_eq!(stored.state, "pending");
-        assert_eq!(stored.source_fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(
+            stored.source_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
 
         let task = database
             .get_task(task_id)
@@ -9942,6 +10085,7 @@ mod tests {
                 q: Some("alpha".to_string()),
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 kind: None,
                 min_rating: None,
                 favorite: None,
@@ -9959,6 +10103,7 @@ mod tests {
                 q: Some("holiday".to_string()),
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 kind: None,
                 min_rating: None,
                 favorite: None,
@@ -10017,6 +10162,7 @@ mod tests {
                 q: None,
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 kind: Some("image".to_string()),
                 min_rating: Some(3),
                 favorite: Some(true),
@@ -10067,6 +10213,7 @@ mod tests {
                 q: None,
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 kind: None,
                 min_rating: None,
                 favorite: None,
@@ -10098,6 +10245,7 @@ mod tests {
                 q: None,
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 kind: Some("image".to_string()),
                 min_rating: None,
                 favorite: None,
@@ -10136,6 +10284,7 @@ mod tests {
                 q: Some("ZebraTag".to_string()),
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 kind: None,
                 min_rating: None,
                 favorite: None,
@@ -10160,6 +10309,7 @@ mod tests {
                 q: Some("ZebraTag".to_string()),
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 kind: None,
                 min_rating: None,
                 favorite: None,
@@ -10229,6 +10379,7 @@ mod tests {
                 q: None,
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 kind: Some("image".to_string()),
                 min_rating: None,
                 favorite: None,

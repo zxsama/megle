@@ -3,17 +3,28 @@ import { useState, type KeyboardEvent } from "react";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassSurface, type InterfaceStyleController } from "../../design/liquid-glass";
 import {
+  LIBRARY_GRID_PREFERENCE_LIMITS,
+  type LibraryGridPreferences
+} from "../media-grid/gridPreferences";
+import {
   normalizeShortcutEvent,
   useShortcutBindings,
   type ShortcutActionId
 } from "../shortcuts/shortcutBindings";
 
 interface SettingsViewProps {
+  gridPreferences: LibraryGridPreferences;
   interfaceStyle: InterfaceStyleController;
   library: LibraryState;
+  onGridPreferencesChange: (patch: Partial<LibraryGridPreferences>) => void;
 }
 
-export function SettingsView({ interfaceStyle, library }: SettingsViewProps) {
+export function SettingsView({
+  gridPreferences,
+  interfaceStyle,
+  library,
+  onGridPreferencesChange
+}: SettingsViewProps) {
   const diagnostics = library.diagnostics;
   const probed = library.diagnosticsProbed;
   const ffmpegAvailable = diagnostics?.ffmpegAvailable;
@@ -73,6 +84,11 @@ export function SettingsView({ interfaceStyle, library }: SettingsViewProps) {
 
         <InterfaceStyleSection interfaceStyle={interfaceStyle} />
 
+        <LibraryGridSection
+          gridPreferences={gridPreferences}
+          onGridPreferencesChange={onGridPreferencesChange}
+        />
+
         <LiquidGlassSurface
           as="section"
           className="settings-section"
@@ -101,6 +117,54 @@ export function SettingsView({ interfaceStyle, library }: SettingsViewProps) {
         <ShortcutBindingsEditor />
       </div>
     </section>
+  );
+}
+
+function LibraryGridSection({
+  gridPreferences,
+  onGridPreferencesChange
+}: {
+  gridPreferences: LibraryGridPreferences;
+  onGridPreferencesChange: (patch: Partial<LibraryGridPreferences>) => void;
+}) {
+  return (
+    <LiquidGlassSurface
+      as="section"
+      className="settings-section"
+      aria-labelledby="settings-library-grid-title"
+      interactive
+      scrollable
+      tone="panel"
+    >
+      <h2 className="settings-section-title" id="settings-library-grid-title">
+        Library grid
+      </h2>
+      <p className="settings-section-copy">
+        Adjust spacing between thumbnails and the vertical space reserved for media names.
+      </p>
+      <div className="settings-style-group">
+        <StyleSlider
+          id="library-grid-gap"
+          label="Thumbnail gap"
+          max={LIBRARY_GRID_PREFERENCE_LIMITS.tileGap.max}
+          min={LIBRARY_GRID_PREFERENCE_LIMITS.tileGap.min}
+          onChange={(tileGap) => onGridPreferencesChange({ tileGap })}
+          step={LIBRARY_GRID_PREFERENCE_LIMITS.tileGap.step}
+          unit="px"
+          value={gridPreferences.tileGap}
+        />
+        <StyleSlider
+          id="library-grid-label-height"
+          label="Name spacing"
+          max={LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.max}
+          min={LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.min}
+          onChange={(tileLabelHeight) => onGridPreferencesChange({ tileLabelHeight })}
+          step={LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.step}
+          unit="px"
+          value={gridPreferences.tileLabelHeight}
+        />
+      </div>
+    </LiquidGlassSurface>
   );
 }
 

@@ -1868,6 +1868,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -1881,6 +1882,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -2028,6 +2030,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -2049,6 +2052,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -2179,6 +2183,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -2217,6 +2222,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -2238,6 +2244,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -2506,7 +2513,10 @@ mod tests {
             .expect("get background task after yield")
             .expect("background task exists after yield");
         assert_eq!(background_task.status, "pending");
-        assert_eq!(background_task.priority, crate::db::THUMBNAIL_BACKGROUND_PRIORITY);
+        assert_eq!(
+            background_task.priority,
+            crate::db::THUMBNAIL_BACKGROUND_PRIORITY
+        );
         assert!(background_task.attempt_generation > old_attempt);
 
         let selected_task = database
@@ -2530,7 +2540,10 @@ mod tests {
 
         let selected_result =
             run_thumbnail_task_with_cache(&mut database, selected_task.id, &cache_root, true);
-        assert!(selected_result.is_ok(), "selected thumbnail should run successfully");
+        assert!(
+            selected_result.is_ok(),
+            "selected thumbnail should run successfully"
+        );
 
         let thumbnail = database
             .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
@@ -2608,29 +2621,26 @@ mod tests {
             .expect("reopened database");
         let injected = Arc::new(AtomicBool::new(false));
         let hook_injected = Arc::clone(&injected);
-        let _hook_guard = set_thumbnail_processing_checkpoint_hook_for_test(Box::new(move |task_id| {
-            if task_id != old_visible_task_id || hook_injected.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            hook_database
-                .request_thumbnail_task(
-                    new_visible_file_id,
-                    crate::thumbnails::GRID_320_PROFILE,
-                    crate::db::ThumbnailTaskPriority::Visible,
-                )
-                .expect("request new visible thumbnail during checkpoint");
-            hook_database
-                .sync_thumbnail_priority_scope(root_id, &[], &[new_visible_file_id], &[])
-                .expect("sync scope to demote old visible task");
-        }));
+        let _hook_guard =
+            set_thumbnail_processing_checkpoint_hook_for_test(Box::new(move |task_id| {
+                if task_id != old_visible_task_id || hook_injected.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                hook_database
+                    .request_thumbnail_task(
+                        new_visible_file_id,
+                        crate::thumbnails::GRID_320_PROFILE,
+                        crate::db::ThumbnailTaskPriority::Visible,
+                    )
+                    .expect("request new visible thumbnail during checkpoint");
+                hook_database
+                    .sync_thumbnail_priority_scope(root_id, &[], &[new_visible_file_id], &[])
+                    .expect("sync scope to demote old visible task");
+            }));
 
-        let error = run_thumbnail_task_with_cache(
-            &mut database,
-            old_visible_task_id,
-            &cache_root,
-            true,
-        )
-        .expect_err("old visible thumbnail should yield after scope demotion");
+        let error =
+            run_thumbnail_task_with_cache(&mut database, old_visible_task_id, &cache_root, true)
+                .expect_err("old visible thumbnail should yield after scope demotion");
 
         assert!(
             error.to_string().contains("yield"),
@@ -2642,7 +2652,10 @@ mod tests {
             .expect("get old visible task after yield")
             .expect("old visible task exists after yield");
         assert_eq!(old_visible_task.status, "pending");
-        assert_eq!(old_visible_task.priority, crate::db::THUMBNAIL_BACKGROUND_PRIORITY);
+        assert_eq!(
+            old_visible_task.priority,
+            crate::db::THUMBNAIL_BACKGROUND_PRIORITY
+        );
         assert!(old_visible_task.attempt_generation > old_attempt);
 
         let new_visible_task = database
@@ -3196,11 +3209,17 @@ mod tests {
         }));
 
         let sender = start_worker_with_ffmpeg(database, true);
-        sender.send(first_task_id).await.expect("send first root scan");
+        sender
+            .send(first_task_id)
+            .await
+            .expect("send first root scan");
         timeout(Duration::from_secs(5), first_scan_started_notify.notified())
             .await
             .expect("first scan should start");
-        sender.send(second_task_id).await.expect("send second root scan");
+        sender
+            .send(second_task_id)
+            .await
+            .expect("send second root scan");
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(
             started_count.load(Ordering::SeqCst),
@@ -3281,6 +3300,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(root_folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -3296,6 +3316,7 @@ mod tests {
             .list_media_page(crate::db::MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(root_folder_id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),

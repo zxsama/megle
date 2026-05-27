@@ -97,6 +97,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/rootIdQuery"
         - $ref: "#/components/parameters/folderIdQuery"
+        - name: includeDescendants
+          in: query
+          description: Include media from descendant folders when folderId is set.
+          schema:
+            type: boolean
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/cursor"
         - name: sort
@@ -658,6 +663,11 @@ paths:
             type: string
         - $ref: "#/components/parameters/rootIdQuery"
         - $ref: "#/components/parameters/folderIdQuery"
+        - name: includeDescendants
+          in: query
+          description: Include media from descendant folders when folderId is set.
+          schema:
+            type: boolean
         - name: kind
           in: query
           schema:

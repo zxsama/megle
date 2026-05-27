@@ -1,19 +1,16 @@
-import { Folder, FolderOpen, Images, PanelTopClose, PanelTopOpen } from "lucide-react";
+import { ChevronDown, ChevronUp, Folder } from "lucide-react";
 import { useMemo } from "react";
 import type { FolderRecord, MediaRecord } from "@megle/core-client";
-import { LiquidGlassButton } from "../../design/liquid-glass";
 import { previewPlaceholderDataUrl } from "../../core/mediaResources";
 
 interface SubfolderStripProps {
   collapsed: boolean;
-  coverMediaByFolderId: Map<number, MediaRecord | null>;
+  coverMediaByFolderId: Map<number, MediaRecord[]>;
   folders: FolderRecord[];
   loading: boolean;
-  showChildContents: boolean;
   selectedFolderId: number | null;
   onToggleCollapsed: () => void;
   onSelectFolder: (folder: FolderRecord) => void;
-  onToggleShowChildContents: () => void;
 }
 
 export function SubfolderStrip({
@@ -21,20 +18,18 @@ export function SubfolderStrip({
   coverMediaByFolderId,
   folders,
   loading,
-  showChildContents,
   onToggleCollapsed,
   onSelectFolder,
-  onToggleShowChildContents,
   selectedFolderId
 }: SubfolderStripProps) {
-  const subtitle = useMemo(() => {
+  const title = useMemo(() => {
     if (loading && folders.length === 0) {
-      return "Loading child folders";
+      return "Subfolders";
     }
     if (folders.length === 0) {
-      return "No child folders";
+      return "Subfolders (0)";
     }
-    return `${folders.length} child folder${folders.length === 1 ? "" : "s"}`;
+    return `Subfolders (${folders.length})`;
   }, [folders.length, loading]);
 
   return (
@@ -44,48 +39,24 @@ export function SubfolderStrip({
     >
       <header className="subfolder-strip-header">
         <div className="subfolder-strip-copy">
-          <div className="subfolder-strip-title">Subfolders</div>
-          <div className="subfolder-strip-subtitle">{subtitle}</div>
+          <div className="subfolder-strip-title">{title}</div>
         </div>
-        <div className="subfolder-strip-actions">
-          <LiquidGlassButton
-            aria-label={showChildContents ? "Hide child folder contents" : "Show child folder contents"}
-            aria-pressed={showChildContents}
-            active={showChildContents}
-            className="subfolder-strip-toggle"
-            onClick={onToggleShowChildContents}
-            title={showChildContents ? "Hide child folder contents" : "Show child folder contents"}
-            tone="control"
-            type="button"
-          >
-            <Images aria-hidden="true" size={15} />
-            <span>Show child folder contents</span>
-          </LiquidGlassButton>
-          <LiquidGlassButton
-            aria-label={collapsed ? "Expand child folders" : "Collapse child folders"}
-            aria-pressed={!collapsed}
-            active={!collapsed}
-            className="subfolder-strip-icon-toggle"
-            onClick={onToggleCollapsed}
-            title={collapsed ? "Expand child folders" : "Collapse child folders"}
-            tone="control"
-            type="button"
-          >
-            {collapsed ? (
-              <PanelTopOpen aria-hidden="true" size={15} />
-            ) : (
-              <PanelTopClose aria-hidden="true" size={15} />
-            )}
-          </LiquidGlassButton>
-        </div>
+        <button
+          aria-label={collapsed ? "Expand child folders" : "Collapse child folders"}
+          className="subfolder-strip-icon-toggle"
+          onClick={onToggleCollapsed}
+          title={collapsed ? "Expand child folders" : "Collapse child folders"}
+          type="button"
+        >
+          {collapsed ? <ChevronDown aria-hidden="true" size={15} /> : <ChevronUp aria-hidden="true" size={15} />}
+        </button>
       </header>
       {!collapsed ? (
         <div className="subfolder-strip-scroller" role="list">
           {folders.length > 0 ? (
             folders.map((folder) => {
               const selected = folder.id === selectedFolderId;
-              const coverMedia = coverMediaByFolderId.get(folder.id) ?? null;
-              const coverUrl = coverMedia ? previewPlaceholderDataUrl(coverMedia) : null;
+              const coverMedia = coverMediaByFolderId.get(folder.id) ?? [];
               return (
                 <button
                   aria-pressed={selected}
@@ -96,13 +67,7 @@ export function SubfolderStrip({
                   type="button"
                 >
                   <span className="subfolder-card-thumb" aria-hidden="true">
-                    {coverUrl ? (
-                      <img alt="" className="subfolder-card-thumb-image" src={coverUrl} />
-                    ) : selected ? (
-                      <FolderOpen size={18} />
-                    ) : (
-                      <Folder size={18} />
-                    )}
+                    <FolderCoverStack coverMedia={coverMedia} />
                   </span>
                   <span className="subfolder-card-copy">
                     <span className="subfolder-card-name" title={folder.name}>
@@ -120,5 +85,33 @@ export function SubfolderStrip({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function FolderCoverStack({ coverMedia }: { coverMedia: MediaRecord[] }) {
+  if (coverMedia.length === 0) {
+    return (
+      <span className="subfolder-card-thumb-fallback">
+        <Folder size={18} />
+      </span>
+    );
+  }
+
+  return (
+    <span className="subfolder-card-thumb-stack">
+      {coverMedia.slice(0, 3).map((media, index) => {
+        const coverUrl = previewPlaceholderDataUrl(media);
+        return (
+          <span
+            className={`subfolder-card-thumb-layer subfolder-card-thumb-layer-${index + 1}`}
+            key={media.id}
+          >
+            {coverUrl ? (
+              <img alt="" className="subfolder-card-thumb-image" src={coverUrl} />
+            ) : null}
+          </span>
+        );
+      })}
+    </span>
   );
 }

@@ -3,12 +3,11 @@ import type { FolderRecord, MediaRecord } from "@megle/core-client";
 import { createCoreClient } from "../../core/client";
 
 const FOLDER_COVER_FETCH_LIMIT = 48;
+const FOLDER_COVER_MEDIA_LIMIT = 3;
 
-export function useFolderCovers(folders: FolderRecord[]): Map<number, MediaRecord | null> {
+export function useFolderCovers(folders: FolderRecord[]): Map<number, MediaRecord[]> {
   const client = useMemo(() => createCoreClient(), []);
-  const [coversByFolderId, setCoversByFolderId] = useState<Map<number, MediaRecord | null>>(
-    () => new Map()
-  );
+  const [coversByFolderId, setCoversByFolderId] = useState<Map<number, MediaRecord[]>>(() => new Map());
 
   useEffect(() => {
     const targetFolders = folders.slice(0, FOLDER_COVER_FETCH_LIMIT);
@@ -23,13 +22,14 @@ export function useFolderCovers(folders: FolderRecord[]): Map<number, MediaRecor
         try {
           const page = await client.listMedia({
             folderId: folder.id,
-            limit: 1,
+            includeDescendants: true,
+            limit: FOLDER_COVER_MEDIA_LIMIT,
             rootId: folder.rootId,
             sort: "mtime_desc"
           });
-          return [folder.id, page.items[0] ?? null] as const;
+          return [folder.id, page.items] as const;
         } catch {
-          return [folder.id, null] as const;
+          return [folder.id, [] as MediaRecord[]] as const;
         }
       })
     ).then((entries) => {

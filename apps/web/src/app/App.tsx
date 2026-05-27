@@ -48,6 +48,11 @@ import {
   isLibraryLayoutMode,
   type LibraryLayoutMode
 } from "../features/media-grid/layoutMode";
+import {
+  readStoredLibraryGridPreferences,
+  storeLibraryGridPreferences,
+  type LibraryGridPreferences
+} from "../features/media-grid/gridPreferences";
 import { OnboardingHero } from "../features/onboarding/OnboardingHero";
 import { PluginsView } from "../features/plugins/PluginsView";
 import { SettingsView } from "../features/settings/SettingsView";
@@ -81,6 +86,9 @@ export function App() {
     useState<PreviewViewCommands | null>(null);
   const [layoutMode, setLayoutMode] = useState<LibraryLayoutMode>(() =>
     readStoredLibraryLayoutMode()
+  );
+  const [gridPreferences, setGridPreferences] = useState<LibraryGridPreferences>(() =>
+    readStoredLibraryGridPreferences()
   );
   const selectedMediaIndex = library.media.findIndex(
     (item) => item.id === library.selectedMediaId
@@ -126,6 +134,10 @@ export function App() {
       // Ignore storage failures in hardened/browser-restricted environments.
     }
   }, [layoutMode]);
+
+  useEffect(() => {
+    storeLibraryGridPreferences(gridPreferences);
+  }, [gridPreferences]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -429,6 +441,7 @@ export function App() {
         />
       ) : (
         <LibraryCenterPane
+          gridPreferences={gridPreferences}
           library={library}
           layoutMode={layoutMode}
           onClosePreview={handleClosePreview}
@@ -447,7 +460,16 @@ export function App() {
       return <PluginsView />;
     }
 
-    return <SettingsView interfaceStyle={interfaceStyle} library={library} />;
+    return (
+      <SettingsView
+        gridPreferences={gridPreferences}
+        interfaceStyle={interfaceStyle}
+        library={library}
+        onGridPreferencesChange={(patch) =>
+          setGridPreferences((current) => ({ ...current, ...patch }))
+        }
+      />
+    );
   }
 
   function renderRightPane() {

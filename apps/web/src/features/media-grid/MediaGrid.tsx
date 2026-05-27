@@ -10,6 +10,7 @@ import {
   type ThumbnailRequestPriority
 } from "../../core/mediaResources";
 import { workbenchLayout } from "../../design/tokens";
+import type { LibraryGridPreferences } from "./gridPreferences";
 import type { LibraryLayoutMode } from "./layoutMode";
 import {
   buildLayoutGeometry,
@@ -25,9 +26,14 @@ const VISIBLE_PRIORITY_ITEM_LIMIT = 10;
 const AHEAD_PRIORITY_ITEM_LIMIT = 10;
 const LOAD_MORE_ROW_HEIGHT = 52;
 const scrollPositionByKey = new Map<string, number>();
+type MediaGridCssVariables = CSSProperties & {
+  "--library-tile-label-gap": string;
+  "--library-tile-label-visible-height": string;
+};
 
 interface MediaGridProps {
   aheadRowCount?: number;
+  gridPreferences: LibraryGridPreferences;
   items: MediaRecord[];
   layoutMode: LibraryLayoutMode;
   selectedMediaId: number | null;
@@ -45,6 +51,7 @@ interface MediaGridProps {
 
 export function MediaGrid({
   aheadRowCount = AHEAD_THUMBNAIL_ROW_COUNT,
+  gridPreferences,
   items,
   layoutMode,
   selectedMediaId,
@@ -112,14 +119,14 @@ export function MediaGrid({
   const layout = useMemo(
     () =>
       buildLayoutGeometry({
-        gap: workbenchLayout.tileGap,
+        gap: gridPreferences.tileGap,
         items,
-        labelHeight: workbenchLayout.tileLabelHeight,
+        labelHeight: gridPreferences.tileLabelHeight,
         layoutMode,
         viewportWidth: viewportSize.width,
         tileMinWidth: workbenchLayout.tileMinWidth
       }),
-    [items, layoutMode, viewportSize.width]
+    [gridPreferences.tileGap, gridPreferences.tileLabelHeight, items, layoutMode, viewportSize.width]
   );
   const itemIndexById = useMemo(() => {
     const map = new Map<number, number>();
@@ -379,12 +386,26 @@ export function MediaGrid({
     }
   }
 
+  const tileLabelGap = resolveTileLabelGap(gridPreferences.tileLabelHeight);
+  const tileLabelVisibleHeight = Math.max(
+    12,
+    gridPreferences.tileLabelHeight - tileLabelGap
+  );
+  const gridStyle = useMemo<MediaGridCssVariables>(
+    () => ({
+      "--library-tile-label-gap": `${tileLabelGap}px`,
+      "--library-tile-label-visible-height": `${tileLabelVisibleHeight}px`
+    }),
+    [tileLabelGap, tileLabelVisibleHeight]
+  );
+
   return (
     <div
       aria-label={`Media ${layoutMode} view`}
       className={`virtual-grid virtual-grid--${layoutMode}`}
       ref={parentRef}
       role="grid"
+      style={gridStyle}
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
@@ -411,6 +432,7 @@ export function MediaGrid({
               }}
             >
               <MediaTile
+                labelGap={tileLabelGap}
                 item={item}
                 layoutMode={layoutMode}
                 onContextMenu={onContextMenu}
@@ -450,6 +472,7 @@ export function MediaGrid({
 }
 
 function MediaTile({
+  labelGap,
   item,
   layoutMode,
   onSelect,
@@ -459,6 +482,7 @@ function MediaTile({
   selected,
   thumbnail
 }: {
+  labelGap: number;
   item: MediaRecord;
   layoutMode: LibraryLayoutMode;
   onSelect: (mediaId: number) => void;
@@ -508,7 +532,7 @@ function MediaTile({
           : {
               display: "flex",
               flexDirection: "column",
-              gap: 6,
+              gap: labelGap,
               height: placement.frameHeight,
               padding: 0,
               width: "100%"
@@ -559,6 +583,10 @@ function MediaTile({
       )}
     </button>
   );
+}
+
+function resolveTileLabelGap(tileLabelHeight: number) {
+  return Math.max(1, Math.round(tileLabelHeight / 6));
 }
 
 function ThumbnailStateView({

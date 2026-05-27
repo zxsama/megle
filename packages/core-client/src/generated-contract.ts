@@ -173,6 +173,7 @@ export interface ListFolderChildrenParams {
 export interface ListMediaParams {
   rootId?: number;
   folderId?: number;
+  includeDescendants?: boolean;
   limit?: number;
   cursor?: string;
   sort?: "mtime_desc" | "mtime_asc" | "name_asc" | "name_desc";
@@ -183,6 +184,7 @@ export interface SearchParams {
   q?: string;
   rootId?: number;
   folderId?: number;
+  includeDescendants?: boolean;
   kind?: "image" | "video" | "other";
   minRating?: number;
   favorite?: boolean;

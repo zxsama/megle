@@ -543,6 +543,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -608,6 +609,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -647,6 +649,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(raw_folder.id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -698,6 +701,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -729,6 +733,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -766,6 +771,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -867,6 +873,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -1002,6 +1009,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -1039,6 +1047,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -1153,6 +1162,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: Some(selected_folder.id),
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -1251,6 +1261,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),
@@ -1275,6 +1286,7 @@ mod tests {
             .list_media_page(MediaPageQuery {
                 root_id: Some(root_id),
                 folder_id: None,
+                include_descendants: false,
                 limit: 10,
                 cursor: None,
                 sort: "name_asc".to_string(),

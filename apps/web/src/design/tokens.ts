@@ -3,8 +3,8 @@ export const workbenchLayout = {
   sidebarWidth: 292,
   taskPanelWidth: 320,
   tileMinWidth: 148,
-  tileGap: 14,
-  tileLabelHeight: 34
+  tileGap: 7,
+  tileLabelHeight: 17
 } as const;
 
 export const radiusTokens = {

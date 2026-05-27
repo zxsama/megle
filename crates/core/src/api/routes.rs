@@ -189,6 +189,8 @@ struct ListMediaQuery {
     root_id: Option<i64>,
     #[serde(rename = "folderId")]
     folder_id: Option<i64>,
+    #[serde(rename = "includeDescendants")]
+    include_descendants: Option<bool>,
     limit: Option<i64>,
     cursor: Option<String>,
     sort: Option<String>,
@@ -227,6 +229,8 @@ struct SearchMediaQuery {
     root_id: Option<i64>,
     #[serde(rename = "folderId")]
     folder_id: Option<i64>,
+    #[serde(rename = "includeDescendants")]
+    include_descendants: Option<bool>,
     kind: Option<String>,
     #[serde(rename = "minRating")]
     min_rating: Option<i64>,
@@ -531,6 +535,7 @@ async fn list_media(
         .list_media_page(MediaPageQuery {
             root_id: query.root_id,
             folder_id: query.folder_id,
+            include_descendants: query.include_descendants.unwrap_or(false),
             limit: query.limit.unwrap_or(200),
             cursor: query.cursor,
             sort,
@@ -1135,6 +1140,7 @@ async fn search_media(
             q: query.q,
             root_id: query.root_id,
             folder_id: query.folder_id,
+            include_descendants: query.include_descendants.unwrap_or(false),
             kind,
             min_rating: query.min_rating,
             favorite: query.favorite,
