@@ -311,6 +311,19 @@ export function MediaGrid({
     visibleMediaSignatureKey
   ]);
 
+  const tileLabelGap = resolveTileLabelGap(gridPreferences.tileLabelHeight);
+  const tileLabelVisibleHeight = Math.max(
+    12,
+    gridPreferences.tileLabelHeight - tileLabelGap
+  );
+  const gridStyle = useMemo<MediaGridCssVariables>(
+    () => ({
+      "--library-tile-label-gap": `${tileLabelGap}px`,
+      "--library-tile-label-visible-height": `${tileLabelVisibleHeight}px`
+    }),
+    [tileLabelGap, tileLabelVisibleHeight]
+  );
+
   if (loading && items.length === 0) {
     return renderLoadingState(layoutMode);
   }
@@ -385,19 +398,6 @@ export function MediaGrid({
       onOpenPreview(selectedMediaId);
     }
   }
-
-  const tileLabelGap = resolveTileLabelGap(gridPreferences.tileLabelHeight);
-  const tileLabelVisibleHeight = Math.max(
-    12,
-    gridPreferences.tileLabelHeight - tileLabelGap
-  );
-  const gridStyle = useMemo<MediaGridCssVariables>(
-    () => ({
-      "--library-tile-label-gap": `${tileLabelGap}px`,
-      "--library-tile-label-visible-height": `${tileLabelVisibleHeight}px`
-    }),
-    [tileLabelGap, tileLabelVisibleHeight]
-  );
 
   return (
     <div

@@ -511,7 +511,7 @@ function updateInteractiveAffordancePointers(clientX: number, clientY: number) {
       target.style.setProperty("--interactive-pointer-opacity", POINTER_OPACITY_HIDDEN);
       continue;
     }
-    const pointer = pointerPercentForRect(clientX, clientY, rect);
+    const pointer = interactiveAffordancePointerPercent(target, clientX, clientY, rect);
     const opacity = Math.pow(1 - distance / maxDistance, 1.55);
     target.dataset.interactivePointer = "active";
     target.style.setProperty("--interactive-pointer-x", `${pointer.x}%`);
@@ -542,6 +542,14 @@ function interactiveAffordanceDisabled(target: HTMLElement) {
     return true;
   }
   return target.matches(".settings-style-slider-control") && Boolean(target.querySelector("input:disabled"));
+}
+
+function interactiveAffordancePointerPercent(target: HTMLElement, clientX: number, clientY: number, rect: DOMRect) {
+  const pointer = pointerPercentForRect(clientX, clientY, rect);
+  if (target.matches(".settings-style-slider-control")) {
+    return { ...pointer, y: 50 };
+  }
+  return pointer;
 }
 
 function hideInteractiveAffordancePointers() {

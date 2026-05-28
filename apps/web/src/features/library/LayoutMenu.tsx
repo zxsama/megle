@@ -5,8 +5,9 @@ import {
   LayoutPanelTop,
   type LucideIcon
 } from "lucide-react";
-import type { KeyboardEvent } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
 import {
   LIBRARY_LAYOUT_MODES,
@@ -31,6 +32,24 @@ const LAYOUT_LABEL: Record<LibraryLayoutMode, string> = Object.fromEntries(
   LIBRARY_LAYOUT_MODES.map((option) => [option.value, option.label])
 ) as Record<LibraryLayoutMode, string>;
 
+const LAYOUT_MENU_MIN_WIDTH_PX = 180;
+const LAYOUT_MENU_OFFSET_Y_PX = 4;
+const LAYOUT_MENU_VIEWPORT_GUTTER_PX = 12;
+
+function layoutMenuPopoverStyle(triggerRect: DOMRect): CSSProperties {
+  const minWidth = Math.max(LAYOUT_MENU_MIN_WIDTH_PX, Math.round(triggerRect.width));
+  const maxLeft = Math.max(
+    LAYOUT_MENU_VIEWPORT_GUTTER_PX,
+    window.innerWidth - minWidth - LAYOUT_MENU_VIEWPORT_GUTTER_PX
+  );
+  return {
+    position: "fixed",
+    top: Math.round(triggerRect.bottom + LAYOUT_MENU_OFFSET_Y_PX),
+    left: Math.min(Math.max(LAYOUT_MENU_VIEWPORT_GUTTER_PX, Math.round(triggerRect.left)), maxLeft),
+    minWidth
+  };
+}
+
 export function LayoutMenu({
   iconOnly = true,
   onChange,
@@ -38,6 +57,7 @@ export function LayoutMenu({
   value
 }: LayoutMenuProps) {
   const [open, setOpen] = useState(false);
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties>();
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const selectedLabel = LAYOUT_LABEL[value];
@@ -75,6 +95,25 @@ export function LayoutMenu({
     return () => document.removeEventListener("keydown", handleDocumentKeyDown, true);
   }, [closeAndReturnFocus, open]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    function updatePopoverStyle() {
+      const triggerRect = buttonRef.current?.getBoundingClientRect();
+      if (!triggerRect) return;
+      setPopoverStyle(layoutMenuPopoverStyle(triggerRect));
+    }
+
+    updatePopoverStyle();
+    const rafId = window.requestAnimationFrame(updatePopoverStyle);
+    window.addEventListener("resize", updatePopoverStyle);
+    window.addEventListener("scroll", updatePopoverStyle, true);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener("resize", updatePopoverStyle);
+      window.removeEventListener("scroll", updatePopoverStyle, true);
+    };
+  }, [open]);
+
   function focusOptionAt(index: number) {
     if (LIBRARY_LAYOUT_MODES.length === 0) return;
     const wrapped =
@@ -105,6 +144,47 @@ export function LayoutMenu({
     }
   }
 
+  const popover =
+    open && typeof document !== "undefined"
+      ? createPortal(
+          <>
+            <div aria-hidden="true" className="sort-menu-backdrop" onClick={closeAndReturnFocus} />
+            <LiquidGlassSurface
+              as="div"
+              className="floating-popover sort-menu-list sort-menu-popover layout-menu-popover popup-surface"
+              interactive
+              role="listbox"
+              aria-label="Layout options"
+              style={popoverStyle}
+              tone="elevated"
+            >
+              {LIBRARY_LAYOUT_MODES.map((option, index) => {
+                const OptionIcon = LAYOUT_ICON[option.value];
+                const selected = value === option.value;
+                return (
+                  <button
+                    ref={(element) => {
+                      optionRefs.current[index] = element;
+                    }}
+                    aria-selected={selected}
+                    className={`sort-menu-item layout-menu-item${selected ? " sort-menu-item-active" : ""}`}
+                    key={option.value}
+                    onClick={() => handleSelect(option.value)}
+                    onKeyDown={(event) => handleOptionKeyDown(event, index)}
+                    role="option"
+                    type="button"
+                  >
+                    <OptionIcon aria-hidden="true" size={14} />
+                    <span>{option.label}</span>
+                  </button>
+                );
+              })}
+            </LiquidGlassSurface>
+          </>,
+          document.body
+        )
+      : null;
+
   return (
     <div className="sort-menu layout-menu">
       <LiquidGlassButton
@@ -125,42 +205,7 @@ export function LayoutMenu({
         <TriggerIcon aria-hidden="true" size={14} />
         {iconOnly ? null : <span>{selectedLabel}</span>}
       </LiquidGlassButton>
-
-      {open ? (
-        <>
-          <div aria-hidden="true" className="sort-menu-backdrop" onClick={closeAndReturnFocus} />
-          <LiquidGlassSurface
-            as="div"
-            className="floating-popover sort-menu-list sort-menu-popover layout-menu-popover popup-surface"
-            interactive
-            role="listbox"
-            aria-label="Layout options"
-            tone="elevated"
-          >
-            {LIBRARY_LAYOUT_MODES.map((option, index) => {
-              const OptionIcon = LAYOUT_ICON[option.value];
-              const selected = value === option.value;
-              return (
-                <button
-                  ref={(element) => {
-                    optionRefs.current[index] = element;
-                  }}
-                  aria-selected={selected}
-                  className={`sort-menu-item layout-menu-item${selected ? " sort-menu-item-active" : ""}`}
-                  key={option.value}
-                  onClick={() => handleSelect(option.value)}
-                  onKeyDown={(event) => handleOptionKeyDown(event, index)}
-                  role="option"
-                  type="button"
-                >
-                  <OptionIcon aria-hidden="true" size={14} />
-                  <span>{option.label}</span>
-                </button>
-              );
-            })}
-          </LiquidGlassSurface>
-        </>
-      ) : null}
+      {popover}
     </div>
   );
 }

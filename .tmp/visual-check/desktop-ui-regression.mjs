@@ -32,6 +32,14 @@ const responses = [];
 const startupOutput = [];
 let child;
 
+function isPreviewApiResponse(item) {
+  return item.url.includes("/api/media/") && item.url.includes("/preview");
+}
+
+function isThumbnailBlobResponse(item) {
+  return item.url.includes("/thumbnail/blob");
+}
+
 const desktopMainSource = await readFile(
   path.join(root, "apps", "desktop", "src", "main.ts"),
   "utf8"
@@ -1941,6 +1949,8 @@ try {
   );
   const selectedPortraitRightPreview = await screenshot(client, "ui-selected-portrait-right-preview.png");
   const inspectorPortrait = await evaluate(client, inspectorPreviewEvidenceExpression());
+  const inspectorPreviewApiResponsesBeforeCentralOpen = responses.filter(isPreviewApiResponse);
+  const inspectorThumbnailBlobResponsesBeforeCentralOpen = responses.filter(isThumbnailBlobResponse);
 
   await doubleClickMediaByName(client, "landscape-sample");
   await waitFor(
@@ -2030,6 +2040,8 @@ try {
       settingsInterfaceStyle: settingsInterfaceStyle.evidence,
       compactPopovers,
       inspectorPortrait,
+      inspectorPreviewApiResponsesBeforeCentralOpen,
+      inspectorThumbnailBlobResponsesBeforeCentralOpen,
       landscapeFit,
       layoutDuringLandscapePreview,
       landscapeActual,
@@ -2049,8 +2061,8 @@ try {
       pointerNearEdge,
       pointerTreeItem,
       pointerTileThumb,
-      previewRouteResponses: responses.filter((item) => item.url.includes("/preview")),
-      thumbnailBlobResponses: responses.filter((item) => item.url.includes("/thumbnail/blob"))
+      previewApiResponses: responses.filter(isPreviewApiResponse),
+      thumbnailBlobResponses: responses.filter(isThumbnailBlobResponse)
     },
     consoleWarnings,
     consoleErrors,
@@ -2379,7 +2391,10 @@ try {
   }
   if (inspectorPortrait.centralOpen) hardFailures.push("central preview open during right preview capture");
   if (inspectorPortrait.headingPresent) hardFailures.push("right preview still renders the old heading row");
-  if (inspectorPortrait.source !== "original") hardFailures.push("right preview is not using original/preview source");
+  if (inspectorPortrait.source !== "thumbnail") hardFailures.push("right preview is not using thumbnail source");
+  if (summary.evidence.inspectorThumbnailBlobResponsesBeforeCentralOpen.length === 0) {
+    hardFailures.push("right preview did not stay on the light grid_320 thumbnail path");
+  }
   if (!transparent(inspectorPortrait.stageBackground) || !transparent(inspectorPortrait.readyBackground)) {
     hardFailures.push("right preview still has opaque fill");
   }
@@ -2560,7 +2575,7 @@ try {
   if (pointerSettingsSlider?.settingsSliderInput?.targetAttr === "true") {
     hardFailures.push("native range input is still selected as the local pointer-highlight target");
   }
-  if (summary.evidence.previewRouteResponses.length === 0) {
+  if (summary.evidence.previewApiResponses.length === 0) {
     hardFailures.push("preview route was not requested");
   }
 
