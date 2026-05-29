@@ -56,7 +56,14 @@ export function RecentOpsPanel({ ops, loading, onRefresh, onDismiss }: RecentOps
 
       <div className="recent-ops-list">
         {ops.length === 0 ? (
-          <div className="empty-panel">{loading ? "Loading…" : "No file operations yet"}</div>
+          <div
+            aria-busy={loading}
+            aria-label={loading ? "Refreshing recent operations" : undefined}
+            className={loading ? "empty-panel empty-panel-busy" : "empty-panel"}
+            role={loading ? "status" : undefined}
+          >
+            {loading ? <span className="central-preview-loading-spinner" aria-hidden="true" /> : "No file operations yet"}
+          </div>
         ) : (
           ops.map((op) => <RecentOpRow key={op.id} op={op} />)
         )}

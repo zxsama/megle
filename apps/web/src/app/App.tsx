@@ -365,15 +365,12 @@ export function App() {
         <PreviewTitlebarToolbar
           canGoNext={canPreviewNext}
           canGoPrevious={canPreviewPrevious}
-          layoutMode={layoutMode}
           mode={previewViewState.mode}
           scale={previewViewState.scale}
           selectedName={library.selectedMedia.name}
           onBack={handleClosePreview}
           onGoNext={handlePreviewNext}
-          onLayoutModeChange={setLayoutMode}
           onGoPrevious={handlePreviewPrevious}
-          onResetView={() => previewViewCommands?.reset()}
           onToggleActualSize={() => previewViewCommands?.toggleActualSize()}
         />
       );
@@ -391,12 +388,11 @@ export function App() {
           filterOpen={filterMenuOpen}
           kind={library.searchState.kind}
           layoutMode={layoutMode}
-          mediaCount={library.media.length}
+          mediaCount={Math.max(library.mediaTotalCount, library.media.length)}
           minRating={library.searchState.minRating}
           onClearFilters={library.clearFilters}
           onFilterOpenChange={setFilterOpen}
           onLayoutModeChange={setLayoutMode}
-          onRefresh={() => void library.refresh()}
           onSetKind={library.setKind}
           onSetMinRating={library.setMinRating}
           onSetQ={library.setQ}
@@ -445,6 +441,7 @@ export function App() {
           library={library}
           layoutMode={layoutMode}
           onClosePreview={handleClosePreview}
+          onFolderContextMenu={handleFolderContextMenu}
           onMediaContextMenu={handleMediaContextMenu}
           onOpenPreview={handleOpenPreview}
           onPreviewCommandChange={setPreviewViewCommands}

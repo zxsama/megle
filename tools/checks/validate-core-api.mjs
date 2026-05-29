@@ -545,8 +545,25 @@ for (const value of [
 if (previewBody.includes("StatusCode::ACCEPTED")) {
   fail("GET /api/media/{fileId}/preview must not be a 202 Accepted placeholder");
 }
-if (dbModRs.includes("OFFSET")) {
-  fail("Core browsing pagination must use keyset cursors, not OFFSET");
+for (const value of [
+  "offset:",
+  "Zero-based media row offset for viewport-windowed browsing",
+  "totalCount"
+]) {
+  if (!openApi.includes(value)) {
+    fail(`OpenAPI media browsing viewport-window contract missing ${value}`);
+  }
+}
+for (const value of [
+  "query.offset",
+  "use_offset",
+  "offset_clause",
+  "total_count: Some(total_count)",
+  "list_media_page_offset_window_reports_total_count"
+]) {
+  if (!dbModRs.includes(value)) {
+    fail(`Core media browsing viewport-window implementation missing ${value}`);
+  }
 }
 for (const value of ["?2 IS NULL OR files.root_id", "?3 IS NULL OR files.folder_id", "?4 IS NULL OR media.kind"]) {
   if (dbModRs.includes(value)) {

@@ -44,6 +44,7 @@ pub struct MediaPageQuery {
     pub folder_id: Option<i64>,
     pub include_descendants: bool,
     pub limit: i64,
+    pub offset: Option<i64>,
     pub cursor: Option<String>,
     pub sort: String,
     pub kind: Option<String>,
@@ -53,6 +54,7 @@ pub struct MediaPageQuery {
 pub struct Page<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<String>,
+    pub total_count: Option<i64>,
 }
 
 pub struct FolderUpsert {
@@ -372,6 +374,7 @@ pub struct SearchQuery {
     pub tag_ids: Vec<i64>,
     pub sort: String,
     pub limit: i64,
+    pub offset: Option<i64>,
     pub cursor: Option<String>,
 }
 
@@ -1814,11 +1817,8 @@ impl Database {
     pub fn list_media_page(&self, query: MediaPageQuery) -> anyhow::Result<Page<MediaRecord>> {
         let limit = query.limit.clamp(1, 500);
         let sort = normalize_media_sort(&query.sort);
-        let cursor = query
-            .cursor
-            .as_deref()
-            .map(|cursor| decode_media_cursor(cursor, sort))
-            .transpose()?;
+        let offset = query.offset.unwrap_or(0).max(0);
+        let use_offset = query.offset.is_some();
         let sort_clause = match sort {
             "mtime_asc" => "files.mtime ASC, files.id ASC",
             "name_asc" => "files.name ASC, files.id ASC",
@@ -1855,6 +1855,33 @@ impl Database {
             predicates.push("media.kind = ?".to_string());
             parameters.push(Value::Text(kind.to_string()));
         }
+        let count_predicates = predicates.clone();
+        let count_parameters = parameters.clone();
+        let total_count: i64 = {
+            let count_sql = format!(
+                r#"
+                SELECT COUNT(*)
+                FROM files
+                LEFT JOIN media ON media.file_id = files.id
+                JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+                WHERE {where_clause}
+                "#,
+                where_clause = count_predicates.join(" AND "),
+            );
+            self.connection
+                .query_row(&count_sql, params_from_iter(count_parameters), |row| {
+                    row.get(0)
+                })?
+        };
+        let cursor = if use_offset {
+            None
+        } else {
+            query
+                .cursor
+                .as_deref()
+                .map(|cursor| decode_media_cursor(cursor, sort))
+                .transpose()?
+        };
         if let Some(cursor) = &cursor {
             let predicate = match sort {
                 "name_asc" => "files.name > ? OR (files.name = ? AND files.id > ?)",
@@ -1876,6 +1903,9 @@ impl Database {
             parameters.push(Value::Integer(cursor.id));
         }
         parameters.push(Value::Integer(limit + 1));
+        if use_offset {
+            parameters.push(Value::Integer(offset));
+        }
 
         let sql = format!(
             r#"
@@ -1895,9 +1925,11 @@ impl Database {
             WHERE {where_clause}
             ORDER BY {sort_clause}
             LIMIT ?
+            {offset_clause}
             "#,
             where_clause = predicates.join(" AND "),
             sort_clause = sort_clause,
+            offset_clause = if use_offset { "OFFSET ?" } else { "" },
         );
 
         let mut statement = self.connection.prepare(&sql)?;
@@ -1913,7 +1945,11 @@ impl Database {
         } else {
             None
         };
-        Ok(Page { items, next_cursor })
+        Ok(Page {
+            items,
+            next_cursor,
+            total_count: Some(total_count),
+        })
     }
 
     pub fn get_media(&self, file_id: i64) -> anyhow::Result<Option<MediaRecord>> {
@@ -2273,6 +2309,7 @@ impl Database {
         folder_id: i64,
         limit: i64,
         cursor: Option<String>,
+        include_descendants: bool,
     ) -> anyhow::Result<Page<FolderRecord>> {
         let limit = limit.clamp(1, 500);
         let cursor = cursor.as_deref().map(decode_folder_cursor).transpose()?;
@@ -2281,18 +2318,44 @@ impl Database {
         } else {
             ""
         };
-        let sql = format!(
-            r#"
-            SELECT folders.id, folders.root_id, folders.parent_id, folders.name, folders.status
-            FROM folders
-            JOIN roots ON roots.id = folders.root_id AND roots.enabled = 1
-            WHERE folders.parent_id = ?1 AND folders.status = 'active'
-              {cursor_clause}
-            ORDER BY folders.name ASC, folders.id ASC
-            LIMIT ?4
-            "#,
-            cursor_clause = cursor_clause,
-        );
+        let sql = if include_descendants {
+            format!(
+                r#"
+                WITH RECURSIVE descendant_folders(id) AS (
+                    SELECT id
+                    FROM folders
+                    WHERE parent_id = ?1 AND status = 'active'
+                    UNION ALL
+                    SELECT folders.id
+                    FROM folders
+                    JOIN descendant_folders ON folders.parent_id = descendant_folders.id
+                    WHERE folders.status = 'active'
+                )
+                SELECT folders.id, folders.root_id, folders.parent_id, folders.name, folders.status
+                FROM folders
+                JOIN descendant_folders ON descendant_folders.id = folders.id
+                JOIN roots ON roots.id = folders.root_id AND roots.enabled = 1
+                WHERE folders.status = 'active'
+                  {cursor_clause}
+                ORDER BY folders.name ASC, folders.id ASC
+                LIMIT ?4
+                "#,
+                cursor_clause = cursor_clause,
+            )
+        } else {
+            format!(
+                r#"
+                SELECT folders.id, folders.root_id, folders.parent_id, folders.name, folders.status
+                FROM folders
+                JOIN roots ON roots.id = folders.root_id AND roots.enabled = 1
+                WHERE folders.parent_id = ?1 AND folders.status = 'active'
+                  {cursor_clause}
+                ORDER BY folders.name ASC, folders.id ASC
+                LIMIT ?4
+                "#,
+                cursor_clause = cursor_clause,
+            )
+        };
         let mut parameters = vec![Value::Integer(folder_id)];
         if let Some(cursor) = &cursor {
             parameters.push(Value::Text(cursor.name.clone()));
@@ -2326,12 +2389,15 @@ impl Database {
         Ok(Page {
             items: folders,
             next_cursor,
+            total_count: None,
         })
     }
 
     #[cfg(test)]
     pub fn list_folder_children(&self, folder_id: i64) -> anyhow::Result<Vec<FolderRecord>> {
-        Ok(self.list_folder_children_page(folder_id, 500, None)?.items)
+        Ok(self
+            .list_folder_children_page(folder_id, 500, None, false)?
+            .items)
     }
 
     pub(crate) fn get_folder_id_by_path(
@@ -3611,11 +3677,8 @@ impl Database {
     pub fn search_media_page(&self, query: SearchQuery) -> anyhow::Result<Page<MediaRecord>> {
         let limit = query.limit.clamp(1, 500);
         let sort = normalize_search_sort(&query.sort);
-        let cursor = query
-            .cursor
-            .as_deref()
-            .map(|cursor| decode_search_cursor(cursor, sort))
-            .transpose()?;
+        let offset = query.offset.unwrap_or(0).max(0);
+        let use_offset = query.offset.is_some();
         let trimmed_query = query
             .q
             .as_deref()
@@ -3706,6 +3769,41 @@ impl Database {
             _ => "files.mtime DESC, files.id DESC",
         };
 
+        let fts_join = if trimmed_query.is_some() {
+            ", media_fts"
+        } else {
+            ""
+        };
+        let count_predicates = predicates.clone();
+        let count_parameters = parameters.clone();
+        let total_count: i64 = {
+            let count_sql = format!(
+                r#"
+                SELECT COUNT(*)
+                FROM files{fts_join}
+                LEFT JOIN media ON media.file_id = files.id
+                LEFT JOIN user_metadata ON user_metadata.file_id = files.id
+                JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+                WHERE {where_clause}{tag_filter_clause}
+                "#,
+                fts_join = fts_join,
+                where_clause = count_predicates.join(" AND "),
+                tag_filter_clause = tag_filter_clause,
+            );
+            self.connection
+                .query_row(&count_sql, params_from_iter(count_parameters), |row| {
+                    row.get(0)
+                })?
+        };
+        let cursor = if use_offset {
+            None
+        } else {
+            query
+                .cursor
+                .as_deref()
+                .map(|cursor| decode_search_cursor(cursor, sort))
+                .transpose()?
+        };
         if let Some(cursor) = &cursor {
             let predicate = match (sort, &cursor.key) {
                 ("name_asc", SearchCursorKey::Name(name)) => {
@@ -3756,12 +3854,10 @@ impl Database {
         }
 
         parameters.push(Value::Integer(limit + 1));
+        if use_offset {
+            parameters.push(Value::Integer(offset));
+        }
 
-        let fts_join = if trimmed_query.is_some() {
-            ", media_fts"
-        } else {
-            ""
-        };
         let sql = format!(
             r#"
             SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
@@ -3782,11 +3878,13 @@ impl Database {
             WHERE {where_clause}{tag_filter_clause}
             ORDER BY {sort_clause}
             LIMIT ?
+            {offset_clause}
             "#,
             fts_join = fts_join,
             where_clause = predicates.join(" AND "),
             tag_filter_clause = tag_filter_clause,
             sort_clause = sort_clause,
+            offset_clause = if use_offset { "OFFSET ?" } else { "" },
         );
 
         let mut statement = self.connection.prepare(&sql)?;
@@ -3840,7 +3938,11 @@ impl Database {
         } else {
             None
         };
-        Ok(Page { items, next_cursor })
+        Ok(Page {
+            items,
+            next_cursor,
+            total_count: Some(total_count),
+        })
     }
 
     fn file_exists(&self, file_id: i64) -> anyhow::Result<bool> {
@@ -4771,6 +4873,12 @@ fn normalize_thumbnail_record_for_source(
     thumbnail: &mut ThumbnailRecord,
     source: &ThumbnailSourceRecord,
 ) {
+    if thumbnail.source_fingerprint.is_some()
+        && !thumbnail_source_fingerprint_matches(thumbnail, source)
+    {
+        reset_thumbnail_record_to_pending(thumbnail);
+        return;
+    }
     if thumbnail.state == "ready" && !thumbnail_source_fingerprint_matches(thumbnail, source) {
         reset_thumbnail_record_to_pending(thumbnail);
     }
@@ -6523,6 +6631,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 200,
+                offset: None,
                 cursor: None,
                 sort: "mtime_desc".to_string(),
                 kind: Some("image".to_string()),
@@ -6628,6 +6737,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: Some("image".to_string()),
@@ -6747,6 +6857,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 100,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: Some("image".to_string()),
@@ -6922,6 +7033,7 @@ mod tests {
                     folder_id: Some(folder_id),
                     include_descendants: false,
                     limit: 2,
+                    offset: None,
                     cursor: None,
                     sort: sort.to_string(),
                     kind: Some("image".to_string()),
@@ -6936,6 +7048,7 @@ mod tests {
                     folder_id: Some(folder_id),
                     include_descendants: false,
                     limit: 2,
+                    offset: None,
                     cursor: Some(cursor),
                     sort: sort.to_string(),
                     kind: Some("image".to_string()),
@@ -6944,6 +7057,29 @@ mod tests {
             assert_eq!(media_names(&second_page.items), expected_pages[1]);
             assert!(second_page.next_cursor.is_none());
         }
+    }
+
+    #[test]
+    fn list_media_page_offset_window_reports_total_count() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+
+        let page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(folder_id),
+                include_descendants: false,
+                limit: 2,
+                offset: Some(1),
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: Some("image".to_string()),
+            })
+            .expect("list offset media page");
+
+        assert_eq!(page.total_count, Some(4));
+        assert_eq!(media_names(&page.items), vec!["bravo.jpg", "charlie.jpg"]);
+        assert!(page.next_cursor.is_some());
     }
 
     #[test]
@@ -6977,16 +7113,76 @@ mod tests {
         }
 
         let first_page = database
-            .list_folder_children_page(root_folder_id, 2, None)
+            .list_folder_children_page(root_folder_id, 2, None, false)
             .expect("list first child page");
         assert_eq!(folder_names(&first_page.items), vec!["alpha", "bravo"]);
         let cursor = first_page.next_cursor.expect("first child page cursor");
 
         let second_page = database
-            .list_folder_children_page(root_folder_id, 2, Some(cursor))
+            .list_folder_children_page(root_folder_id, 2, Some(cursor), false)
             .expect("list second child page");
         assert_eq!(folder_names(&second_page.items), vec!["charlie"]);
         assert!(second_page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn list_folder_children_page_can_include_descendants_recursively() {
+        let database = migrated_database();
+        let root_id = database
+            .add_root(NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let root_folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "root-hash".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let child_folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: Some(root_folder_id),
+                name: "child".to_string(),
+                path_hash: "child-hash".to_string(),
+                mtime: Some(2),
+            })
+            .expect("insert child folder");
+        database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: Some(child_folder_id),
+                name: "grandchild".to_string(),
+                path_hash: "grandchild-hash".to_string(),
+                mtime: Some(3),
+            })
+            .expect("insert grandchild folder");
+        database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: Some(root_folder_id),
+                name: "sibling".to_string(),
+                path_hash: "sibling-hash".to_string(),
+                mtime: Some(4),
+            })
+            .expect("insert sibling folder");
+
+        let direct_page = database
+            .list_folder_children_page(root_folder_id, 10, None, false)
+            .expect("list direct children");
+        assert_eq!(folder_names(&direct_page.items), vec!["child", "sibling"]);
+
+        let recursive_page = database
+            .list_folder_children_page(root_folder_id, 10, None, true)
+            .expect("list recursive children");
+        assert_eq!(
+            folder_names(&recursive_page.items),
+            vec!["child", "grandchild", "sibling"]
+        );
     }
 
     #[test]
@@ -7054,6 +7250,7 @@ mod tests {
                 folder_id: Some(child_folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "mtime_desc".to_string(),
                 kind: Some("image".to_string()),
@@ -7067,6 +7264,7 @@ mod tests {
                 folder_id: Some(child_folder_id),
                 include_descendants: true,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "mtime_desc".to_string(),
                 kind: Some("image".to_string()),
@@ -7091,6 +7289,7 @@ mod tests {
                 folder_id: None,
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -7130,6 +7329,7 @@ mod tests {
                 folder_id: None,
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -7358,6 +7558,7 @@ mod tests {
                 folder_id: None,
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -10092,6 +10293,7 @@ mod tests {
                 tag_ids: Vec::new(),
                 sort: "mtime_desc".to_string(),
                 limit: 50,
+                offset: None,
                 cursor: None,
             })
             .expect("search by name");
@@ -10110,6 +10312,7 @@ mod tests {
                 tag_ids: Vec::new(),
                 sort: "mtime_desc".to_string(),
                 limit: 50,
+                offset: None,
                 cursor: None,
             })
             .expect("search by tag/note token");
@@ -10169,6 +10372,7 @@ mod tests {
                 tag_ids: vec![beach_tag.id, summer_tag.id],
                 sort: "mtime_desc".to_string(),
                 limit: 50,
+                offset: None,
                 cursor: None,
             })
             .expect("search combined filters");
@@ -10220,6 +10424,7 @@ mod tests {
                 tag_ids: Vec::new(),
                 sort: "rating_desc".to_string(),
                 limit: 50,
+                offset: None,
                 cursor: None,
             })
             .expect("rating desc");
@@ -10252,6 +10457,7 @@ mod tests {
                 tag_ids: Vec::new(),
                 sort: "name_asc".to_string(),
                 limit: 50,
+                offset: None,
                 cursor: None,
             })
             .expect("image search without query");
@@ -10291,6 +10497,7 @@ mod tests {
                 tag_ids: Vec::new(),
                 sort: "mtime_desc".to_string(),
                 limit: 50,
+                offset: None,
                 cursor: None,
             })
             .expect("search before delete");
@@ -10316,6 +10523,7 @@ mod tests {
                 tag_ids: Vec::new(),
                 sort: "mtime_desc".to_string(),
                 limit: 50,
+                offset: None,
                 cursor: None,
             })
             .expect("search after delete");
@@ -10386,6 +10594,7 @@ mod tests {
                 tag_ids: Vec::new(),
                 sort: "mtime_asc".to_string(),
                 limit: 500,
+                offset: None,
                 cursor: None,
             })
             .expect("search batch");

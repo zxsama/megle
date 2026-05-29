@@ -169,7 +169,6 @@ function RootNode({
         onContextMenu={(event) => {
           if (!onRootContextMenu) return;
           event.preventDefault();
-          library.setSelectedRootId(root.id);
           onRootContextMenu({
             root,
             x: event.clientX,
@@ -246,7 +245,6 @@ function FolderNode({
         onContextMenu={(event) => {
           if (!onFolderContextMenu) return;
           event.preventDefault();
-          library.setSelectedFolder(folder);
           onFolderContextMenu({
             folder,
             x: event.clientX,
@@ -271,7 +269,7 @@ function FolderNode({
         >
           {expanded ? <FolderOpen size={16} /> : <Folder size={16} />}
           <span>{folder.name}</span>
-          <small>{loading ? "loading" : folder.status}</small>
+          <small aria-busy={loading}>{folder.status}</small>
         </button>
       </div>
       {expanded ? (
@@ -315,7 +313,7 @@ function LoadMoreChildren({
       style={{ "--tree-depth": String(depth) } as CSSProperties}
       type="button"
     >
-      {loading ? "Loading children" : "Load more children"}
+      Load more children
     </button>
   );
 }

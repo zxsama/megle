@@ -234,7 +234,7 @@ assertInterfaceMatchesSchema("PluginDiscoveryResponse");
 assertInterfaceMatchesSchema("DeletePluginResponse");
 
 const pageBody = interfaceBody("Page");
-for (const line of ["items: T[];", "nextCursor: string | null;"]) {
+for (const line of ["items: T[];", "nextCursor: string | null;", "totalCount?: number;"]) {
   requireLine(pageBody, line, "generated-contract.ts Page");
 }
 
@@ -243,6 +243,7 @@ for (const [name, line] of [
   ["rootId", "rootId?: number;"],
   ["folderId", "folderId?: number;"],
   ["limit", "limit?: number;"],
+  ["offset", "offset?: number;"],
   ["cursor", "cursor?: string;"],
   ["sort", `sort?: ${operationParameter("listMedia", "sort")?.schema?.enum.map((item) => JSON.stringify(item)).join(" | ")};`],
   ["kind", `kind?: ${operationParameter("listMedia", "kind")?.schema?.enum.map((item) => JSON.stringify(item)).join(" | ")};`]
@@ -256,17 +257,19 @@ if (!listFolderChildrenBody) {
 }
 for (const [name, line] of [
   ["limit", "limit?: number;"],
-  ["cursor", "cursor?: string;"]
+  ["cursor", "cursor?: string;"],
+  ["includeDescendants", "includeDescendants?: boolean;"]
 ]) {
   assertParamLine("ListFolderChildrenParams", name, line);
 }
 
-assertOperationParameters("listFolderChildren", ["folderId", "limit", "cursor"]);
-assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "cursor", "sort", "kind"]);
+assertOperationParameters("listFolderChildren", ["folderId", "limit", "cursor", "includeDescendants"]);
+assertOperationParameters("listMedia", ["rootId", "folderId", "limit", "offset", "cursor", "sort", "kind"]);
 assertOperationParameters("getMedia", ["fileId"]);
 assertOperationParameters("getThumbnail", ["fileId", "target", "priority"]);
 assertOperationParameters("getThumbnailBlob", ["fileId", "target"]);
 operation("syncThumbnailPriorityScope");
+assertOperationParameters("searchMedia", ["rootId", "folderId", "limit", "offset", "cursor", "sort", "kind"]);
 
 for (const method of [
   "listRoots",

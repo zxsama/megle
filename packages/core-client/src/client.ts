@@ -243,6 +243,9 @@ function query(params: QueryParams): string {
     search.set("includeDescendants", params.includeDescendants ? "true" : "false");
   }
   if (params.limit) search.set("limit", String(params.limit));
+  if ("offset" in params && typeof params.offset === "number") {
+    search.set("offset", String(params.offset));
+  }
   if (params.cursor) search.set("cursor", params.cursor);
   if ("sort" in params && params.sort) search.set("sort", params.sort);
   if ("kind" in params && params.kind) search.set("kind", params.kind);
@@ -273,6 +276,7 @@ function searchQuery(params: SearchParams): string {
   }
   if (params.sort) search.set("sort", params.sort);
   if (params.limit) search.set("limit", String(params.limit));
+  if (typeof params.offset === "number") search.set("offset", String(params.offset));
   if (params.cursor) search.set("cursor", params.cursor);
   const value = search.toString();
   return value ? `?${value}` : "";

@@ -69,10 +69,14 @@ const mediaResources = existsSync(path.join(root, mediaResourcesPath))
   ? read(mediaResourcesPath)
   : "";
 const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
+const mediaGridLayoutGeometry = read("apps/web/src/features/media-grid/layoutGeometry.ts");
 const main = read("apps/web/src/main.tsx");
 const app = read("apps/web/src/app/App.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
 const librarySidebar = read("apps/web/src/features/library/LibrarySidebar.tsx");
+const subfolderStrip = read("apps/web/src/features/library/SubfolderStrip.tsx");
+const recentOpsPanel = read("apps/web/src/features/file-ops/RecentOpsPanel.tsx");
+const pluginsView = read("apps/web/src/features/plugins/PluginsView.tsx");
 const previewPanelPath = "apps/web/src/features/preview/PreviewPanel.tsx";
 const previewPanel = existsSync(path.join(root, previewPanelPath))
   ? read(previewPanelPath)
@@ -196,6 +200,125 @@ if (!mediaGrid.includes("@tanstack/react-virtual") || !mediaGrid.includes("useVi
 
 if (/Loading library/.test(mediaGrid)) {
   fail("MediaGrid tiles must keep stable dimensions without loading text layout shifts");
+}
+if (!/\.virtual-grid\s*\{[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-y:\s*auto;/.test(read("apps/web/src/styles.css"))) {
+  fail("MediaGrid must disable horizontal scrolling while preserving vertical scrolling");
+}
+if (/\.library-browser-layout\s*\{[^}]*overflow-y:\s*auto;/.test(read("apps/web/src/styles.css"))) {
+  fail("Library browser sections must share the MediaGrid scroll container instead of adding a parent scroller");
+}
+if (/leadingContent\??/.test(mediaGrid) || /leadingContentRef/.test(mediaGrid) || /contentOffset/.test(mediaGrid)) {
+  fail("MediaGrid must not keep subfolders as static measured leading content; folder cards must be virtualized with media rows");
+}
+if (
+  !/folderSection\?/.test(mediaGrid) ||
+  !/buildFolderCoverLayout/.test(mediaGridLayoutGeometry) ||
+  !/renderFolder/.test(mediaGrid)
+) {
+  fail("MediaGrid must virtualize the subfolder section as responsive rows in the same scroll model as media");
+}
+if (!/previousMediaOffsetRef/.test(mediaGrid) || !/mediaOffsetDelta/.test(mediaGrid)) {
+  fail("MediaGrid must compensate scrollTop when late-loading subfolder sections change the media offset");
+}
+if (/leadingContent=/.test(libraryView) || /<SubfolderStrip[\s\S]*?folders=\{/.test(libraryView)) {
+  fail("LibraryCenterPane must pass folder rows into MediaGrid instead of rendering a static subfolder strip");
+}
+if (/folders\.map/.test(subfolderStrip)) {
+  fail("SubfolderStrip must not render every folder card eagerly; folder cards belong to MediaGrid virtualization");
+}
+if (/const\s+PAGE_LIMIT\s*=\s*200;/.test(useLibraryData)) {
+  fail("Library media loading must not keep the old 200-item page cap");
+}
+if (/autoloadRemainingMediaPages/.test(useLibraryData) || /AUTOLOAD_MEDIA_PAGE_LIMIT/.test(useLibraryData)) {
+  fail("Library data loading must not eagerly load every media metadata page; use viewport-indexed windows instead");
+}
+if (!/mediaTotalCount/.test(useLibraryData) || !/loadedMediaRanges/.test(useLibraryData)) {
+  fail("Library data loading must track total media count and loaded media index ranges for million-item folders");
+}
+if (/const\s+windowedGrid\s*=/.test(mediaGrid) || /layoutMode\s*===\s*"grid"\s*&&[\s\S]*mediaSlots/.test(mediaGrid)) {
+  fail("MediaGrid viewport-windowed browsing must not be limited to grid layout mode");
+}
+if (/Load more media/.test(mediaGrid) || /type:\s*"load-more"/.test(mediaGrid)) {
+  fail("MediaGrid must expose the full media count through virtual rows instead of a Load more row");
+}
+if (/Math\.max\(\s*clampedEnd,\s*pageOffset\s*\+\s*INITIAL_MEDIA_PAGE_LIMIT\s*\)/.test(useLibraryData)) {
+  fail("useLibraryData requestMediaWindow must request the visible/ahead window, not inflate every viewport request to the page cap");
+}
+if (!/onRequestMediaWindow/.test(mediaGrid) || !/visibleMediaIndexRange/.test(mediaGrid)) {
+  fail("MediaGrid must report visible/ahead media index windows instead of requesting more records only at the end");
+}
+if (/function\s+renderLoadingState/.test(mediaGrid) || /Loading media/.test(mediaGrid)) {
+  fail("MediaGrid refresh must keep the grid shell stable and must not replace it with a Loading media page");
+}
+if (!/media-grid-refresh-indicator/.test(mediaGrid) || !/aria-busy=\{loading/.test(mediaGrid)) {
+  fail("MediaGrid must expose refresh progress through a non-blocking overlay indicator");
+}
+if (
+  !/isFinalInputItem\s*=\s*itemIndex\s*===\s*items\.length\s*-\s*1/.test(mediaGridLayoutGeometry) ||
+  !/if\s*\(\s*shouldFlush\s*&&\s*!isFinalInputItem\s*\)\s*\{\s*flushRow\(true\);/.test(mediaGridLayoutGeometry) ||
+  /shouldFillRemainingWidth\s*=\s*justify\s*&&\s*entryIndex\s*===\s*rowItems\.length\s*-\s*1/.test(mediaGridLayoutGeometry) ||
+  /entryIndex\s*===\s*rowItems\.length\s*-\s*1\s*\?\s*Math\.max\(1,\s*remainingWidth\)/.test(mediaGridLayoutGeometry)
+) {
+  fail("adaptive media layout must not stretch the final underfilled row across the viewport");
+}
+if (/function\s+ReadyThumbnail[\s\S]*?setSrc\(null\);/.test(mediaGrid)) {
+  fail("ReadyThumbnail must keep the previous thumbnail visible while a refreshed blob loads");
+}
+if (!/FOLDER_COVER_MEDIA_LIMIT\s*=\s*1/.test(read("apps/web/src/features/library/useFolderCovers.ts"))) {
+  fail("Folder covers must request only the first preview image for the vertical cover card");
+}
+if (!/onVisibleFolderIndexesChange/.test(mediaGrid) || !/folderCoverPriorityIndexes/.test(libraryView)) {
+  fail("Folder cover loading must follow the virtualized visible/ahead folder window instead of the full folder list");
+}
+if (/Promise\.all/.test(read("apps/web/src/features/library/useFolderCovers.ts"))) {
+  fail("Folder covers must disclose each cover as it resolves; waiting for a full batch blocks visible cover refresh");
+}
+if (!/inFlightFolderIds/.test(read("apps/web/src/features/library/useFolderCovers.ts"))) {
+  fail("Folder cover loading must track in-flight folder requests to avoid duplicate visible-window fetches");
+}
+if (/previewPlaceholderDataUrl/.test(subfolderStrip)) {
+  fail("Folder covers must not depend on low-resolution placeholder data; they need decoded thumbnail/original preview blobs");
+}
+if (!/requestThumbnailBlob/.test(subfolderStrip) || !/requestOriginalPreviewBlob/.test(subfolderStrip)) {
+  fail("Folder cover cards must load a real image blob, falling back from thumbnail to original preview when needed");
+}
+if (
+  !/thumbnailObjectUrlCache/.test(mediaResources) ||
+  !/readCachedThumbnailObjectUrl/.test(mediaGrid) ||
+  !/rememberThumbnailObjectUrl/.test(mediaGrid)
+) {
+  fail("ReadyThumbnail must reuse cached object URLs so remounted virtual tiles do not flash blank");
+}
+if (/function\s+ReadyPreviewMedia[\s\S]*?setSrc\(null\);/.test(mediaPreview)) {
+  fail("ReadyPreviewMedia must keep the previous preview visible while a new blob loads");
+}
+if (!/useLayoutEffect/.test(centralPreviewStage) || !/fitLongEdgeScaleForMedia/.test(centralPreviewStage)) {
+  fail("Central preview must compute fit scale from media dimensions before the first preview paint to avoid size flicker");
+}
+if (!/preloadImageObjectUrl/.test(mediaGrid) || !/preloadImageObjectUrl[\s\S]*?then\(\(\)\s*=>\s*\{[\s\S]*?setSrc\(objectUrl\)/.test(mediaGrid)) {
+  fail("ReadyThumbnail must decode refreshed image blobs before swapping the visible thumbnail src");
+}
+if (!/preloadImageObjectUrl/.test(mediaPreview) || !/preloadImageObjectUrl[\s\S]*?then\(\(\)\s*=>\s*\{[\s\S]*?setSrc\(objectUrl\)/.test(mediaPreview)) {
+  fail("ReadyPreviewMedia must decode refreshed image blobs before swapping the visible preview src");
+}
+if (/tile-thumb-loading[\s\S]*?<span>(?:loading|pending|queued)<\/span>/.test(mediaGrid)) {
+  fail("Pending thumbnails must not flash loading/pending/queued text while refreshing");
+}
+if (/className="preview-placeholder pending"[\s\S]{0,160}<span>/.test(mediaPreview)) {
+  fail("Pending previews must use stable empty placeholders instead of flashing loading text");
+}
+if (/thumbnail\?\.state\s*\?\?\s*selectedMedia\.thumbnailState\s*\?\?\s*"pending"/.test(previewPanel)) {
+  fail("PreviewPanel must not expose raw pending/queued thumbnail state text during refresh");
+}
+if (/animation:\s*shimmer/.test(read("apps/web/src/styles.css"))) {
+  fail("Refresh placeholders must not use shimmer animations that flicker during global refresh");
+}
+if (
+  /Loading children|loading"\s*:|>\s*loading\s*</.test(librarySidebar) ||
+  /正在加载子文件夹/.test(subfolderStrip) ||
+  /Loading…|Loading plugins/.test(recentOpsPanel + pluginsView)
+) {
+  fail("Global refresh surfaces must not replace existing chrome with Loading text");
 }
 if (!mediaGrid.includes("scrollToIndex")) {
   fail("MediaGrid keyboard navigation must scroll the selected row into view");
@@ -424,8 +547,12 @@ if (
 ) {
   fail("useLibraryData scan refresh must use a selection/version token to discard stale media after root or folder navigation");
 }
-if (!mediaGrid.includes("onRequestMore") || !mediaGrid.includes("hasMore")) {
-  fail("MediaGrid must request incremental media pages near the loaded tail");
+if (
+  !/onRequestMediaWindow/.test(mediaGrid) ||
+  !/visibleMediaIndexRange/.test(mediaGrid) ||
+  /onRequestMore/.test(mediaGrid)
+) {
+  fail("MediaGrid must request viewport media windows instead of tail-only incremental pages");
 }
 if (!existsSync(path.join(root, mediaResourcesPath))) {
   fail("web thumbnail resource helper must live behind apps/web/src/core/mediaResources.ts");

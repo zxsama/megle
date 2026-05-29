@@ -287,6 +287,7 @@ pub fn list_recent(
     Ok(Page {
         items: records,
         next_cursor,
+        total_count: None,
     })
 }
 

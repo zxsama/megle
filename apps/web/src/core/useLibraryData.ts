@@ -26,7 +26,9 @@ import {
   shouldRequestThumbnailState
 } from "./mediaResources";
 
-const PAGE_LIMIT = 200;
+const INITIAL_MEDIA_WINDOW_LIMIT = 96;
+const MEDIA_WINDOW_MAX_LIMIT = 256;
+const FOLDER_PAGE_LIMIT = 500;
 const SEARCH_DEBOUNCE_MS = 250;
 const SCAN_REFRESH_INTERVAL_MS = 800;
 const SELECTED_THUMBNAIL_REPOLL_MS = 150;
@@ -64,6 +66,9 @@ export interface LibraryState {
   roots: RootRecord[];
   folders: FolderRecord[];
   media: MediaRecord[];
+  mediaSlots: Array<MediaRecord | undefined>;
+  mediaTotalCount: number;
+  loadedMediaRanges: Array<{ start: number; end: number }>;
   showChildFolderContents: boolean;
   selectedRootId: number | null;
   selectedFolderId: number | null;
@@ -71,9 +76,11 @@ export interface LibraryState {
   selectedMedia: MediaRecord | null;
   selectedMetadata: UserMetadataRecord | null;
   folderChildrenByParent: Record<number, FolderRecord[]>;
+  folderDescendantsByParent: Record<number, FolderRecord[]>;
   folderChildNextCursorByParent: Record<number, string | null>;
   expandedFolderIds: Set<number>;
   loadingFolderIds: Set<number>;
+  loadingFolderDescendantIds: Set<number>;
   loadingMoreFolderIds: Set<number>;
   loading: boolean;
   loadingMoreMedia: boolean;
@@ -114,6 +121,7 @@ export interface LibraryState {
   setSelectedMediaId: (mediaId: number | null) => void;
   toggleFolderExpanded: (folderId: number) => void;
   requestThumbnailStates: (mediaIds: number[], priority: ThumbnailRequestPriority) => void;
+  requestMediaWindow: (startIndex: number, endIndex: number) => void;
   loadMoreFolderChildren: (folderId: number) => Promise<void>;
   loadMoreMedia: () => Promise<void>;
   rescanRoot: (rootId: number) => Promise<void>;
@@ -167,6 +175,7 @@ export function useLibraryData(): LibraryState {
   const loadedMediaPageKeys = useRef<Set<string>>(new Set());
   const inFlightFolderChildPageKeys = useRef<Set<string>>(new Set());
   const loadedFolderChildPageKeys = useRef<Set<string>>(new Set());
+  const inFlightFolderDescendantIds = useRef<Set<number>>(new Set());
   const scanRefreshInFlightRef = useRef(false);
   const scanRefreshActiveRootIdRef = useRef<number | null>(null);
   const scanRefreshSelectionVersionRef = useRef(0);
@@ -174,19 +183,36 @@ export function useLibraryData(): LibraryState {
   const [folderChildrenByParent, setFolderChildrenByParent] = useState<Record<number, FolderRecord[]>>(
     {}
   );
+  const [folderDescendantsByParent, setFolderDescendantsByParent] = useState<
+    Record<number, FolderRecord[]>
+  >({});
+  const folderDescendantsByParentRef = useRef(folderDescendantsByParent);
+  folderDescendantsByParentRef.current = folderDescendantsByParent;
   const [folderChildNextCursorByParent, setFolderChildNextCursorByParent] = useState<
     Record<number, string | null>
   >({});
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<number>>(() => new Set());
   const [loadingFolderIds, setLoadingFolderIds] = useState<Set<number>>(() => new Set());
+  const [loadingFolderDescendantIds, setLoadingFolderDescendantIds] = useState<Set<number>>(
+    () => new Set()
+  );
   const [loadingMoreFolderIds, setLoadingMoreFolderIds] = useState<Set<number>>(() => new Set());
   const [media, setMedia] = useState<MediaRecord[]>([]);
+  const [mediaSlots, setMediaSlots] = useState<Array<MediaRecord | undefined>>([]);
+  const [mediaTotalCount, setMediaTotalCount] = useState(0);
+  const [loadedMediaRanges, setLoadedMediaRanges] = useState<Array<{ start: number; end: number }>>(
+    []
+  );
+  const mediaTotalCountRef = useRef(mediaTotalCount);
+  mediaTotalCountRef.current = mediaTotalCount;
+  const loadedMediaRangesRef = useRef(loadedMediaRanges);
+  loadedMediaRangesRef.current = loadedMediaRanges;
   const [thumbnailStatesByMediaId, setThumbnailStatesByMediaId] = useState<
     Record<number, ThumbnailResponse>
   >({});
   const thumbnailStateSignaturesByMediaIdRef = useRef<Record<number, string>>({});
   const [mediaNextCursor, setMediaNextCursor] = useState<string | null>(null);
-  const mediaHasMore = mediaNextCursor !== null;
+  const mediaHasMore = media.length < mediaTotalCount || mediaNextCursor !== null;
   const [showChildFolderContents, setShowChildFolderContents] = useState<boolean>(() =>
     readStoredShowChildFolderContents()
   );
@@ -222,6 +248,7 @@ export function useLibraryData(): LibraryState {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [selectedMetadata, setSelectedMetadata] = useState<UserMetadataRecord | null>(null);
   const [metadataSaving, setMetadataSaving] = useState(false);
+  const metadataEditGenerationRef = useRef(0);
   const [recentOps, setRecentOps] = useState<FileOperationRecord[]>([]);
   const [recentOpsLoading, setRecentOpsLoading] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | null>(null);
@@ -482,7 +509,7 @@ export function useLibraryData(): LibraryState {
         const cursor = null;
         const page = await client.listFolderChildren(folderId, {
           cursor: cursor ?? undefined,
-          limit: PAGE_LIMIT
+          limit: FOLDER_PAGE_LIMIT
         });
         setFolderChildrenByParent((current) => ({
           ...current,
@@ -524,7 +551,7 @@ export function useLibraryData(): LibraryState {
       try {
         const page = await client.listFolderChildren(folderId, {
           cursor: cursor ?? undefined,
-          limit: PAGE_LIMIT
+          limit: FOLDER_PAGE_LIMIT
         });
         setFolderChildrenByParent((current) => ({
           ...current,
@@ -547,6 +574,49 @@ export function useLibraryData(): LibraryState {
       }
     },
     [client, folderChildNextCursorByParent, loadingMoreFolderIds]
+  );
+
+  const loadFolderDescendants = useCallback(
+    async (folderId: number) => {
+      if (inFlightFolderDescendantIds.current.has(folderId)) {
+        return folderDescendantsByParentRef.current[folderId] ?? [];
+      }
+
+      inFlightFolderDescendantIds.current.add(folderId);
+      setLoadingFolderDescendantIds((current) => new Set(current).add(folderId));
+      try {
+        let cursor: string | null = null;
+        let descendants: FolderRecord[] = [];
+        let publishedFirstPage = false;
+        do {
+          const page = await client.listFolderChildren(folderId, {
+            cursor: cursor ?? undefined,
+            includeDescendants: true,
+            limit: FOLDER_PAGE_LIMIT
+          });
+          descendants.push(...page.items);
+          cursor = page.nextCursor;
+          if (!publishedFirstPage || !cursor) {
+            const publishedDescendants = descendants.slice();
+            setFolderDescendantsByParent((current) => ({
+              ...current,
+              [folderId]: publishedDescendants
+            }));
+            publishedFirstPage = true;
+            await yieldToBrowser();
+          }
+        } while (cursor);
+        return descendants;
+      } finally {
+        inFlightFolderDescendantIds.current.delete(folderId);
+        setLoadingFolderDescendantIds((current) => {
+          const next = new Set(current);
+          next.delete(folderId);
+          return next;
+        });
+      }
+    },
+    [client]
   );
 
   const loadRoots = useCallback(async (scope?: LibrarySelectionScope) => {
@@ -594,6 +664,144 @@ export function useLibraryData(): LibraryState {
     [selectedFolderId, selectedRootId]
   );
 
+  const loadMediaPage = useCallback(
+    async (scope: {
+      rootId: number;
+      folderId: number | undefined;
+      includeDescendants: boolean;
+      cursor?: string;
+      offset?: number;
+      limit: number;
+    }) => {
+      const sort = searchStateRef.current.sort;
+      return searchActiveRef.current
+        ? client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, scope))
+        : client.listMedia({
+            cursor: scope.cursor,
+            folderId: scope.folderId,
+            includeDescendants: scope.includeDescendants,
+            limit: scope.limit,
+            offset: scope.offset,
+            rootId: scope.rootId,
+            sort: listMediaSort(sort)
+          });
+    },
+    [client]
+  );
+
+  const loadMediaWindow = useCallback(
+    async (scope: {
+      rootId: number;
+      folderId: number | undefined;
+      includeDescendants: boolean;
+      offset: number;
+      limit: number;
+      requestGeneration: number;
+      selectFirst?: boolean;
+    }) => {
+      const offset = Math.max(0, scope.offset);
+      const limit = Math.max(1, Math.min(MEDIA_WINDOW_MAX_LIMIT, scope.limit));
+      const requestKey = mediaPageRequestKey(
+        scope.rootId,
+        scope.folderId,
+        `offset:${offset}:${limit}`,
+        scope.includeDescendants
+      );
+      if (
+        inFlightMediaPageKeys.current.has(requestKey) ||
+        loadedMediaPageKeys.current.has(requestKey)
+      ) {
+        return;
+      }
+
+      inFlightMediaPageKeys.current.add(requestKey);
+      setLoadingMoreMedia(true);
+      try {
+        const mediaPage = await loadMediaPage({
+          folderId: scope.folderId,
+          includeDescendants: scope.includeDescendants,
+          limit,
+          offset,
+          rootId: scope.rootId
+        });
+        if (scope.requestGeneration !== mediaPageGeneration.current) {
+          return;
+        }
+        const totalCount = Math.max(
+          mediaPage.totalCount ?? mediaTotalCountRef.current,
+          offset + mediaPage.items.length
+        );
+        setMediaTotalCount(totalCount);
+        setMediaSlots((current) => {
+          return applyMediaWindowToSlots(current, totalCount, offset, mediaPage.items);
+        });
+        setMedia((current) => appendUniqueMedia(current, mediaPage.items));
+        setLoadedMediaRanges((current) =>
+          mergeLoadedMediaRanges(current, offset, offset + mediaPage.items.length)
+        );
+        loadedMediaPageKeys.current.add(requestKey);
+        setMediaNextCursor(mediaPage.nextCursor);
+        if (scope.selectFirst) {
+          selectMedia((current) =>
+            current && mediaPage.items.some((item) => item.id === current)
+              ? current
+              : mediaPage.items[0]?.id ?? null
+          );
+        }
+        await yieldToBrowser();
+      } catch (cause) {
+        if (scope.requestGeneration === mediaPageGeneration.current) {
+          setError(errorMessage(cause));
+        }
+      } finally {
+        inFlightMediaPageKeys.current.delete(requestKey);
+        if (scope.requestGeneration === mediaPageGeneration.current) {
+          setLoadingMoreMedia(false);
+        }
+      }
+    },
+    [loadMediaPage]
+  );
+
+  const requestMediaWindow = useCallback(
+    (startIndex: number, endIndex: number) => {
+      const totalCount = mediaTotalCountRef.current;
+      const clampedStart = Math.max(0, Math.floor(startIndex));
+      const clampedEnd = Math.max(clampedStart, Math.ceil(endIndex));
+      if (totalCount <= 0 || clampedStart >= totalCount) {
+        return;
+      }
+      const pageOffset = clampedStart;
+      const pageEnd = Math.min(
+        totalCount,
+        pageOffset + Math.min(MEDIA_WINDOW_MAX_LIMIT, Math.max(1, clampedEnd - pageOffset))
+      );
+      const missingRange = firstMissingMediaRange(
+        loadedMediaRangesRef.current,
+        pageOffset,
+        pageEnd
+      );
+      if (!missingRange) {
+        return;
+      }
+      const rootId = selectedRootIdRef.current;
+      if (rootId === null) {
+        return;
+      }
+      const folderId = selectedFolderIdRef.current;
+      const folderFilter = folderId !== null && folderId !== undefined ? folderId : undefined;
+      void loadMediaWindow({
+        rootId,
+        folderId: folderFilter,
+        includeDescendants: showChildFolderContentsRef.current,
+        offset: missingRange.start,
+        limit: missingRange.end - missingRange.start,
+        requestGeneration: mediaPageGeneration.current
+      });
+    },
+    [loadMediaWindow]
+  );
+
   const reloadCurrentMedia = useCallback(
     async (scope?: {
       rootId?: number;
@@ -634,33 +842,26 @@ export function useLibraryData(): LibraryState {
       const folderId = scope && "folderId" in scope ? scope.folderId : selectedFolderId;
       const includeDescendants =
         scope?.includeDescendants ?? showChildFolderContentsRef.current;
-      const folderFilter =
-        folderId !== null && folderId !== undefined && folderId !== root.rootFolderId
-          ? folderId
-          : undefined;
+      const folderFilter = folderId !== null && folderId !== undefined ? folderId : undefined;
       inFlightMediaPageKeys.current.clear();
       loadedMediaPageKeys.current.clear();
+      setMedia([]);
+      setMediaSlots([]);
+      setMediaTotalCount(0);
+      setLoadedMediaRanges([]);
+      setMediaNextCursor(null);
       setError(null);
 
       try {
-        const cursor = null;
-        const sort = searchStateRef.current.sort;
-        const mediaPage = searchActiveRef.current
-          ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
-              includeDescendants,
-              rootId: root.id,
-              folderId: folderFilter,
-              cursor: cursor ?? undefined,
-              limit: PAGE_LIMIT
-            }))
-          : await client.listMedia({
-            cursor: cursor ?? undefined,
-            folderId: folderFilter,
-            includeDescendants,
-            limit: PAGE_LIMIT,
-            rootId: root.id,
-            sort: listMediaSort(sort)
-          });
+        await loadMediaWindow({
+          rootId: root.id,
+          folderId: folderFilter,
+          includeDescendants,
+          offset: 0,
+          limit: INITIAL_MEDIA_WINDOW_LIMIT,
+          requestGeneration,
+          selectFirst: true
+        });
         if (
           requestGeneration !== mediaPageGeneration.current ||
           (scanRefreshSelectionToken &&
@@ -668,13 +869,6 @@ export function useLibraryData(): LibraryState {
         ) {
           return;
         }
-        setMedia(mediaPage.items);
-        setMediaNextCursor(mediaPage.nextCursor);
-        selectMedia((current) =>
-          current && mediaPage.items.some((item) => item.id === current)
-            ? current
-            : mediaPage.items[0]?.id ?? null
-        );
       } catch (cause) {
         setError(errorMessage(cause));
         throw cause;
@@ -689,7 +883,13 @@ export function useLibraryData(): LibraryState {
         }
       }
     },
-    [client, isCurrentScanRefreshSelection, roots, selectedFolderId, selectedRootId]
+    [
+      isCurrentScanRefreshSelection,
+      loadMediaWindow,
+      roots,
+      selectedFolderId,
+      selectedRootId
+    ]
   );
 
   const refreshCurrentScanView = useCallback(async () => {
@@ -722,6 +922,11 @@ export function useLibraryData(): LibraryState {
         return;
       }
       await loadFolderChildren(folderId);
+      if (showChildFolderContentsRef.current) {
+        void loadFolderDescendants(folderId).catch((cause) => {
+          setError(errorMessage(cause));
+        });
+      }
       if (!isCurrentScanRefreshSelection(selectionToken)) {
         return;
       }
@@ -745,6 +950,7 @@ export function useLibraryData(): LibraryState {
     createScanRefreshSelectionToken,
     isCurrentScanRefreshSelection,
     loadFolderChildren,
+    loadFolderDescendants,
     loadRoots,
     loadTasks,
     reloadCurrentMedia
@@ -770,44 +976,38 @@ export function useLibraryData(): LibraryState {
       if (folderId) {
         setExpandedFolderIds((current) => new Set(current).add(folderId));
         await loadFolderChildren(folderId);
+        if (includeDescendants) {
+          void loadFolderDescendants(folderId).catch((cause) => {
+            setError(errorMessage(cause));
+          });
+        }
       } else {
         setFolderChildrenByParent({});
+        setFolderDescendantsByParent({});
         setFolderChildNextCursorByParent({});
       }
 
       if (root) {
-        const folderFilter =
-          folderId && folderId !== root.rootFolderId ? folderId : undefined;
-        const cursor = null;
-        const sort = searchStateRef.current.sort;
-        const mediaPage = searchActiveRef.current
-          ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
-              includeDescendants,
-              rootId: root.id,
-              folderId: folderFilter,
-              cursor: cursor ?? undefined,
-              limit: PAGE_LIMIT
-            }))
-          : await client.listMedia({
-              cursor: cursor ?? undefined,
-              folderId: folderFilter,
-              includeDescendants,
-              limit: PAGE_LIMIT,
-              rootId: root.id,
-              sort: listMediaSort(sort)
-            });
-        if (requestGeneration !== mediaPageGeneration.current) {
-          return;
-        }
-        setMedia(mediaPage.items);
-        setMediaNextCursor(mediaPage.nextCursor);
-        selectMedia((current) =>
-          current && mediaPage.items.some((item) => item.id === current)
-            ? current
-            : mediaPage.items[0]?.id ?? null
-        );
+        const folderFilter = folderId !== null && folderId !== undefined ? folderId : undefined;
+        setMedia([]);
+        setMediaSlots([]);
+        setMediaTotalCount(0);
+        setLoadedMediaRanges([]);
+        setMediaNextCursor(null);
+        await loadMediaWindow({
+          rootId: root.id,
+          folderId: folderFilter,
+          includeDescendants,
+          offset: 0,
+          limit: INITIAL_MEDIA_WINDOW_LIMIT,
+          requestGeneration,
+          selectFirst: true
+        });
       } else {
         setMedia([]);
+        setMediaSlots([]);
+        setMediaTotalCount(0);
+        setLoadedMediaRanges([]);
         setMediaNextCursor(null);
         selectMedia(null);
       }
@@ -816,7 +1016,13 @@ export function useLibraryData(): LibraryState {
     } finally {
       setLoading(false);
     }
-  }, [client, loadFolderChildren, loadRoots, loadTasks]);
+  }, [
+    loadMediaWindow,
+    loadFolderChildren,
+    loadFolderDescendants,
+    loadRoots,
+    loadTasks
+  ]);
 
   useEffect(() => {
     void loadLibrary();
@@ -893,10 +1099,16 @@ export function useLibraryData(): LibraryState {
       return;
     }
     let cancelled = false;
+    const requestGeneration = metadataEditGenerationRef.current;
+    const requestMediaId = selectedMediaId;
     void client
       .getUserMetadata(selectedMediaId)
       .then((record) => {
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          selectedMediaIdRef.current === requestMediaId &&
+          metadataEditGenerationRef.current === requestGeneration
+        ) {
           setSelectedMetadata(record);
         }
       })
@@ -1125,6 +1337,7 @@ export function useLibraryData(): LibraryState {
           selectRoot(response.rootId);
           selectFolder(null);
           setExpandedFolderIds(new Set());
+          setFolderDescendantsByParent({});
           setFolderChildNextCursorByParent({});
         }
         await loadTasks();
@@ -1139,62 +1352,12 @@ export function useLibraryData(): LibraryState {
   );
 
   const loadMoreMedia = useCallback(async () => {
-    if (!mediaNextCursor || loadingMoreMedia) {
-      return;
-    }
-
-    const root = roots.find((item) => item.id === selectedRootId);
-    if (!root) {
-      return;
-    }
-
-    const folderFilter =
-      selectedFolderId && selectedFolderId !== root.rootFolderId ? selectedFolderId : undefined;
-    const includeDescendants = showChildFolderContentsRef.current;
-    const cursor = mediaNextCursor;
-    const requestGeneration = mediaPageGeneration.current;
-    const requestKey = mediaPageRequestKey(root.id, folderFilter, cursor);
-    if (
-      inFlightMediaPageKeys.current.has(requestKey) ||
-      loadedMediaPageKeys.current.has(requestKey)
-    ) {
-      return;
-    }
-
-    inFlightMediaPageKeys.current.add(requestKey);
-    setLoadingMoreMedia(true);
-    setError(null);
-    try {
-      const sort = searchStateRef.current.sort;
-      const mediaPage = searchActiveRef.current
-        ? await client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, {
-            includeDescendants,
-            rootId: root.id,
-            folderId: folderFilter,
-            cursor: cursor ?? undefined,
-            limit: PAGE_LIMIT
-          }))
-        : await client.listMedia({
-            cursor: cursor ?? undefined,
-            folderId: folderFilter,
-            includeDescendants,
-            limit: PAGE_LIMIT,
-            rootId: root.id,
-            sort: listMediaSort(sort)
-          });
-      if (requestGeneration !== mediaPageGeneration.current) {
-        return;
-      }
-      setMedia((current) => [...current, ...mediaPage.items]);
-      loadedMediaPageKeys.current.add(requestKey);
-      setMediaNextCursor(mediaPage.nextCursor);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setLoadingMoreMedia(false);
-      inFlightMediaPageKeys.current.delete(requestKey);
-    }
-  }, [client, loadingMoreMedia, mediaNextCursor, roots, selectedFolderId, selectedRootId]);
+    const loadedEnd = loadedMediaRangesRef.current.reduce(
+      (maxEnd, range) => Math.max(maxEnd, range.end),
+      0
+    );
+    requestMediaWindow(loadedEnd, loadedEnd + INITIAL_MEDIA_WINDOW_LIMIT);
+  }, [requestMediaWindow]);
 
   const rescanRoot = useCallback(
     async (rootId: number) => {
@@ -1316,11 +1479,14 @@ export function useLibraryData(): LibraryState {
   const reflectMetadataLocally = useCallback(
     (fileId: number, patch: UserMetadataUpdate) => {
       setSelectedMetadata((current) => {
-        if (!current || current.fileId !== fileId) return current;
-        const next: UserMetadataRecord = { ...current };
+        if (current && current.fileId !== fileId) return current;
+        if (!current && selectedMediaIdRef.current !== fileId) return current;
+        const base = current ?? emptyUserMetadataRecord(fileId);
+        const next: UserMetadataRecord = { ...base };
         if ("rating" in patch) next.rating = patch.rating ?? null;
         if ("favorite" in patch && patch.favorite !== undefined) next.favorite = patch.favorite;
         if ("note" in patch) next.note = patch.note ?? null;
+        next.updatedAt = Date.now();
         return next;
       });
       if ("favorite" in patch && patch.favorite !== undefined) {
@@ -1344,13 +1510,12 @@ export function useLibraryData(): LibraryState {
       const previousMetadata =
         selectedMetadata && selectedMetadata.fileId === fileId ? selectedMetadata : null;
       const previousMediaRow = media.find((item) => item.id === fileId) ?? null;
+      metadataEditGenerationRef.current += 1;
       reflectMetadataLocally(fileId, patch);
       setMetadataSaving(true);
       try {
         const record = await client.updateUserMetadata(fileId, patch);
-        setSelectedMetadata((current) =>
-          current && current.fileId === fileId ? record : current
-        );
+        reflectMetadataLocally(fileId, confirmedMetadataPatch(patch, record));
       } catch (cause) {
         if (previousMetadata) {
           setSelectedMetadata((current) =>
@@ -1371,9 +1536,12 @@ export function useLibraryData(): LibraryState {
   );
 
   const reflectFileTagsLocally = useCallback((fileId: number, tagIds: number[]) => {
-    setSelectedMetadata((current) =>
-      current && current.fileId === fileId ? { ...current, tagIds } : current
-    );
+    setSelectedMetadata((current) => {
+      if (current && current.fileId !== fileId) return current;
+      if (!current && selectedMediaIdRef.current !== fileId) return current;
+      const base = current ?? emptyUserMetadataRecord(fileId);
+      return { ...base, tagIds, updatedAt: Date.now() };
+    });
     setMedia((current) =>
       current.map((item) => (item.id === fileId ? { ...item, tagIds } : item))
     );
@@ -1396,6 +1564,7 @@ export function useLibraryData(): LibraryState {
   const setFileTags = useCallback(
     async (fileId: number, tagIds: number[]) => {
       const previous = capturePreviousTagIds(fileId);
+      metadataEditGenerationRef.current += 1;
       reflectFileTagsLocally(fileId, tagIds);
       try {
         const response = await client.setFileTags(fileId, { tagIds });
@@ -1412,6 +1581,7 @@ export function useLibraryData(): LibraryState {
     async (fileId: number, tagId: number) => {
       const previous = capturePreviousTagIds(fileId);
       const optimistic = previous && previous.includes(tagId) ? previous : [...(previous ?? []), tagId];
+      metadataEditGenerationRef.current += 1;
       reflectFileTagsLocally(fileId, optimistic);
       try {
         const response = await client.addFileTag(fileId, { tagId });
@@ -1428,6 +1598,7 @@ export function useLibraryData(): LibraryState {
     async (fileId: number, tagId: number) => {
       const previous = capturePreviousTagIds(fileId);
       const optimistic = (previous ?? []).filter((id) => id !== tagId);
+      metadataEditGenerationRef.current += 1;
       reflectFileTagsLocally(fileId, optimistic);
       try {
         const response = await client.removeFileTag(fileId, tagId);
@@ -1528,6 +1699,7 @@ export function useLibraryData(): LibraryState {
   const renameFolder = useCallback(
     async (folderId: number, newName: string): Promise<FileOpResult> => {
       const previousChildren = folderChildrenByParent;
+      const previousDescendants = folderDescendantsByParent;
       // Optimistic: update folder name everywhere it appears
       setFolderChildrenByParent((current) => {
         let changed = false;
@@ -1543,18 +1715,20 @@ export function useLibraryData(): LibraryState {
         }
         return changed ? next : current;
       });
+      setFolderDescendantsByParent((current) => renameFolderInMap(current, folderId, newName));
       try {
         await client.renameFileOp({ folderId, newName });
         await Promise.all([loadRecentOps(), loadLibrary()]);
         return { ok: true };
       } catch (cause) {
         setFolderChildrenByParent(previousChildren);
+        setFolderDescendantsByParent(previousDescendants);
         const result = fileOpFailure(cause);
         setError(result.message ?? "Rename failed");
         return result;
       }
     },
-    [client, folderChildrenByParent, loadLibrary, loadRecentOps]
+    [client, folderChildrenByParent, folderDescendantsByParent, loadLibrary, loadRecentOps]
   );
 
   const moveItems = useCallback(
@@ -1605,6 +1779,7 @@ export function useLibraryData(): LibraryState {
       const previousMedia = media;
       const previousSelectedMediaId = selectedMediaId;
       const previousChildren = folderChildrenByParent;
+      const previousDescendants = folderDescendantsByParent;
 
       // Optimistic: remove deleted items locally
       if (fileIds.length > 0) {
@@ -1621,6 +1796,7 @@ export function useLibraryData(): LibraryState {
           }
           return next;
         });
+        setFolderDescendantsByParent((current) => removeFoldersFromMap(current, folderIds));
       }
 
       try {
@@ -1636,6 +1812,7 @@ export function useLibraryData(): LibraryState {
         setMedia(previousMedia);
         selectMedia(previousSelectedMediaId);
         setFolderChildrenByParent(previousChildren);
+        setFolderDescendantsByParent(previousDescendants);
         const result = fileOpFailure(cause);
         setError(result.message ?? "Delete failed");
         return result;
@@ -1644,6 +1821,7 @@ export function useLibraryData(): LibraryState {
     [
       client,
       folderChildrenByParent,
+      folderDescendantsByParent,
       loadLibrary,
       loadRecentOps,
       media,
@@ -1655,6 +1833,9 @@ export function useLibraryData(): LibraryState {
     roots,
     folders,
     media,
+    mediaSlots,
+    mediaTotalCount,
+    loadedMediaRanges,
     showChildFolderContents,
     selectedRootId,
     selectedFolderId,
@@ -1662,9 +1843,11 @@ export function useLibraryData(): LibraryState {
     selectedMedia,
     selectedMetadata,
     folderChildrenByParent,
+    folderDescendantsByParent,
     folderChildNextCursorByParent,
     expandedFolderIds,
     loadingFolderIds,
+    loadingFolderDescendantIds,
     loadingMoreFolderIds,
     loading,
     loadingMoreMedia,
@@ -1702,10 +1885,16 @@ export function useLibraryData(): LibraryState {
       if (rootFolderId) {
         setExpandedFolderIds((current) => new Set(current).add(rootFolderId));
         void loadFolderChildren(rootFolderId);
+        if (showChildFolderContentsRef.current) {
+          void loadFolderDescendants(rootFolderId).catch((cause) => {
+            setError(errorMessage(cause));
+          });
+        }
       }
       void reloadCurrentMedia({
         rootId,
         folderId: rootFolderId,
+        includeDescendants: showChildFolderContentsRef.current,
         setLoadingState: true
       }).catch((cause) => {
         setError(errorMessage(cause));
@@ -1718,9 +1907,15 @@ export function useLibraryData(): LibraryState {
       selectRoot(folder.rootId);
       selectFolder(folder.id);
       void loadFolderChildren(folder.id);
+      if (showChildFolderContentsRef.current) {
+        void loadFolderDescendants(folder.id).catch((cause) => {
+          setError(errorMessage(cause));
+        });
+      }
       void reloadCurrentMedia({
         rootId: folder.rootId,
         folderId: folder.id,
+        includeDescendants: showChildFolderContentsRef.current,
         setLoadingState: true
       }).catch((cause) => {
         setError(errorMessage(cause));
@@ -1730,6 +1925,11 @@ export function useLibraryData(): LibraryState {
       const nextShowChildFolderContents = !showChildFolderContentsRef.current;
       showChildFolderContentsRef.current = nextShowChildFolderContents;
       setShowChildFolderContents(nextShowChildFolderContents);
+      if (nextShowChildFolderContents && selectedFolderIdRef.current !== null) {
+        void loadFolderDescendants(selectedFolderIdRef.current).catch((cause) => {
+          setError(errorMessage(cause));
+        });
+      }
       prepareNavigationMediaReload();
       void reloadCurrentMedia({
         rootId: selectedRootIdRef.current ?? undefined,
@@ -1742,6 +1942,7 @@ export function useLibraryData(): LibraryState {
     },
     setSelectedMediaId: selectMedia,
     requestThumbnailStates,
+    requestMediaWindow,
     toggleFolderExpanded: (folderId: number) => {
       setExpandedFolderIds((current) => {
         const next = new Set(current);
@@ -1778,12 +1979,107 @@ export function useLibraryData(): LibraryState {
   };
 }
 
+function appendUniqueMedia(current: MediaRecord[], incoming: MediaRecord[]): MediaRecord[] {
+  if (incoming.length === 0) {
+    return current;
+  }
+
+  const next = [...current];
+  const indexById = new Map(current.map((item, index) => [item.id, index]));
+  let changed = false;
+  for (const item of incoming) {
+    const existingIndex = indexById.get(item.id);
+    if (existingIndex === undefined) {
+      indexById.set(item.id, next.length);
+      next.push(item);
+      changed = true;
+    } else if (next[existingIndex] !== item) {
+      next[existingIndex] = item;
+      changed = true;
+    }
+  }
+  return changed ? next : current;
+}
+
+function mergeLoadedMediaRanges(
+  current: Array<{ start: number; end: number }>,
+  start: number,
+  end: number
+): Array<{ start: number; end: number }> {
+  if (end <= start) return current;
+  const ranges = [...current, { start, end }].sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (!previous || range.start > previous.end) {
+      merged.push({ ...range });
+    } else {
+      previous.end = Math.max(previous.end, range.end);
+    }
+  }
+  return merged;
+}
+
+function firstMissingMediaRange(
+  ranges: Array<{ start: number; end: number }>,
+  start: number,
+  end: number
+): { start: number; end: number } | null {
+  if (end <= start) return null;
+  const sortedRanges = [...ranges].sort((left, right) => left.start - right.start);
+  let cursor = start;
+  for (const range of sortedRanges) {
+    if (range.end <= cursor) {
+      continue;
+    }
+    if (range.start > cursor) {
+      break;
+    }
+    cursor = Math.max(cursor, range.end);
+    if (cursor >= end) {
+      return null;
+    }
+  }
+  return { start: cursor, end };
+}
+
+function applyMediaWindowToSlots(
+  current: Array<MediaRecord | undefined>,
+  totalCount: number,
+  offset: number,
+  items: MediaRecord[]
+): Array<MediaRecord | undefined> {
+  const next = current.length === totalCount
+    ? current.slice()
+    : new Array<MediaRecord | undefined>(totalCount);
+  if (current.length > 0 && current.length !== totalCount) {
+    const copyLength = Math.min(current.length, totalCount);
+    for (let index = 0; index < copyLength; index += 1) {
+      next[index] = current[index];
+    }
+  }
+  items.forEach((item, index) => {
+    const targetIndex = offset + index;
+    if (targetIndex >= 0 && targetIndex < totalCount) {
+      next[targetIndex] = item;
+    }
+  });
+  return next;
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+}
+
 function mediaPageRequestKey(
   rootId: number,
   folderId: number | undefined,
-  cursor: string
+  cursor: string,
+  includeDescendants = false
 ): string {
-  return [rootId, folderId ?? "root", cursor].join(":");
+  return [rootId, folderId ?? "root", includeDescendants ? "recursive" : "direct", cursor].join(":");
 }
 
 function folderChildPageRequestKey(folderId: number, cursor: string): string {
@@ -1797,6 +2093,28 @@ function clearFolderChildPageKeys(keys: Set<string>, folderId: number): void {
       keys.delete(key);
     }
   }
+}
+
+function emptyUserMetadataRecord(fileId: number): UserMetadataRecord {
+  return {
+    favorite: false,
+    fileId,
+    note: null,
+    rating: null,
+    tagIds: [],
+    updatedAt: Date.now()
+  };
+}
+
+function confirmedMetadataPatch(
+  requestedPatch: UserMetadataUpdate,
+  record: UserMetadataRecord
+): UserMetadataUpdate {
+  const confirmed: UserMetadataUpdate = {};
+  if ("rating" in requestedPatch) confirmed.rating = record.rating;
+  if ("favorite" in requestedPatch) confirmed.favorite = record.favorite;
+  if ("note" in requestedPatch) confirmed.note = record.note;
+  return confirmed;
 }
 
 function emptyThumbnailPriorityScope(): ThumbnailPriorityScope {
@@ -1907,6 +2225,42 @@ function removeThumbnailState(
   return next;
 }
 
+function renameFolderInMap(
+  current: Record<number, FolderRecord[]>,
+  folderId: number,
+  newName: string
+): Record<number, FolderRecord[]> {
+  let changed = false;
+  const next: Record<number, FolderRecord[]> = {};
+  for (const [parentId, children] of Object.entries(current)) {
+    const updated = children.map((child) =>
+      child.id === folderId ? { ...child, name: newName } : child
+    );
+    if (updated.some((child, index) => child !== children[index])) {
+      changed = true;
+    }
+    next[Number(parentId)] = updated;
+  }
+  return changed ? next : current;
+}
+
+function removeFoldersFromMap(
+  current: Record<number, FolderRecord[]>,
+  folderIds: number[]
+): Record<number, FolderRecord[]> {
+  const folderIdSet = new Set(folderIds);
+  let changed = false;
+  const next: Record<number, FolderRecord[]> = {};
+  for (const [parentId, children] of Object.entries(current)) {
+    const updated = children.filter((child) => !folderIdSet.has(child.id));
+    if (updated.length !== children.length) {
+      changed = true;
+    }
+    next[Number(parentId)] = updated;
+  }
+  return changed ? next : current;
+}
+
 function latestFailedThumbnailTaskForFile(tasks: TaskRecord[], fileId: number): TaskRecord | null {
   return (
     tasks
@@ -1982,6 +2336,7 @@ function buildSearchParams(
     folderId: number | undefined;
     includeDescendants: boolean;
     cursor?: string;
+    offset?: number;
     limit: number;
   }
 ): SearchParams {
@@ -1991,6 +2346,7 @@ function buildSearchParams(
     sort: state.sort
   };
   if (scope.cursor) params.cursor = scope.cursor;
+  if (typeof scope.offset === "number") params.offset = scope.offset;
   if (scope.folderId !== undefined) {
     params.folderId = scope.folderId;
     params.includeDescendants = scope.includeDescendants;

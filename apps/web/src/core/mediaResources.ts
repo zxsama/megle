@@ -11,6 +11,9 @@ type CachedOriginalPreviewEntry = {
   mediaSignature: string;
   blob: Blob;
 };
+type CachedThumbnailObjectUrlEntry = {
+  objectUrl: string;
+};
 type OriginalPreviewRequestOptions = {
   signal?: AbortSignal;
 };
@@ -21,8 +24,10 @@ const thumbnailClient = createCoreClient();
 export const thumbnailResourceCache = new Map<number, CachedThumbnailEntry>();
 export const inFlightThumbnailRequests = new Map<string, Promise<ThumbnailResponse>>();
 export const inFlightThumbnailBlobRequests = new Map<string, Promise<Blob>>();
+export const thumbnailObjectUrlCache = new Map<string, CachedThumbnailObjectUrlEntry>();
 export const originalPreviewBlobCache = new Map<number, CachedOriginalPreviewEntry>();
 export const inFlightOriginalPreviewRequests = new Map<string, Promise<Blob>>();
+const THUMBNAIL_OBJECT_URL_CACHE_LIMIT = 512;
 const ORIGINAL_PREVIEW_CACHE_LIMIT = 5;
 
 export async function requestThumbnailState(
@@ -89,6 +94,70 @@ export async function requestThumbnailBlob(
     });
   inFlightThumbnailBlobRequests.set(requestKey, request);
   return request;
+}
+
+export function readCachedThumbnailObjectUrl(cacheKey: string): string | null {
+  const cached = thumbnailObjectUrlCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+  thumbnailObjectUrlCache.delete(cacheKey);
+  thumbnailObjectUrlCache.set(cacheKey, cached);
+  return cached.objectUrl;
+}
+
+export function rememberThumbnailObjectUrl(cacheKey: string, objectUrl: string): void {
+  const previous = thumbnailObjectUrlCache.get(cacheKey);
+  if (previous?.objectUrl === objectUrl) {
+    thumbnailObjectUrlCache.delete(cacheKey);
+    thumbnailObjectUrlCache.set(cacheKey, previous);
+    return;
+  }
+  if (previous) {
+    URL.revokeObjectURL(previous.objectUrl);
+  }
+  thumbnailObjectUrlCache.set(cacheKey, { objectUrl });
+  pruneThumbnailObjectUrlCache();
+}
+
+export function thumbnailObjectUrlCacheKey(
+  fileId: number,
+  mediaSignature: string,
+  versionKey: number | null
+): string {
+  return `${fileId}:${GRID_THUMBNAIL_TARGET}:${versionKey ?? mediaSignature}`;
+}
+
+export function preloadImageObjectUrl(
+  objectUrl: string
+): Promise<{ naturalHeight: number; naturalWidth: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+
+    const cleanup = () => {
+      image.onload = null;
+      image.onerror = null;
+    };
+
+    image.onload = () => {
+      const decode = typeof image.decode === "function" ? image.decode() : Promise.resolve();
+      decode
+        .catch(() => undefined)
+        .then(() => {
+          cleanup();
+          resolve({
+            naturalHeight: image.naturalHeight,
+            naturalWidth: image.naturalWidth
+          });
+        });
+    };
+    image.onerror = () => {
+      cleanup();
+      reject(new Error("image preload failed"));
+    };
+    image.src = objectUrl;
+  });
 }
 
 export function requestOriginalPreviewBlob(
@@ -294,6 +363,18 @@ function pruneOriginalPreviewCache(): void {
     const firstKey = originalPreviewBlobCache.keys().next().value;
     if (firstKey === undefined) break;
     originalPreviewBlobCache.delete(firstKey);
+  }
+}
+
+function pruneThumbnailObjectUrlCache(): void {
+  while (thumbnailObjectUrlCache.size > THUMBNAIL_OBJECT_URL_CACHE_LIMIT) {
+    const firstKey = thumbnailObjectUrlCache.keys().next().value;
+    if (firstKey === undefined) break;
+    const cached = thumbnailObjectUrlCache.get(firstKey);
+    if (cached) {
+      URL.revokeObjectURL(cached.objectUrl);
+    }
+    thumbnailObjectUrlCache.delete(firstKey);
   }
 }
 

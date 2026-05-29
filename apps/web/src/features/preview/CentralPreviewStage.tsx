@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
@@ -44,18 +45,58 @@ export function CentralPreviewStage({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [fitSyncTick, setFitSyncTick] = useState(0);
   const [previewReadyTick, setPreviewReadyTick] = useState(0);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [measuredNaturalSize, setMeasuredNaturalSize] = useState<{
+    mediaId: number;
+    naturalHeight: number;
+    naturalWidth: number;
+  } | null>(null);
+  const measuredNaturalSizeRef = useRef(measuredNaturalSize);
   const [viewMode, setViewMode] = useState<PreviewViewMode>("fit-long-edge");
+  const viewModeRef = useRef(viewMode);
+  const fitLongEdgeScaleForMedia = useCallback((sizeOverride?: {
+    naturalHeight: number;
+    naturalWidth: number;
+  }) => {
+    const stage = stageRef.current;
+    const measuredSize =
+      measuredNaturalSize?.mediaId === selectedMedia.id ? measuredNaturalSize : null;
+    const width =
+      sizeOverride?.naturalWidth ?? measuredSize?.naturalWidth ?? selectedMedia.width ?? 0;
+    const height =
+      sizeOverride?.naturalHeight ?? measuredSize?.naturalHeight ?? selectedMedia.height ?? 0;
+    return fitScaleForDimensions(stage, width, height);
+  }, [measuredNaturalSize, selectedMedia.height, selectedMedia.id, selectedMedia.width]);
   const resetTransform = useCallback(() => {
     setPan({ x: 0, y: 0 });
     setViewMode("fit-long-edge");
+    setScale(fitLongEdgeScaleForMedia() ?? 1);
     setFitSyncTick((value) => value + 1);
     dragRef.current = null;
-  }, []);
+  }, [fitLongEdgeScaleForMedia]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     stageRef.current?.focus({ preventScroll: true });
     resetTransform();
   }, [resetTransform, selectedMedia.id]);
+
+  useEffect(() => {
+    measuredNaturalSizeRef.current = measuredNaturalSize;
+  }, [measuredNaturalSize]);
+
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
+
+  useEffect(() => {
+    setMeasuredNaturalSize((current) =>
+      current?.mediaId === selectedMedia.id ? current : null
+    );
+    measuredNaturalSizeRef.current =
+      measuredNaturalSizeRef.current?.mediaId === selectedMedia.id
+        ? measuredNaturalSizeRef.current
+        : null;
+  }, [selectedMedia.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +151,29 @@ export function CentralPreviewStage({
   const handleMediaReady = useCallback(() => {
     setPreviewReadyTick((value) => value + 1);
   }, []);
+  const handleMediaLoadingChange = useCallback((loading: boolean) => {
+    setPreviewLoading(loading);
+  }, []);
+  const handleNaturalSize = useCallback(
+    (size: { naturalHeight: number; naturalWidth: number }) => {
+      const measuredSize = { mediaId: selectedMedia.id, ...size };
+      measuredNaturalSizeRef.current = measuredSize;
+      setMeasuredNaturalSize(measuredSize);
+      if (viewModeRef.current === "fit-long-edge") {
+        const nextScale = fitScaleForDimensions(
+          stageRef.current,
+          size.naturalWidth,
+          size.naturalHeight
+        );
+        if (nextScale !== null) {
+          setScale(nextScale);
+          setPan({ x: 0, y: 0 });
+          setFitSyncTick((value) => value + 1);
+        }
+      }
+    },
+    [selectedMedia.id]
+  );
 
   const zoomAtPoint = useCallback(
     (clientX: number, clientY: number, nextScale: number, nextMode: PreviewViewMode = viewMode) => {
@@ -218,7 +282,7 @@ export function CentralPreviewStage({
     const stage = stageRef.current;
     const metrics = stage ? previewMetrics(stage) : null;
     if (!metrics) {
-      return null;
+      return fitLongEdgeScaleForMedia();
     }
     return clampFitScale(
       Math.min(
@@ -229,7 +293,9 @@ export function CentralPreviewStage({
   }
 
   function previewMetrics(stage: HTMLDivElement) {
-    const mediaElement = stage.querySelector<HTMLImageElement | HTMLVideoElement>(".preview-image");
+    const mediaElement = stage.querySelector<HTMLImageElement | HTMLVideoElement>(
+      ".preview-placeholder.ready .preview-image"
+    );
     if (!stage || !mediaElement) {
       return null;
     }
@@ -331,11 +397,23 @@ export function CentralPreviewStage({
         >
           <MediaPreview
             media={selectedMedia}
+            onLoadingChange={handleMediaLoadingChange}
             onMediaReady={handleMediaReady}
+            onNaturalSize={handleNaturalSize}
             source="original"
+            stableFrame
             thumbnail={thumbnail}
           />
         </div>
+        {previewLoading ? (
+          <div
+            aria-label="Loading preview"
+            className="central-preview-loading-indicator"
+            role="status"
+          >
+            <span className="central-preview-loading-spinner" aria-hidden="true" />
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -343,6 +421,21 @@ export function CentralPreviewStage({
 
 const MAX_PREVIEW_SCALE = 8;
 const MIN_INTERACTIVE_SCALE = 0.1;
+
+function fitScaleForDimensions(
+  stage: HTMLDivElement | null,
+  width: number,
+  height: number
+) {
+  if (!stage || width <= 0 || height <= 0) {
+    return null;
+  }
+  const stageRect = stage.getBoundingClientRect();
+  if (stageRect.width <= 0 || stageRect.height <= 0) {
+    return null;
+  }
+  return clampFitScale(Math.min(stageRect.width / width, stageRect.height / height));
+}
 
 function clampScale(value: number) {
   return Math.min(MAX_PREVIEW_SCALE, Math.max(MIN_INTERACTIVE_SCALE, value));

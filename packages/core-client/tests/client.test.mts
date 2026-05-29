@@ -58,23 +58,46 @@ describe("createCoreClient", () => {
     assert.equal(recorded[0].headers["x-megle-session"], "secret");
   });
 
-  test("listMedia serializes filters and sort", async () => {
-    mockFetch({ items: [], nextCursor: null });
-    await client().listMedia({ rootId: 7, sort: "mtime_desc", kind: "image", limit: 50 });
+  test("listMedia serializes filters, offset window, and sort", async () => {
+    mockFetch({ items: [], nextCursor: null, totalCount: 1234 });
+    const page = await client().listMedia({
+      rootId: 7,
+      sort: "mtime_desc",
+      kind: "image",
+      limit: 50,
+      offset: 100
+    });
     const url = new URL(recorded[0].url);
     assert.equal(url.searchParams.get("rootId"), "7");
     assert.equal(url.searchParams.get("sort"), "mtime_desc");
     assert.equal(url.searchParams.get("kind"), "image");
     assert.equal(url.searchParams.get("limit"), "50");
+    assert.equal(url.searchParams.get("offset"), "100");
+    assert.equal(page.totalCount, 1234);
   });
 
-  test("searchMedia repeats tagId for AND filtering", async () => {
+  test("listFolderChildren serializes recursive descendant mode", async () => {
     mockFetch({ items: [], nextCursor: null });
-    await client().searchMedia({ rootId: 1, tagIds: [10, 20, 30], sort: "rating_desc" });
+    await client().listFolderChildren(42, { includeDescendants: true, limit: 25 });
+    const url = new URL(recorded[0].url);
+    assert.equal(url.pathname, "/api/folders/42/children");
+    assert.equal(url.searchParams.get("includeDescendants"), "true");
+    assert.equal(url.searchParams.get("limit"), "25");
+  });
+
+  test("searchMedia repeats tagId for AND filtering and offset windows", async () => {
+    mockFetch({ items: [], nextCursor: null });
+    await client().searchMedia({
+      rootId: 1,
+      tagIds: [10, 20, 30],
+      sort: "rating_desc",
+      offset: 250
+    });
     const url = new URL(recorded[0].url);
     const tagIds = url.searchParams.getAll("tagId");
     assert.deepEqual(tagIds, ["10", "20", "30"]);
     assert.equal(url.searchParams.get("sort"), "rating_desc");
+    assert.equal(url.searchParams.get("offset"), "250");
   });
 
   test("createTag posts JSON body", async () => {

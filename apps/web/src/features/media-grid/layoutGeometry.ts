@@ -39,6 +39,23 @@ export interface LayoutGeometry {
   totalSize: number;
 }
 
+export interface FolderCoverLayoutPlacement {
+  itemIndex: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  frameHeight: number;
+  coverHeight: number;
+}
+
+export interface FolderCoverLayoutGeometry {
+  estimatedSegmentSize: number;
+  placements: FolderCoverLayoutPlacement[];
+  segments: LayoutSegment[];
+  totalSize: number;
+}
+
 export interface ScopedMedia {
   ids: number[];
   key: string;
@@ -66,6 +83,63 @@ export function buildLayoutGeometry(options: LayoutBuildOptions): LayoutGeometry
     default:
       return buildGridLayout(options);
   }
+}
+
+export function buildFolderCoverLayout({
+  count,
+  gap,
+  labelHeight,
+  tileMinWidth,
+  viewportWidth
+}: {
+  count: number;
+  gap: number;
+  labelHeight: number;
+  tileMinWidth: number;
+  viewportWidth: number;
+}): FolderCoverLayoutGeometry {
+  const contentWidth = normalizeViewportWidth(viewportWidth, tileMinWidth);
+  const columnCount = resolveColumnCount(contentWidth, tileMinWidth, gap);
+  const tileWidth = resolveColumnWidth(contentWidth, columnCount, gap);
+  const coverHeight = Math.round(tileWidth * 4 / 3);
+  const rowHeight = coverHeight + labelHeight + gap;
+  const placements: FolderCoverLayoutPlacement[] = [];
+  const segments: LayoutSegment[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const rowIndex = Math.floor(index / columnCount);
+    const columnIndex = index % columnCount;
+    const top = rowIndex * rowHeight;
+    const left = columnIndex * (tileWidth + gap);
+    placements.push({
+      itemIndex: index,
+      left,
+      top,
+      width: tileWidth,
+      height: rowHeight,
+      frameHeight: coverHeight + labelHeight,
+      coverHeight
+    });
+  }
+
+  const rowCount = Math.ceil(count / columnCount);
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const startIndex = rowIndex * columnCount;
+    const endIndex = Math.min(count, startIndex + columnCount);
+    segments.push({
+      index: rowIndex,
+      start: rowIndex * rowHeight,
+      size: rowHeight,
+      itemIndexes: createSequentialIndexes(startIndex, endIndex)
+    });
+  }
+
+  return {
+    estimatedSegmentSize: rowHeight,
+    placements,
+    segments,
+    totalSize: rowCount * rowHeight
+  };
 }
 
 export function collectScopedMediaInViewport(
@@ -124,7 +198,7 @@ export function collectScopedMediaInViewport(
 }
 
 export function collectPlacementIndexesFromSegmentRange(
-  geometry: LayoutGeometry,
+  geometry: { segments: LayoutSegment[] },
   startIndex: number,
   endIndex: number
 ): number[] {
@@ -349,10 +423,8 @@ function buildAdaptiveLayout({
 
     rowItems.forEach((entry, entryIndex) => {
       const remainingWidth = contentWidth - left - gap * Math.max(0, rowItems.length - entryIndex - 1);
-      const itemWidth =
-        entryIndex === rowItems.length - 1
-          ? Math.max(1, remainingWidth)
-          : Math.max(1, Math.round(rowThumbHeight * entry.ratio));
+      const naturalWidth = Math.max(1, Math.round(rowThumbHeight * entry.ratio));
+      const itemWidth = Math.max(1, Math.min(remainingWidth, naturalWidth));
       placements.push({
         item: entry.item,
         itemIndex: entry.itemIndex,
@@ -386,7 +458,8 @@ function buildAdaptiveLayout({
     ratioSum += ratio;
     const projectedWidth = ratioSum * targetRowHeight + gap * Math.max(0, rowItems.length - 1);
     const shouldFlush = projectedWidth >= contentWidth * ADAPTIVE_ROW_FILL_THRESHOLD;
-    if (shouldFlush) {
+    const isFinalInputItem = itemIndex === items.length - 1;
+    if (shouldFlush && !isFinalInputItem) {
       flushRow(true);
     }
   });

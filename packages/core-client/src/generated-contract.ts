@@ -4,6 +4,7 @@
 export interface Page<T> {
   items: T[];
   nextCursor: string | null;
+  totalCount?: number;
 }
 
 export interface ScanSummary {
@@ -168,6 +169,7 @@ export interface ThumbnailResponse {
 export interface ListFolderChildrenParams {
   limit?: number;
   cursor?: string;
+  includeDescendants?: boolean;
 }
 
 export interface ListMediaParams {
@@ -175,6 +177,7 @@ export interface ListMediaParams {
   folderId?: number;
   includeDescendants?: boolean;
   limit?: number;
+  offset?: number;
   cursor?: string;
   sort?: "mtime_desc" | "mtime_asc" | "name_asc" | "name_desc";
   kind?: "image" | "video" | "other";
@@ -197,6 +200,7 @@ export interface SearchParams {
     | "rating_desc"
     | "rating_asc";
   limit?: number;
+  offset?: number;
   cursor?: string;
 }
 

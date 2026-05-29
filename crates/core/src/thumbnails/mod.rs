@@ -608,8 +608,14 @@ mod tests {
 
     #[test]
     fn target_dimensions_caps_extreme_aspect_ratio_to_safe_max_side() {
-        assert_eq!(target_dimensions(1, 100_000, 320), (1, GRID_320_MAX_SIDE_PX));
-        assert_eq!(target_dimensions(100_000, 1, 320), (GRID_320_MAX_SIDE_PX, 1));
+        assert_eq!(
+            target_dimensions(1, 100_000, 320),
+            (1, GRID_320_MAX_SIDE_PX)
+        );
+        assert_eq!(
+            target_dimensions(100_000, 1, 320),
+            (GRID_320_MAX_SIDE_PX, 1)
+        );
     }
 
     #[test]

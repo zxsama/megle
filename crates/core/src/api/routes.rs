@@ -109,6 +109,8 @@ struct HealthResponse {
 struct ListResponse<T> {
     items: Vec<T>,
     next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_count: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,6 +183,8 @@ struct ThumbnailPriorityScopeSyncRequest {
 struct ListFolderChildrenQuery {
     limit: Option<i64>,
     cursor: Option<String>,
+    #[serde(rename = "includeDescendants")]
+    include_descendants: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +196,7 @@ struct ListMediaQuery {
     #[serde(rename = "includeDescendants")]
     include_descendants: Option<bool>,
     limit: Option<i64>,
+    offset: Option<i64>,
     cursor: Option<String>,
     sort: Option<String>,
     kind: Option<String>,
@@ -239,6 +244,7 @@ struct SearchMediaQuery {
     tag_id: Vec<i64>,
     sort: Option<String>,
     limit: Option<i64>,
+    offset: Option<i64>,
     cursor: Option<String>,
 }
 
@@ -449,6 +455,7 @@ async fn list_roots(State(state): State<AppState>) -> ApiResult<Json<ListRespons
     Ok(Json(ListResponse {
         items,
         next_cursor: None,
+        total_count: None,
     }))
 }
 
@@ -516,11 +523,17 @@ async fn list_folder_children(
         )));
     }
     let page = database
-        .list_folder_children_page(folder_id, query.limit.unwrap_or(200), query.cursor)
+        .list_folder_children_page(
+            folder_id,
+            query.limit.unwrap_or(200),
+            query.cursor,
+            query.include_descendants.unwrap_or(false),
+        )
         .map_err(map_cursor_error)?;
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
+        total_count: page.total_count,
     }))
 }
 
@@ -537,6 +550,7 @@ async fn list_media(
             folder_id: query.folder_id,
             include_descendants: query.include_descendants.unwrap_or(false),
             limit: query.limit.unwrap_or(200),
+            offset: query.offset,
             cursor: query.cursor,
             sort,
             kind,
@@ -545,6 +559,7 @@ async fn list_media(
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
+        total_count: page.total_count,
     }))
 }
 
@@ -695,6 +710,7 @@ async fn list_tasks(State(state): State<AppState>) -> ApiResult<Json<ListRespons
     Ok(Json(ListResponse {
         items,
         next_cursor: None,
+        total_count: None,
     }))
 }
 
@@ -899,6 +915,7 @@ async fn list_file_operations(
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
+        total_count: page.total_count,
     }))
 }
 
@@ -1022,6 +1039,7 @@ async fn list_tags(State(state): State<AppState>) -> ApiResult<Json<ListResponse
     Ok(Json(ListResponse {
         items,
         next_cursor: None,
+        total_count: None,
     }))
 }
 
@@ -1147,12 +1165,14 @@ async fn search_media(
             tag_ids: query.tag_id,
             sort,
             limit,
+            offset: query.offset,
             cursor: query.cursor,
         })
         .map_err(map_cursor_error)?;
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
+        total_count: page.total_count,
     }))
 }
 
@@ -1161,6 +1181,7 @@ fn empty_list<T>() -> ListResponse<T> {
     ListResponse {
         items: Vec::new(),
         next_cursor: None,
+        total_count: None,
     }
 }
 
@@ -3098,10 +3119,13 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::OPTIONS)
-                    .uri("/api/health")
+                    .uri("/api/media/1/metadata")
                     .header(header::ORIGIN, "http://127.0.0.1:5173")
-                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
-                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "x-megle-session")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "content-type,x-megle-session",
+                    )
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -3121,6 +3145,13 @@ mod tests {
             .to_ascii_lowercase();
         assert!(allow_headers.contains("content-type"));
         assert!(allow_headers.contains("x-megle-session"));
+        let allow_methods = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|value| value.to_str().ok())
+            .expect("allow methods")
+            .to_ascii_uppercase();
+        assert!(allow_methods.contains("PUT"));
         assert_ne!(
             response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
             Some(&"*".parse().expect("wildcard header"))

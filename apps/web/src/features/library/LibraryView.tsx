@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
-import type { MediaRecord, RootRecord } from "@megle/core-client";
-import { Check } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import type { FolderRecord, MediaRecord, RootRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassButton } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
@@ -9,7 +8,7 @@ import type { LibraryLayoutMode } from "../media-grid/layoutMode";
 import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
-import { SubfolderStrip } from "./SubfolderStrip";
+import { SubfolderCard, SubfolderStrip } from "./SubfolderStrip";
 import { useFolderCovers } from "./useFolderCovers";
 
 const AHEAD_THUMBNAIL_ROW_COUNT = 4;
@@ -35,6 +34,12 @@ interface LibraryViewProps {
     y: number;
     shiftKey: boolean;
   }) => void;
+  onFolderContextMenu?: (event: {
+    folder: FolderRecord;
+    x: number;
+    y: number;
+    shiftKey: boolean;
+  }) => void;
 }
 
 export function LibraryView({
@@ -42,6 +47,7 @@ export function LibraryView({
   library,
   layoutMode,
   onClosePreview,
+  onFolderContextMenu,
   onMediaContextMenu,
   onOpenPreview,
   onPreviewCommandChange,
@@ -57,6 +63,7 @@ export function LibraryView({
         library={library}
         layoutMode={layoutMode}
         onClosePreview={onClosePreview}
+        onFolderContextMenu={onFolderContextMenu}
         onMediaContextMenu={onMediaContextMenu}
         onOpenPreview={onOpenPreview}
         onPreviewCommandChange={onPreviewCommandChange}
@@ -75,6 +82,7 @@ export function LibraryCenterPane({
   library,
   layoutMode,
   onClosePreview,
+  onFolderContextMenu,
   onMediaContextMenu,
   onOpenPreview,
   onPreviewCommandChange,
@@ -94,12 +102,87 @@ export function LibraryCenterPane({
   const [subfolderStripCollapsed, setSubfolderStripCollapsed] = useState<boolean>(() =>
     readStoredSubfolderStripCollapsed()
   );
+  const [folderCoverPriorityIndexes, setFolderCoverPriorityIndexes] = useState<number[]>([]);
   const currentFolderId = library.selectedFolderId ?? selectedRoot?.rootFolderId ?? null;
-  const childFolders = currentFolderId ? library.folderChildrenByParent[currentFolderId] ?? [] : [];
-  const childFoldersLoading = currentFolderId ? library.loadingFolderIds.has(currentFolderId) : false;
-  const showSubfolderStrip = !previewMedia && (childFolders.length > 0 || childFoldersLoading);
-  const coverMediaByFolderId = useFolderCovers(childFolders);
-  const contentCountLabel = `${library.media.length}${library.mediaHasMore ? "+" : ""}`;
+  const directChildFolders = currentFolderId ? library.folderChildrenByParent[currentFolderId] ?? [] : [];
+  const recursiveChildFolders =
+    currentFolderId && library.showChildFolderContents
+      ? library.folderDescendantsByParent[currentFolderId] ?? directChildFolders
+      : directChildFolders;
+  const childFoldersLoading = currentFolderId
+    ? library.loadingFolderIds.has(currentFolderId) ||
+      (library.showChildFolderContents && library.loadingFolderDescendantIds.has(currentFolderId))
+    : false;
+  const showSubfolderStrip = !previewMedia && (recursiveChildFolders.length > 0 || childFoldersLoading);
+  const folderCoverPriorityFolders = useMemo(() => {
+    const indexes =
+      folderCoverPriorityIndexes.length > 0
+        ? folderCoverPriorityIndexes
+        : recursiveChildFolders.slice(0, 48).map((_, index) => index);
+    const seen = new Set<number>();
+    const folders: FolderRecord[] = [];
+    for (const index of indexes) {
+      const folder = recursiveChildFolders[index];
+      if (!folder || seen.has(folder.id)) {
+        continue;
+      }
+      seen.add(folder.id);
+      folders.push(folder);
+    }
+    return folders;
+  }, [folderCoverPriorityIndexes, recursiveChildFolders]);
+  const coverMediaByFolderId = useFolderCovers(folderCoverPriorityFolders);
+  const contentCount = Math.max(library.mediaTotalCount, library.media.length);
+  const contentCountLabel = `${contentCount}`;
+  const folderSection =
+    !previewMedia && showSubfolderStrip
+      ? {
+          collapsed: subfolderStripCollapsed,
+          header: (
+            <SubfolderStrip
+              collapsed={subfolderStripCollapsed}
+              folderCount={recursiveChildFolders.length}
+              loading={childFoldersLoading}
+              showChildContents={library.showChildFolderContents}
+              onToggleCollapsed={() => setSubfolderStripCollapsed((current) => !current)}
+              onToggleShowChildContents={library.toggleShowChildFolderContents}
+            />
+          ),
+          itemCount: recursiveChildFolders.length,
+          loading: childFoldersLoading,
+          onVisibleFolderIndexesChange: (indexes: number[]) => {
+            setFolderCoverPriorityIndexes((current) => {
+              if (
+                current.length === indexes.length &&
+                current.every((value, index) => value === indexes[index])
+              ) {
+                return current;
+              }
+              return indexes;
+            });
+          },
+          renderFolder: (index: number) => {
+            const folder = recursiveChildFolders[index];
+            if (!folder) {
+              return null;
+            }
+            return (
+              <SubfolderCard
+                coverMedia={coverMediaByFolderId.get(folder.id) ?? []}
+                folder={folder}
+                onFolderContextMenu={onFolderContextMenu}
+                onSelectFolder={library.setSelectedFolder}
+                selected={folder.id === library.selectedFolderId}
+              />
+            );
+          }
+        }
+      : undefined;
+  const contentHeader = previewMedia ? null : (
+    <div className="library-browser-content-header">
+      <div className="library-browser-content-title">{`内容 (${contentCountLabel})`}</div>
+    </div>
+  );
 
   useEffect(() => {
     if (previewOpen && !selectedMedia) {
@@ -117,6 +200,10 @@ export function LibraryCenterPane({
       // Ignore storage failures.
     }
   }, [subfolderStripCollapsed]);
+
+  useEffect(() => {
+    setFolderCoverPriorityIndexes([]);
+  }, [currentFolderId, library.showChildFolderContents]);
 
   function handleOpenPreview(mediaId: number) {
     onOpenPreview(mediaId);
@@ -142,56 +229,27 @@ export function LibraryCenterPane({
             />
           ) : (
             <div className="library-browser-layout">
-              {showSubfolderStrip ? (
-                <SubfolderStrip
-                  collapsed={subfolderStripCollapsed}
-                  coverMediaByFolderId={coverMediaByFolderId}
-                  folders={childFolders}
-                  loading={childFoldersLoading}
-                  onToggleCollapsed={() => setSubfolderStripCollapsed((current) => !current)}
-                  onSelectFolder={library.setSelectedFolder}
-                  selectedFolderId={library.selectedFolderId}
-                />
-              ) : null}
-              <div className="library-browser-content">
-                <div className="library-browser-content-header">
-                  <div className="library-browser-content-title">{`Contents (${contentCountLabel})`}</div>
-                  {showSubfolderStrip ? (
-                    <label className="library-browser-content-toggle">
-                      <input
-                        checked={library.showChildFolderContents}
-                        onChange={() => library.toggleShowChildFolderContents()}
-                        type="checkbox"
-                      />
-                      <span className="library-browser-content-toggle-indicator" aria-hidden="true">
-                        <Check size={12} />
-                      </span>
-                      <span className="library-browser-content-toggle-label">
-                        Show child folder contents
-                      </span>
-                    </label>
-                  ) : null}
-                </div>
-                {renderEmptyState({ library, selectedRoot }) ?? (
-                  <MediaGrid
-                    aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
-                    gridPreferences={gridPreferences}
-                    hasMore={library.mediaHasMore}
-                    items={library.media}
-                    layoutMode={layoutMode}
-                    loading={library.loading}
-                    loadingMore={library.loadingMoreMedia}
-                    onContextMenu={onMediaContextMenu}
-                    onOpenPreview={handleOpenPreview}
-                    onRequestMore={library.loadMoreMedia}
-                    onRequestThumbnailStates={library.requestThumbnailStates}
-                    onSelect={library.setSelectedMediaId}
-                    scrollPositionKey={mediaScrollKey}
-                    selectedMediaId={library.selectedMediaId}
-                    thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
-                  />
-                )}
-              </div>
+              <MediaGrid
+                aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
+                contentHeader={contentHeader}
+                emptyContent={library.loading ? null : renderEmptyState({ library, selectedRoot })}
+                folderSection={folderSection}
+                gridPreferences={gridPreferences}
+                items={library.media}
+                layoutMode={layoutMode}
+                loading={library.loading}
+                loadingMore={library.loadingMoreMedia}
+                mediaSlots={library.mediaSlots}
+                onContextMenu={onMediaContextMenu}
+                onOpenPreview={handleOpenPreview}
+                onRequestMediaWindow={library.requestMediaWindow}
+                onRequestThumbnailStates={library.requestThumbnailStates}
+                onSelect={library.setSelectedMediaId}
+                scrollPositionKey={mediaScrollKey}
+                selectedMediaId={library.selectedMediaId}
+                thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
+                totalCount={library.mediaTotalCount}
+              />
             </div>
           )}
         </div>

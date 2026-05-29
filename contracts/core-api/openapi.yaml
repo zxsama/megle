@@ -72,6 +72,11 @@ paths:
         - $ref: "#/components/parameters/folderId"
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/cursor"
+        - name: includeDescendants
+          in: query
+          description: Include descendant folders recursively under the requested folder.
+          schema:
+            type: boolean
       responses:
         "200":
           description: Child folders for lazy folder-tree loading.
@@ -103,6 +108,7 @@ paths:
           schema:
             type: boolean
         - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
         - $ref: "#/components/parameters/cursor"
         - name: sort
           in: query
@@ -714,6 +720,7 @@ paths:
             minimum: 1
             maximum: 500
             default: 100
+        - $ref: "#/components/parameters/offset"
         - $ref: "#/components/parameters/cursor"
       responses:
         "200":
@@ -895,6 +902,13 @@ components:
         minimum: 1
         maximum: 500
         default: 200
+    offset:
+      name: offset
+      in: query
+      description: Zero-based media row offset for viewport-windowed browsing.
+      schema:
+        type: integer
+        minimum: 0
     cursor:
       name: cursor
       in: query
@@ -1267,6 +1281,8 @@ components:
         nextCursor:
           type: string
           nullable: true
+        totalCount:
+          type: integer
     TagRecord:
       type: object
       required: [id, name, color]

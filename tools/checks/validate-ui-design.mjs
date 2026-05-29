@@ -1026,7 +1026,6 @@ for (const value of [
   "ArrowLeft",
   "SearchBar",
   "SortMenu",
-  "RefreshCw",
   "library-toolbar-back",
   "titlebar-library-summary",
   "PreviewTitlebarToolbar",

@@ -88,7 +88,13 @@ static WORKER_TASK_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<WorkerTaskH
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 #[cfg(test)]
-struct WorkerTaskHookGuard;
+static TEST_HOOK_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+#[cfg(test)]
+struct WorkerTaskHookGuard {
+    _test_lock: std::sync::MutexGuard<'static, ()>,
+}
 
 #[cfg(test)]
 impl Drop for WorkerTaskHookGuard {
@@ -99,8 +105,11 @@ impl Drop for WorkerTaskHookGuard {
 
 #[cfg(test)]
 fn set_worker_task_hook_for_test(hook: WorkerTaskHook) -> WorkerTaskHookGuard {
+    let test_lock = TEST_HOOK_LOCK.lock().expect("lock test hook");
     *WORKER_TASK_HOOK.lock().expect("lock worker task hook") = Some(hook);
-    WorkerTaskHookGuard
+    WorkerTaskHookGuard {
+        _test_lock: test_lock,
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +132,9 @@ static THUMBNAIL_PROCESSING_CHECKPOINT_HOOK: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 #[cfg(test)]
-struct ThumbnailProcessingCheckpointHookGuard;
+struct ThumbnailProcessingCheckpointHookGuard {
+    _test_lock: std::sync::MutexGuard<'static, ()>,
+}
 
 #[cfg(test)]
 impl Drop for ThumbnailProcessingCheckpointHookGuard {
@@ -138,10 +149,13 @@ impl Drop for ThumbnailProcessingCheckpointHookGuard {
 fn set_thumbnail_processing_checkpoint_hook_for_test(
     hook: ThumbnailProcessingCheckpointHook,
 ) -> ThumbnailProcessingCheckpointHookGuard {
+    let test_lock = TEST_HOOK_LOCK.lock().expect("lock test hook");
     *THUMBNAIL_PROCESSING_CHECKPOINT_HOOK
         .lock()
         .expect("lock thumbnail processing checkpoint hook") = Some(hook);
-    ThumbnailProcessingCheckpointHookGuard
+    ThumbnailProcessingCheckpointHookGuard {
+        _test_lock: test_lock,
+    }
 }
 
 #[cfg(test)]
@@ -1870,6 +1884,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -1884,6 +1899,7 @@ mod tests {
                 folder_id: None,
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -2032,6 +2048,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -2054,6 +2071,7 @@ mod tests {
                 folder_id: None,
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -2185,6 +2203,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -2224,6 +2243,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -2246,6 +2266,7 @@ mod tests {
                 folder_id: Some(folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -3302,6 +3323,7 @@ mod tests {
                 folder_id: Some(root_folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,
@@ -3318,6 +3340,7 @@ mod tests {
                 folder_id: Some(root_folder_id),
                 include_descendants: false,
                 limit: 10,
+                offset: None,
                 cursor: None,
                 sort: "name_asc".to_string(),
                 kind: None,

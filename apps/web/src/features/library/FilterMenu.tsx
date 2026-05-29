@@ -1,7 +1,9 @@
 import { Heart, SlidersHorizontal, Star, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { TagRecord } from "@megle/core-client";
 import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
+import { useAnchoredPopoverStyle } from "./anchoredPopover";
 
 type Kind = "image" | "video" | "other";
 type MinRating = 1 | 2 | 3 | 4 | 5;
@@ -47,6 +49,9 @@ export function FilterMenu({
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const isControlled = controlledOpen !== undefined;
   const open = controlledOpen ?? uncontrolledOpen;
+  const popoverStyle = useAnchoredPopoverStyle(open, buttonRef, {
+    preferredWidth: 320
+  });
   const hasFilters =
     kind !== undefined ||
     minRating !== undefined ||
@@ -103,122 +108,126 @@ export function FilterMenu({
         {hasFilters ? <span className="filter-menu-dot" aria-hidden="true" /> : null}
       </LiquidGlassButton>
 
-      {open ? (
-        <>
-          {!isControlled ? (
-            <div
-              aria-hidden="true"
-              className="filter-menu-backdrop"
-              onClick={() => closeAndReturnFocus()}
-            />
-          ) : null}
-          <LiquidGlassSurface
-            as="div"
-            aria-label="Filters"
-            className="floating-popover filter-menu-popover popup-surface"
-            data-compact-popover="filter"
-            data-compact-popover-root="filter"
-            interactive
-            role="menu"
-            tone="elevated"
-          >
-            <div className="filter-menu-section" aria-label="Kind">
-              <div className="filter-menu-section-title">Kind</div>
-              <div className="filter-menu-options">
-                {KINDS.map((option) => (
-                  <button
-                    aria-pressed={kind === option.value}
-                    className={kind === option.value ? "filter-menu-item active" : "filter-menu-item"}
-                    key={option.value}
-                    onClick={() => onSetKind(kind === option.value ? undefined : option.value)}
-                    role="menuitemcheckbox"
-                    type="button"
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="filter-menu-section" aria-label="Rating">
-              <div className="filter-menu-section-title">Rating</div>
-              <div className="filter-menu-options filter-menu-rating">
-                {RATINGS.map((rating) => (
-                  <button
-                    aria-pressed={minRating === rating}
-                    aria-label={`Minimum ${rating} star${rating > 1 ? "s" : ""}`}
-                    className={minRating === rating ? "filter-menu-item active" : "filter-menu-item"}
-                    key={rating}
-                    onClick={() => onSetMinRating(minRating === rating ? undefined : rating)}
-                    role="menuitemcheckbox"
-                    type="button"
-                  >
-                    <Star aria-hidden="true" size={12} />
-                    <span>{rating}+</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="filter-menu-section" aria-label="Favorite">
-              <button
-                aria-pressed={favorite === true}
-                className={favorite === true ? "filter-menu-item active" : "filter-menu-item"}
-                onClick={onToggleFavorite}
-                role="menuitemcheckbox"
-                type="button"
+      {open && typeof document !== "undefined"
+        ? createPortal(
+            <>
+              {!isControlled ? (
+                <div
+                  aria-hidden="true"
+                  className="filter-menu-backdrop"
+                  onClick={() => closeAndReturnFocus()}
+                />
+              ) : null}
+              <LiquidGlassSurface
+                as="div"
+                aria-label="Filters"
+                className="floating-popover filter-menu-popover popup-surface"
+                data-compact-popover="filter"
+                data-compact-popover-root="filter"
+                interactive
+                role="menu"
+                style={popoverStyle}
+                tone="elevated"
               >
-                <Heart aria-hidden="true" size={13} />
-                <span>Favorites</span>
-              </button>
-            </div>
+                <div className="filter-menu-section" aria-label="Kind">
+                  <div className="filter-menu-section-title">Kind</div>
+                  <div className="filter-menu-options">
+                    {KINDS.map((option) => (
+                      <button
+                        aria-pressed={kind === option.value}
+                        className={kind === option.value ? "filter-menu-item active" : "filter-menu-item"}
+                        key={option.value}
+                        onClick={() => onSetKind(kind === option.value ? undefined : option.value)}
+                        role="menuitemcheckbox"
+                        type="button"
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-            <div className="filter-menu-section" aria-label="Tags">
-              <div className="filter-menu-section-title">Tags</div>
-              <div className="filter-menu-tags">
-                {tags.length > 0 ? (
-                  tags.map((tag) => (
-                    <button
-                      aria-pressed={tagIds.includes(tag.id)}
-                      className={
-                        tagIds.includes(tag.id)
-                          ? "filter-menu-item filter-menu-tag active"
-                          : "filter-menu-item filter-menu-tag"
-                      }
-                      key={tag.id}
-                      onClick={() => onToggleTag(tag.id)}
-                      role="menuitemcheckbox"
-                      type="button"
-                    >
-                      {tag.color ? (
-                        <span
-                          aria-hidden="true"
-                          className="filter-menu-tag-swatch"
-                          style={{ background: tag.color }}
-                        />
-                      ) : null}
-                      <span>{tag.name}</span>
-                    </button>
-                  ))
-                ) : (
-                  <span className="filter-menu-empty">No tags</span>
-                )}
-              </div>
-            </div>
+                <div className="filter-menu-section" aria-label="Rating">
+                  <div className="filter-menu-section-title">Rating</div>
+                  <div className="filter-menu-options filter-menu-rating">
+                    {RATINGS.map((rating) => (
+                      <button
+                        aria-pressed={minRating === rating}
+                        aria-label={`Minimum ${rating} star${rating > 1 ? "s" : ""}`}
+                        className={minRating === rating ? "filter-menu-item active" : "filter-menu-item"}
+                        key={rating}
+                        onClick={() => onSetMinRating(minRating === rating ? undefined : rating)}
+                        role="menuitemcheckbox"
+                        type="button"
+                      >
+                        <Star aria-hidden="true" size={12} />
+                        <span>{rating}+</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-            <button
-              className="filter-menu-clear"
-              disabled={!hasFilters}
-              onClick={onClear}
-              role="menuitem"
-              type="button"
-            >
-              <X aria-hidden="true" size={13} />
-              <span>Clear filters</span>
-            </button>
-          </LiquidGlassSurface>
-        </>
-      ) : null}
+                <div className="filter-menu-section" aria-label="Favorite">
+                  <button
+                    aria-pressed={favorite === true}
+                    className={favorite === true ? "filter-menu-item active" : "filter-menu-item"}
+                    onClick={onToggleFavorite}
+                    role="menuitemcheckbox"
+                    type="button"
+                  >
+                    <Heart aria-hidden="true" size={13} />
+                    <span>Favorites</span>
+                  </button>
+                </div>
+
+                <div className="filter-menu-section" aria-label="Tags">
+                  <div className="filter-menu-section-title">Tags</div>
+                  <div className="filter-menu-tags">
+                    {tags.length > 0 ? (
+                      tags.map((tag) => (
+                        <button
+                          aria-pressed={tagIds.includes(tag.id)}
+                          className={
+                            tagIds.includes(tag.id)
+                              ? "filter-menu-item filter-menu-tag active"
+                              : "filter-menu-item filter-menu-tag"
+                          }
+                          key={tag.id}
+                          onClick={() => onToggleTag(tag.id)}
+                          role="menuitemcheckbox"
+                          type="button"
+                        >
+                          {tag.color ? (
+                            <span
+                              aria-hidden="true"
+                              className="filter-menu-tag-swatch"
+                              style={{ background: tag.color }}
+                            />
+                          ) : null}
+                          <span>{tag.name}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <span className="filter-menu-empty">No tags</span>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  className="filter-menu-clear"
+                  disabled={!hasFilters}
+                  onClick={onClear}
+                  role="menuitem"
+                  type="button"
+                >
+                  <X aria-hidden="true" size={13} />
+                  <span>Clear filters</span>
+                </button>
+              </LiquidGlassSurface>
+            </>,
+            document.body
+          )
+        : null}
     </div>
   );
 }

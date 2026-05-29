@@ -81,12 +81,10 @@ export function ContextMenu({ x, y, items, onClose, ariaLabel = "Item actions" }
     }
 
     window.addEventListener("mousedown", handlePointer);
-    window.addEventListener("contextmenu", handlePointer);
     window.addEventListener("keydown", handleKey);
     window.addEventListener("scroll", handleScroll, true);
     return () => {
       window.removeEventListener("mousedown", handlePointer);
-      window.removeEventListener("contextmenu", handlePointer);
       window.removeEventListener("keydown", handleKey);
       window.removeEventListener("scroll", handleScroll, true);
     };

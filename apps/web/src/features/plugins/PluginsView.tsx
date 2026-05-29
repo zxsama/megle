@@ -78,7 +78,9 @@ export function PluginsView() {
         <div className="plugins-layout">
           <div className="plugins-list" role="list">
             {plugins.loading && totalCount === 0 ? (
-              <div className="empty-panel">Loading plugins…</div>
+              <div aria-label="Refreshing plugins" className="empty-panel empty-panel-busy" role="status">
+                <span className="central-preview-loading-spinner" aria-hidden="true" />
+              </div>
             ) : totalCount === 0 ? (
               <div className="plugins-empty">
                 <p className="plugins-empty-title">No plugins discovered yet.</p>

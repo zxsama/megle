@@ -1,7 +1,9 @@
 import { ArrowDownUp } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { LiquidGlassButton, LiquidGlassSurface } from "../../design/liquid-glass";
+import { useAnchoredPopoverStyle } from "./anchoredPopover";
 
 export type SortOption =
   | "mtime_desc"
@@ -45,6 +47,9 @@ export function SortMenu({
   const isControlled = controlledOpen !== undefined;
   const open = controlledOpen ?? uncontrolledOpen;
   const selectedLabel = SORT_LABEL[value];
+  const popoverStyle = useAnchoredPopoverStyle(open, buttonRef, {
+    minWidth: 180
+  });
 
   const setOpen = useCallback(
     (nextOpen: boolean) => {
@@ -143,44 +148,48 @@ export function SortMenu({
         {iconOnly ? null : <span>{selectedLabel}</span>}
       </LiquidGlassButton>
 
-      {open ? (
-        <>
-          {!isControlled ? (
-            <div
-              aria-hidden="true"
-              className="sort-menu-backdrop"
-              onClick={() => closeAndReturnFocus()}
-            />
-          ) : null}
-          <LiquidGlassSurface
-            as="div"
-            className="floating-popover sort-menu-list sort-menu-popover popup-surface"
-            data-compact-popover="sort"
-            data-compact-popover-root="sort"
-            interactive
-            role="listbox"
-            aria-label="Sort options"
-            tone="elevated"
-          >
-            {SORT_OPTIONS.map((option, index) => (
-              <button
-                ref={(element) => {
-                  optionRefs.current[index] = element;
-                }}
-                aria-selected={value === option.value}
-                className={`sort-menu-item${value === option.value ? " sort-menu-item-active" : ""}`}
-                key={option.value}
-                onClick={() => handleSelect(option.value)}
-                onKeyDown={(event) => handleOptionKeyDown(event, index)}
-                role="option"
-                type="button"
+      {open && typeof document !== "undefined"
+        ? createPortal(
+            <>
+              {!isControlled ? (
+                <div
+                  aria-hidden="true"
+                  className="sort-menu-backdrop"
+                  onClick={() => closeAndReturnFocus()}
+                />
+              ) : null}
+              <LiquidGlassSurface
+                as="div"
+                className="floating-popover sort-menu-list sort-menu-popover popup-surface"
+                data-compact-popover="sort"
+                data-compact-popover-root="sort"
+                interactive
+                role="listbox"
+                aria-label="Sort options"
+                style={popoverStyle}
+                tone="elevated"
               >
-                {option.label}
-              </button>
-            ))}
-          </LiquidGlassSurface>
-        </>
-      ) : null}
+                {SORT_OPTIONS.map((option, index) => (
+                  <button
+                    ref={(element) => {
+                      optionRefs.current[index] = element;
+                    }}
+                    aria-selected={value === option.value}
+                    className={`sort-menu-item${value === option.value ? " sort-menu-item-active" : ""}`}
+                    key={option.value}
+                    onClick={() => handleSelect(option.value)}
+                    onKeyDown={(event) => handleOptionKeyDown(event, index)}
+                    role="option"
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </LiquidGlassSurface>
+            </>,
+            document.body
+          )
+        : null}
     </div>
   );
 }

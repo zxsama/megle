@@ -180,7 +180,13 @@ pub fn router_with_config(database: Database, config: ApiConfig) -> Router {
 fn cors_layer(origin: HeaderValue) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(origin)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::CONTENT_TYPE,
             HeaderName::from_static("x-megle-session"),

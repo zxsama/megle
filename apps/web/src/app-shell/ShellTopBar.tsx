@@ -8,8 +8,6 @@ import {
   Maximize2,
   Minimize2,
   Package,
-  RefreshCw,
-  RotateCcw,
   Settings
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -39,7 +37,6 @@ interface LibraryTitlebarToolbarProps {
   onClearFilters: FilterMenuProps["onClear"];
   onFilterOpenChange: (open: boolean) => void;
   onLayoutModeChange: (mode: LibraryLayoutMode) => void;
-  onRefresh: () => void;
   onSetKind: FilterMenuProps["onSetKind"];
   onSetMinRating: FilterMenuProps["onSetMinRating"];
   onSetQ: SearchBarProps["onChange"];
@@ -63,12 +60,9 @@ interface PreviewTitlebarToolbarProps {
   mode: PreviewViewMode;
   scale: number;
   selectedName: string;
-  layoutMode: LibraryLayoutMode;
   onBack: () => void;
   onGoNext: () => void;
-  onLayoutModeChange: (mode: LibraryLayoutMode) => void;
   onGoPrevious: () => void;
-  onResetView: () => void;
   onToggleActualSize: () => void;
 }
 
@@ -149,7 +143,6 @@ export function LibraryTitlebarToolbar({
   onClearFilters,
   onFilterOpenChange,
   onLayoutModeChange,
-  onRefresh,
   onSetKind,
   onSetMinRating,
   onSetQ,
@@ -198,17 +191,6 @@ export function LibraryTitlebarToolbar({
           titlebarControlId="library-layout"
           value={layoutMode}
         />
-        <LiquidGlassButton
-          aria-label="Refresh library"
-          className="titlebar-icon-button"
-          data-titlebar-control="library-refresh"
-          onClick={onRefresh}
-          title="Refresh"
-          tone="control"
-          type="button"
-        >
-          <RefreshCw aria-hidden="true" size={16} />
-        </LiquidGlassButton>
       </div>
       <div className="titlebar-workspace-summary titlebar-library-summary" title={title}>
         {mediaCount} media
@@ -225,15 +207,12 @@ export function LibraryTitlebarToolbar({
 export function PreviewTitlebarToolbar({
   canGoNext,
   canGoPrevious,
-  layoutMode,
   mode,
   scale,
   selectedName,
   onBack,
   onGoNext,
-  onLayoutModeChange,
   onGoPrevious,
-  onResetView,
   onToggleActualSize
 }: PreviewTitlebarToolbarProps) {
   const previewScale = `${Math.round(scale * 100)}%`;
@@ -279,12 +258,6 @@ export function PreviewTitlebarToolbar({
         >
           <ChevronRight aria-hidden="true" size={16} />
         </LiquidGlassButton>
-        <LayoutMenu
-          iconOnly
-          onChange={onLayoutModeChange}
-          titlebarControlId="preview-layout"
-          value={layoutMode}
-        />
         <LiquidGlassButton
           aria-label={modeAction}
           aria-pressed={mode === "actual"}
@@ -297,17 +270,6 @@ export function PreviewTitlebarToolbar({
           type="button"
         >
           <ModeIcon aria-hidden="true" size={15} />
-        </LiquidGlassButton>
-        <LiquidGlassButton
-          aria-label="Reset preview view"
-          className="titlebar-icon-button"
-          data-titlebar-control="preview-reset"
-          onClick={onResetView}
-          title="Reset view"
-          tone="control"
-          type="button"
-        >
-          <RotateCcw aria-hidden="true" size={15} />
         </LiquidGlassButton>
       </div>
       <div

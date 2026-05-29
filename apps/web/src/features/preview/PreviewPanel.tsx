@@ -43,7 +43,7 @@ export function PreviewPanel({
             <dt>Dimensions</dt>
             <dd>{formatDimensions(selectedMedia)}</dd>
             <dt>Thumbnail</dt>
-            <dd>{thumbnail?.state ?? selectedMedia.thumbnailState ?? "pending"}</dd>
+            <dd>{thumbnailStatus(thumbnail?.state ?? selectedMedia.thumbnailState)}</dd>
           </dl>
           {children}
         </>
@@ -51,6 +51,23 @@ export function PreviewPanel({
         <div className="empty-panel">No selection</div>
       )}
     </aside>
+  );
+}
+
+function thumbnailStatus(state: ThumbnailResponse["state"] | string | null | undefined): ReactNode {
+  if (state === "ready") {
+    return "Ready";
+  }
+  if (state === "failed") {
+    return "Failed";
+  }
+  if (state === "skipped_small") {
+    return "Skipped";
+  }
+  return (
+    <span aria-label="Thumbnail refreshing" className="metadata-inline-spinner" role="status">
+      <span className="central-preview-loading-spinner" aria-hidden="true" />
+    </span>
   );
 }
 
