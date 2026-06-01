@@ -8,10 +8,12 @@ type CachedThumbnailEntry = {
   thumbnail: ThumbnailResponse;
 };
 type CachedOriginalPreviewEntry = {
+  byteSize: number;
   mediaSignature: string;
   blob: Blob;
 };
 type CachedThumbnailObjectUrlEntry = {
+  byteSize: number;
   objectUrl: string;
 };
 type SharedRequest<T> = {
@@ -45,8 +47,8 @@ export const inFlightThumbnailBlobRequests = new Map<string, SharedRequest<Blob>
 export const thumbnailObjectUrlCache = new Map<string, CachedThumbnailObjectUrlEntry>();
 export const originalPreviewBlobCache = new Map<number, CachedOriginalPreviewEntry>();
 export const inFlightOriginalPreviewRequests = new Map<string, SharedRequest<Blob>>();
-const THUMBNAIL_OBJECT_URL_CACHE_LIMIT = 512;
-const ORIGINAL_PREVIEW_CACHE_LIMIT = 5;
+export const DEFAULT_THUMBNAIL_CACHE_LIMIT_BYTES = 5120 * 1024 * 1024;
+export const DEFAULT_ORIGINAL_PREVIEW_BUFFER_LIMIT_BYTES = 1200 * 1024 * 1024;
 const MAX_FOREGROUND_RESOURCE_REQUESTS = 12;
 const MAX_INTERACTIVE_FOREGROUND_RESOURCE_REQUESTS = 2;
 const MAX_AHEAD_FOREGROUND_RESOURCE_REQUESTS = 2;
@@ -68,6 +70,10 @@ let activeForegroundResourceRequests = 0;
 let activeInteractiveForegroundResourceRequests = 0;
 let activeAheadForegroundResourceRequests = 0;
 let activeFallbackForegroundResourceRequests = 0;
+let thumbnailObjectUrlCacheBytes = 0;
+let thumbnailObjectUrlCacheLimitBytes = DEFAULT_THUMBNAIL_CACHE_LIMIT_BYTES;
+let originalPreviewBlobCacheBytes = 0;
+let originalPreviewBlobCacheLimitBytes = DEFAULT_ORIGINAL_PREVIEW_BUFFER_LIMIT_BYTES;
 const foregroundResourceRequestQueue: QueuedForegroundResourceRequest[] = [];
 
 export async function requestThumbnailState(
@@ -172,18 +178,43 @@ export function readCachedThumbnailObjectUrl(cacheKey: string): string | null {
   return cached.objectUrl;
 }
 
-export function rememberThumbnailObjectUrl(cacheKey: string, objectUrl: string): void {
+export function rememberThumbnailObjectUrl(
+  cacheKey: string,
+  objectUrl: string,
+  byteSize: number
+): boolean {
+  const normalizedByteSize = Math.max(0, Math.floor(byteSize));
   const previous = thumbnailObjectUrlCache.get(cacheKey);
   if (previous?.objectUrl === objectUrl) {
+    if (normalizedByteSize > thumbnailObjectUrlCacheLimitBytes) {
+      deleteThumbnailObjectUrlCacheEntry(cacheKey);
+      return false;
+    }
+    thumbnailObjectUrlCacheBytes = Math.max(
+      0,
+      thumbnailObjectUrlCacheBytes - previous.byteSize + normalizedByteSize
+    );
     thumbnailObjectUrlCache.delete(cacheKey);
-    thumbnailObjectUrlCache.set(cacheKey, previous);
-    return;
+    thumbnailObjectUrlCache.set(cacheKey, {
+      ...previous,
+      byteSize: normalizedByteSize
+    });
+    pruneThumbnailObjectUrlCache();
+    return thumbnailObjectUrlCache.get(cacheKey)?.objectUrl === objectUrl;
   }
+
+  if (normalizedByteSize > thumbnailObjectUrlCacheLimitBytes) {
+    deleteThumbnailObjectUrlCacheEntry(cacheKey);
+    return false;
+  }
+
   if (previous) {
-    URL.revokeObjectURL(previous.objectUrl);
+    deleteThumbnailObjectUrlCacheEntry(cacheKey);
   }
-  thumbnailObjectUrlCache.set(cacheKey, { objectUrl });
+  thumbnailObjectUrlCache.set(cacheKey, { byteSize: normalizedByteSize, objectUrl });
+  thumbnailObjectUrlCacheBytes += normalizedByteSize;
   pruneThumbnailObjectUrlCache();
+  return thumbnailObjectUrlCache.get(cacheKey)?.objectUrl === objectUrl;
 }
 
 export function thumbnailObjectUrlCacheKey(
@@ -226,6 +257,16 @@ export function preloadImageObjectUrl(
   });
 }
 
+export function configureOriginalPreviewBuffer(maxBytes: number): void {
+  originalPreviewBlobCacheLimitBytes = Math.max(0, Math.floor(maxBytes));
+  pruneOriginalPreviewCache();
+}
+
+export function configureThumbnailCache(maxBytes: number): void {
+  thumbnailObjectUrlCacheLimitBytes = Math.max(0, Math.floor(maxBytes));
+  pruneThumbnailObjectUrlCache();
+}
+
 export function requestOriginalPreviewBlob(
   mediaRecord: MediaRecord,
   options: OriginalPreviewRequestOptions = {}
@@ -238,7 +279,7 @@ export function requestOriginalPreviewBlob(
       originalPreviewBlobCache.set(mediaRecord.id, cached);
       return withAbortSignal(Promise.resolve(cached.blob), options.signal);
     }
-    originalPreviewBlobCache.delete(mediaRecord.id);
+    deleteOriginalPreviewCacheEntry(mediaRecord.id);
   }
 
   if (options.signal?.aborted) {
@@ -290,7 +331,7 @@ export function prefetchOriginalPreview(
     if (isAbortError(cause)) {
       return;
     }
-    originalPreviewBlobCache.delete(mediaRecord.id);
+    deleteOriginalPreviewCacheEntry(mediaRecord.id);
   });
 }
 
@@ -448,24 +489,53 @@ function originalPreviewRequestKey(mediaRecord: MediaRecord): string {
   return [mediaFileContentSignature(mediaRecord), "original"].join(":");
 }
 
+function rememberOriginalPreviewBlob(
+  mediaRecord: MediaRecord,
+  mediaSignature: string,
+  blob: Blob
+): void {
+  deleteOriginalPreviewCacheEntry(mediaRecord.id);
+  const byteSize = blob.size;
+  originalPreviewBlobCache.set(mediaRecord.id, {
+    blob,
+    byteSize,
+    mediaSignature
+  });
+  originalPreviewBlobCacheBytes += byteSize;
+  pruneOriginalPreviewCache();
+}
+
+function deleteOriginalPreviewCacheEntry(fileId: number): void {
+  const cached = originalPreviewBlobCache.get(fileId);
+  if (cached) {
+    originalPreviewBlobCacheBytes = Math.max(0, originalPreviewBlobCacheBytes - cached.byteSize);
+  }
+  originalPreviewBlobCache.delete(fileId);
+}
+
 function pruneOriginalPreviewCache(): void {
-  while (originalPreviewBlobCache.size > ORIGINAL_PREVIEW_CACHE_LIMIT) {
+  while (originalPreviewBlobCacheBytes > originalPreviewBlobCacheLimitBytes) {
     const firstKey = originalPreviewBlobCache.keys().next().value;
     if (firstKey === undefined) break;
-    originalPreviewBlobCache.delete(firstKey);
+    deleteOriginalPreviewCacheEntry(firstKey);
   }
 }
 
 function pruneThumbnailObjectUrlCache(): void {
-  while (thumbnailObjectUrlCache.size > THUMBNAIL_OBJECT_URL_CACHE_LIMIT) {
+  while (thumbnailObjectUrlCacheBytes > thumbnailObjectUrlCacheLimitBytes) {
     const firstKey = thumbnailObjectUrlCache.keys().next().value;
     if (firstKey === undefined) break;
-    const cached = thumbnailObjectUrlCache.get(firstKey);
-    if (cached) {
-      URL.revokeObjectURL(cached.objectUrl);
-    }
-    thumbnailObjectUrlCache.delete(firstKey);
+    deleteThumbnailObjectUrlCacheEntry(firstKey);
   }
+}
+
+function deleteThumbnailObjectUrlCacheEntry(cacheKey: string): void {
+  const cached = thumbnailObjectUrlCache.get(cacheKey);
+  if (cached) {
+    thumbnailObjectUrlCacheBytes = Math.max(0, thumbnailObjectUrlCacheBytes - cached.byteSize);
+    URL.revokeObjectURL(cached.objectUrl);
+  }
+  thumbnailObjectUrlCache.delete(cacheKey);
 }
 
 function scheduleForegroundResourceRequest<T>(
@@ -679,11 +749,7 @@ function fetchOriginalPreviewBlob(
       version: mediaSignature
     })
     .then((blob) => {
-      originalPreviewBlobCache.set(mediaRecord.id, {
-        mediaSignature,
-        blob
-      });
-      pruneOriginalPreviewCache();
+      rememberOriginalPreviewBlob(mediaRecord, mediaSignature, blob);
       return blob;
     });
 }

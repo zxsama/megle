@@ -1167,6 +1167,7 @@ button:disabled {
 
 .grid-surface {
   display: flex;
+  position: relative;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
@@ -1182,6 +1183,10 @@ button:disabled {
   display: flex;
   gap: 0;
   padding: 0;
+}
+
+.grid-surface-preview-active {
+  isolation: isolate;
 }
 
 .titlebar-workspace-toolbar {
@@ -1369,6 +1374,22 @@ button:disabled {
   min-height: 0;
   overflow: visible;
   overscroll-behavior-x: none;
+}
+
+.library-browser-layout--preview-covered {
+  pointer-events: none;
+  user-select: none;
+  visibility: hidden;
+}
+
+.central-preview-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
 }
 
 .library-browser-content {
@@ -2537,6 +2558,12 @@ button:disabled {
   background: transparent;
   pointer-events: none;
   user-select: none;
+}
+
+.central-preview-stage .preview-image-pending {
+  position: absolute;
+  visibility: hidden;
+  opacity: 0;
 }
 
 .central-preview-loading-indicator,

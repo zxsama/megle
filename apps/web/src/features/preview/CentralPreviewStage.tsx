@@ -21,6 +21,7 @@ interface CentralPreviewStageProps {
   onClosePreview: () => void;
   onPreviewPrevious: () => void;
   onPreviewNext: () => void;
+  onPreviewMediaSettled: (mediaId: number) => void;
   onViewStateChange: (state: { mode: PreviewViewMode; scale: number }) => void;
   onCommandChange: (
     commands: { reset: () => void; toggleActualSize: () => void } | null
@@ -33,6 +34,7 @@ export function CentralPreviewStage({
   selectedMedia,
   thumbnail,
   onClosePreview,
+  onPreviewMediaSettled,
   onPreviewPrevious,
   onPreviewNext,
   onViewStateChange,
@@ -51,6 +53,7 @@ export function CentralPreviewStage({
     naturalHeight: number;
     naturalWidth: number;
   } | null>(null);
+  const fittedMediaIdRef = useRef<number | null>(null);
   const measuredNaturalSizeRef = useRef(measuredNaturalSize);
   const [viewMode, setViewMode] = useState<PreviewViewMode>("fit-long-edge");
   const viewModeRef = useRef(viewMode);
@@ -77,8 +80,8 @@ export function CentralPreviewStage({
 
   useLayoutEffect(() => {
     stageRef.current?.focus({ preventScroll: true });
-    resetTransform();
-  }, [resetTransform, selectedMedia.id]);
+    dragRef.current = null;
+  }, [selectedMedia.id]);
 
   useEffect(() => {
     measuredNaturalSizeRef.current = measuredNaturalSize;
@@ -89,6 +92,7 @@ export function CentralPreviewStage({
   }, [viewMode]);
 
   useEffect(() => {
+    fittedMediaIdRef.current = null;
     setMeasuredNaturalSize((current) =>
       current?.mediaId === selectedMedia.id ? current : null
     );
@@ -146,11 +150,12 @@ export function CentralPreviewStage({
       window.removeEventListener("resize", requestSync);
       window.cancelAnimationFrame(frame);
     };
-  }, [fitSyncTick, previewReadyTick, selectedMedia.id, viewMode]);
+  }, [fitSyncTick, previewReadyTick, viewMode]);
 
   const handleMediaReady = useCallback(() => {
     setPreviewReadyTick((value) => value + 1);
-  }, []);
+    onPreviewMediaSettled(selectedMedia.id);
+  }, [onPreviewMediaSettled, selectedMedia.id]);
   const handleMediaLoadingChange = useCallback((loading: boolean) => {
     setPreviewLoading(loading);
   }, []);
@@ -159,17 +164,17 @@ export function CentralPreviewStage({
       const measuredSize = { mediaId: selectedMedia.id, ...size };
       measuredNaturalSizeRef.current = measuredSize;
       setMeasuredNaturalSize(measuredSize);
-      if (viewModeRef.current === "fit-long-edge") {
-        const nextScale = fitScaleForDimensions(
-          stageRef.current,
-          size.naturalWidth,
-          size.naturalHeight
-        );
-        if (nextScale !== null) {
-          setScale(nextScale);
-          setPan({ x: 0, y: 0 });
-          setFitSyncTick((value) => value + 1);
-        }
+      const shouldResetTransform = fittedMediaIdRef.current !== selectedMedia.id;
+      if (shouldResetTransform) {
+        fittedMediaIdRef.current = selectedMedia.id;
+      }
+      if (shouldResetTransform || viewModeRef.current === "fit-long-edge") {
+        const nextScale =
+          fitScaleForDimensions(stageRef.current, size.naturalWidth, size.naturalHeight) ?? 1;
+        setViewMode("fit-long-edge");
+        setScale(nextScale);
+        setPan({ x: 0, y: 0 });
+        setFitSyncTick((value) => value + 1);
       }
     },
     [selectedMedia.id]

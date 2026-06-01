@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { flushSync } from "react-dom";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import {
   mediaContentSignature,
@@ -13,6 +14,17 @@ import {
 } from "../../core/mediaResources";
 
 const STALE_PREVIEW_OBJECT_URL_REVOKE_DELAY_MS = 8000;
+
+type PreviewNaturalSize = {
+  naturalHeight: number;
+  naturalWidth: number;
+};
+
+type PendingBufferedPreview = {
+  frameStyle?: CSSProperties;
+  naturalSize: PreviewNaturalSize | null;
+  src: string;
+};
 
 export function MediaPreview({
   media,
@@ -233,13 +245,20 @@ function ReadyPreviewMedia({
   versionKey?: number | string | null;
 }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [pendingPreview, setPendingPreview] = useState<PendingBufferedPreview | null>(null);
   const [error, setError] = useState(false);
   const [containedMediaStyle, setContainedMediaStyle] = useState<CSSProperties | undefined>(undefined);
   const [naturalFrameStyle, setNaturalFrameStyle] = useState<CSSProperties | undefined>(undefined);
   const objectUrlRef = useRef<string | null>(null);
+  const pendingObjectUrlRef = useRef<string | null>(null);
+  const shouldUseBufferedSwap = source === "original" && preserveNaturalFrame && kind !== "video";
 
   useEffect(() => {
     return () => {
+      if (pendingObjectUrlRef.current) {
+        schedulePreviewObjectUrlRevoke(pendingObjectUrlRef.current);
+        pendingObjectUrlRef.current = null;
+      }
       if (objectUrlRef.current) {
         schedulePreviewObjectUrlRevoke(objectUrlRef.current);
         objectUrlRef.current = null;
@@ -247,11 +266,46 @@ function ReadyPreviewMedia({
     };
   }, []);
 
+  const commitBufferedPreview = (preview: PendingBufferedPreview, size: PreviewNaturalSize) => {
+    if (pendingObjectUrlRef.current !== preview.src) {
+      return;
+    }
+    const previousObjectUrl = objectUrlRef.current;
+    flushSync(() => {
+      objectUrlRef.current = preview.src;
+      pendingObjectUrlRef.current = null;
+      setContainedMediaStyle(undefined);
+      setNaturalFrameStyle(naturalFrameStyleForSize(size));
+      setSrc(preview.src);
+      setPendingPreview(null);
+      setError(false);
+      onNaturalSize?.(size);
+      onLoadingChange?.(false);
+      onMediaReady?.();
+    });
+    if (previousObjectUrl && previousObjectUrl !== preview.src) {
+      schedulePreviewObjectUrlRevoke(previousObjectUrl);
+    }
+  };
+
   useEffect(() => {
     let revoked = false;
     let objectUrl: string | null = null;
     onLoadingChange?.(true);
     setError(false);
+    if (shouldUseBufferedSwap) {
+      setPendingPreview(null);
+    }
+    const initialNaturalSize =
+      source === "original" &&
+      preserveNaturalFrame &&
+      kind !== "video" &&
+      media.width &&
+      media.height &&
+      media.width > 0 &&
+      media.height > 0
+        ? { naturalHeight: media.height, naturalWidth: media.width }
+        : null;
 
     const controller = new AbortController();
     const request = source === "original"
@@ -273,7 +327,25 @@ function ReadyPreviewMedia({
           return;
         }
         const nextObjectUrl = objectUrl;
-        if (source !== "original" || !preserveNaturalFrame) {
+
+        if (shouldUseBufferedSwap) {
+          pendingObjectUrlRef.current = nextObjectUrl;
+          setPendingPreview({
+            frameStyle: initialNaturalSize ? naturalFrameStyleForSize(initialNaturalSize) : undefined,
+            naturalSize: initialNaturalSize,
+            src: nextObjectUrl
+          });
+          return;
+        }
+
+        if (initialNaturalSize) {
+          onNaturalSize?.(initialNaturalSize);
+          setContainedMediaStyle(undefined);
+          setNaturalFrameStyle({
+            height: `${initialNaturalSize.naturalHeight}px`,
+            width: `${initialNaturalSize.naturalWidth}px`
+          });
+        } else if (source !== "original" || !preserveNaturalFrame) {
           setNaturalFrameStyle(undefined);
           setContainedMediaStyle(undefined);
         }
@@ -314,6 +386,7 @@ function ReadyPreviewMedia({
         if (!revoked && !controller.signal.aborted) {
           setError(true);
           onLoadingChange?.(false);
+          onMediaReady?.();
         }
       });
 
@@ -321,27 +394,94 @@ function ReadyPreviewMedia({
       revoked = true;
       controller.abort();
       if (objectUrl && objectUrlRef.current !== objectUrl) {
+        if (pendingObjectUrlRef.current === objectUrl) {
+          pendingObjectUrlRef.current = null;
+        }
         schedulePreviewObjectUrlRevoke(objectUrl);
       }
     };
-  }, [kind, media.id, onLoadingChange, onNaturalSize, preserveNaturalFrame, source, versionKey]);
+  }, [
+    kind,
+    media.height,
+    media.id,
+    media.width,
+    onLoadingChange,
+    onNaturalSize,
+    preserveNaturalFrame,
+    shouldUseBufferedSwap,
+    source,
+    versionKey
+  ]);
 
-  const effectiveFrameStyle = frameStyle ?? naturalFrameStyle;
+  const effectiveFrameStyle = shouldUseBufferedSwap
+    ? naturalFrameStyle ?? frameStyle
+    : frameStyle ?? naturalFrameStyle;
+  const pendingImage = pendingPreview ? (
+    <img
+      alt=""
+      aria-hidden="true"
+      className="preview-image preview-image-pending"
+      decoding="async"
+      onError={() => {
+        if (pendingObjectUrlRef.current !== pendingPreview.src) {
+          return;
+        }
+        pendingObjectUrlRef.current = null;
+        setPendingPreview(null);
+        setError(true);
+        onLoadingChange?.(false);
+        onMediaReady?.();
+        schedulePreviewObjectUrlRevoke(pendingPreview.src);
+      }}
+      onLoad={(event) => {
+        const image = event.currentTarget;
+        const naturalSize =
+          image.naturalWidth > 0 && image.naturalHeight > 0
+            ? {
+                naturalHeight: image.naturalHeight,
+                naturalWidth: image.naturalWidth
+              }
+            : pendingPreview.naturalSize;
+        if (naturalSize) {
+          decodePendingPreviewImage(image)
+            .then(() => {
+              commitBufferedPreview(pendingPreview, naturalSize);
+            })
+            .catch(() => {
+              commitBufferedPreview(pendingPreview, naturalSize);
+            });
+        }
+      }}
+      src={pendingPreview.src}
+      style={pendingPreview.frameStyle}
+    />
+  ) : null;
 
   if (error && !src) {
     return (
-      <div className="preview-placeholder failed" style={effectiveFrameStyle}>
-        <span>load error</span>
-      </div>
+      <>
+        <div className="preview-placeholder failed" style={effectiveFrameStyle}>
+          <span>load error</span>
+        </div>
+        {pendingImage}
+      </>
     );
   }
 
   if (!src) {
     if (fallbackUrl) {
-      return <PreviewFallbackImage alt={alt} frameStyle={effectiveFrameStyle} src={fallbackUrl} state="pending" />;
+      return (
+        <>
+          <PreviewFallbackImage alt={alt} frameStyle={effectiveFrameStyle} src={fallbackUrl} state="pending" />
+          {pendingImage}
+        </>
+      );
     }
     return (
-      <div className="preview-placeholder pending preview-placeholder-empty" style={effectiveFrameStyle} />
+      <>
+        <div className="preview-placeholder pending preview-placeholder-empty" style={effectiveFrameStyle} />
+        {pendingImage}
+      </>
     );
   }
 
@@ -361,7 +501,8 @@ function ReadyPreviewMedia({
   }
 
   return (
-    <div className="preview-placeholder ready" data-preview-source={source} style={effectiveFrameStyle}>
+    <>
+      <div className="preview-placeholder ready" data-preview-source={source} style={effectiveFrameStyle}>
         <img
           alt={alt}
           className="preview-image"
@@ -388,11 +529,14 @@ function ReadyPreviewMedia({
           onError={() => {
             setError(true);
             onLoadingChange?.(false);
+            onMediaReady?.();
           }}
           src={src}
           style={containedMediaStyle}
         />
-    </div>
+      </div>
+      {pendingImage}
+    </>
   );
 }
 
@@ -408,12 +552,26 @@ function containedPreviewMediaStyle(size: {
   };
 }
 
+function naturalFrameStyleForSize(size: PreviewNaturalSize): CSSProperties {
+  return {
+    height: `${size.naturalHeight}px`,
+    width: `${size.naturalWidth}px`
+  };
+}
+
+function decodePendingPreviewImage(image: HTMLImageElement): Promise<void> {
+  if (typeof image.decode !== "function") {
+    return Promise.resolve();
+  }
+  return image.decode().catch(() => undefined);
+}
+
 function previewStableFrameStyle(media: MediaRecord): CSSProperties | undefined {
   if (!media.width || !media.height || media.width <= 0 || media.height <= 0) {
     return undefined;
   }
-  return {
-    height: `${media.height}px`,
-    width: `${media.width}px`
-  };
+  return naturalFrameStyleForSize({
+    naturalHeight: media.height,
+    naturalWidth: media.width
+  });
 }

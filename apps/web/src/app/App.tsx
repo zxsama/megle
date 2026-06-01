@@ -8,7 +8,7 @@ import {
   RefreshCw,
   Trash2
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FolderRecord, MediaRecord, RootRecord } from "@megle/core-client";
 import { AppShell } from "../app-shell/AppShell";
 import { useOverlayScrollbars } from "../app-shell/useOverlayScrollbars";
@@ -31,7 +31,11 @@ import {
   openPath,
   revealPath
 } from "../core/desktop";
-import { prefetchOriginalPreview } from "../core/mediaResources";
+import {
+  configureOriginalPreviewBuffer,
+  configureThumbnailCache,
+  prefetchOriginalPreview
+} from "../core/mediaResources";
 import { useLibraryData, type LibraryState } from "../core/useLibraryData";
 import { LiquidGlassLayer, useInterfaceStyle } from "../design/liquid-glass";
 import { type ContextMenuItem } from "../features/file-ops/ContextMenu";
@@ -56,6 +60,11 @@ import {
 } from "../features/media-grid/gridPreferences";
 import { OnboardingHero } from "../features/onboarding/OnboardingHero";
 import { PluginsView } from "../features/plugins/PluginsView";
+import {
+  readStoredPreviewPreferences,
+  storePreviewPreferences,
+  type PreviewPreferences
+} from "../features/preview/previewPreferences";
 import { SettingsView } from "../features/settings/SettingsView";
 import { useShortcuts } from "../features/shortcuts/useShortcuts";
 
@@ -68,7 +77,8 @@ const DEFAULT_PREVIEW_VIEW_STATE: PreviewViewState = {
   mode: "fit-long-edge",
   scale: 1
 };
-const CENTER_PREVIEW_PREFETCH_RADIUS = 1;
+const PREVIEW_PREFETCH_UNKNOWN_MEDIA_BYTES = 32 * 1024 * 1024;
+const MAX_PREVIEW_PREFETCH_CANDIDATES = 512;
 const LIBRARY_LAYOUT_STORAGE_KEY = "megle.library.layout-mode";
 
 export function App() {
@@ -82,6 +92,8 @@ export function App() {
     useState<CompactPopover>(null);
   const [taskCenterOpen, setTaskCenterOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewDisplayedMediaId, setPreviewDisplayedMediaId] = useState<number | null>(null);
+  const previewNavigationLockedRef = useRef(false);
   const [sidebarsHidden, setSidebarsHidden] = useState(false);
   const [previewViewState, setPreviewViewState] =
     useState<PreviewViewState>(DEFAULT_PREVIEW_VIEW_STATE);
@@ -93,6 +105,9 @@ export function App() {
   const [gridPreferences, setGridPreferences] = useState<LibraryGridPreferences>(() =>
     readStoredLibraryGridPreferences()
   );
+  const [previewPreferences, setPreviewPreferences] = useState<PreviewPreferences>(() =>
+    readStoredPreviewPreferences()
+  );
   const orderedPreviewMedia = useMemo(() => {
     const orderedWindowMedia = orderedMediaSlots(library.mediaSlots);
     return orderedWindowMedia.length > 0 ? orderedWindowMedia : library.media;
@@ -100,27 +115,39 @@ export function App() {
   const selectedMediaIndex = orderedPreviewMedia.findIndex(
     (item) => item.id === library.selectedMediaId
   );
-  const canPreviewPrevious = selectedMediaIndex > 0;
+  const previewNavigationReady =
+    !previewOpen ||
+    (library.selectedMediaId !== null && previewDisplayedMediaId === library.selectedMediaId);
+  const canPreviewPrevious = previewNavigationReady && selectedMediaIndex > 0;
   const canPreviewNext =
-    selectedMediaIndex >= 0 && selectedMediaIndex < orderedPreviewMedia.length - 1;
+    previewNavigationReady &&
+    selectedMediaIndex >= 0 &&
+    selectedMediaIndex < orderedPreviewMedia.length - 1;
 
   useEffect(() => {
     if (!previewOpen || selectedMediaIndex < 0) return;
     const controller = new AbortController();
-    for (
-      let offset = -CENTER_PREVIEW_PREFETCH_RADIUS;
-      offset <= CENTER_PREVIEW_PREFETCH_RADIUS;
-      offset += 1
-    ) {
-      if (offset === 0) continue;
-      const neighbor = orderedPreviewMedia[selectedMediaIndex + offset];
-      if (neighbor) prefetchOriginalPreview(neighbor, { signal: controller.signal });
+    const bufferBytes = previewBufferLimitMbToBytes(previewPreferences.previewBufferLimitMb);
+    const prefetchWindow = buildPreviewPrefetchWindow(
+      orderedPreviewMedia,
+      selectedMediaIndex,
+      bufferBytes
+    );
+    for (const neighbor of prefetchWindow) {
+      prefetchOriginalPreview(neighbor, { signal: controller.signal });
     }
     return () => controller.abort();
-  }, [orderedPreviewMedia, previewOpen, selectedMediaIndex]);
+  }, [
+    orderedPreviewMedia,
+    previewOpen,
+    previewPreferences.previewBufferLimitMb,
+    selectedMediaIndex
+  ]);
 
   const handleClosePreview = useCallback(() => {
     setPreviewOpen(false);
+    setPreviewDisplayedMediaId(null);
+    previewNavigationLockedRef.current = false;
     setPreviewViewCommands(null);
     setPreviewViewState(DEFAULT_PREVIEW_VIEW_STATE);
   }, []);
@@ -128,14 +155,6 @@ export function App() {
   const toggleSidebars = useCallback(() => {
     setSidebarsHidden((current) => !current);
   }, []);
-
-  useShortcuts({
-    fileOps,
-    library,
-    onClosePreview: handleClosePreview,
-    onToggleSidebars: toggleSidebars,
-    previewOpen
-  });
 
   useEffect(() => {
     void notifyDesktopShellReady();
@@ -152,6 +171,16 @@ export function App() {
   useEffect(() => {
     storeLibraryGridPreferences(gridPreferences);
   }, [gridPreferences]);
+
+  useEffect(() => {
+    storePreviewPreferences(previewPreferences);
+    configureOriginalPreviewBuffer(
+      previewBufferLimitMbToBytes(previewPreferences.previewBufferLimitMb)
+    );
+    configureThumbnailCache(
+      thumbnailCacheLimitMbToBytes(previewPreferences.thumbnailCacheLimitMb)
+    );
+  }, [previewPreferences]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -262,6 +291,8 @@ export function App() {
 
   const handleOpenPreview = useCallback(
     (mediaId: number) => {
+      previewNavigationLockedRef.current = true;
+      setPreviewDisplayedMediaId(null);
       library.setSelectedMediaId(mediaId);
       setActiveView("library");
       setPreviewViewCommands(null);
@@ -271,21 +302,46 @@ export function App() {
     [library]
   );
 
+  function startPreviewNavigation(target: MediaRecord | undefined) {
+    if (!target) return;
+    if (previewOpen) {
+      if (previewNavigationLockedRef.current || !previewNavigationReady) return;
+      previewNavigationLockedRef.current = true;
+      setPreviewDisplayedMediaId(null);
+    }
+    library.setSelectedMediaId(target.id);
+  }
+
   const handlePreviewPrevious = useCallback(() => {
     if (selectedMediaIndex <= 0) return;
     const previous = orderedPreviewMedia[selectedMediaIndex - 1];
-    if (previous) {
-      library.setSelectedMediaId(previous.id);
-    }
-  }, [library, orderedPreviewMedia, selectedMediaIndex]);
+    startPreviewNavigation(previous);
+  }, [library, orderedPreviewMedia, previewNavigationReady, previewOpen, selectedMediaIndex]);
 
   const handlePreviewNext = useCallback(() => {
     if (selectedMediaIndex < 0 || selectedMediaIndex >= orderedPreviewMedia.length - 1) return;
     const next = orderedPreviewMedia[selectedMediaIndex + 1];
-    if (next) {
-      library.setSelectedMediaId(next.id);
-    }
-  }, [library, orderedPreviewMedia, selectedMediaIndex]);
+    startPreviewNavigation(next);
+  }, [library, orderedPreviewMedia, previewNavigationReady, previewOpen, selectedMediaIndex]);
+
+  const handlePreviewMediaSettled = useCallback(
+    (mediaId: number) => {
+      if (mediaId !== library.selectedMediaId) return;
+      setPreviewDisplayedMediaId(mediaId);
+      previewNavigationLockedRef.current = false;
+    },
+    [library.selectedMediaId]
+  );
+
+  useShortcuts({
+    fileOps,
+    library,
+    onClosePreview: handleClosePreview,
+    onPreviewNext: handlePreviewNext,
+    onPreviewPrevious: handlePreviewPrevious,
+    onToggleSidebars: toggleSidebars,
+    previewOpen
+  });
 
   const handleMediaContextMenu = useCallback(
     ({
@@ -494,6 +550,7 @@ export function App() {
           onMediaContextMenu={handleMediaContextMenu}
           onOpenPreview={handleOpenPreview}
           onPreviewCommandChange={setPreviewViewCommands}
+          onPreviewMediaSettled={handlePreviewMediaSettled}
           onPreviewNext={handlePreviewNext}
           onPreviewPrevious={handlePreviewPrevious}
           onPreviewViewStateChange={setPreviewViewState}
@@ -514,6 +571,10 @@ export function App() {
         onGridPreferencesChange={(patch) =>
           setGridPreferences((current) => ({ ...current, ...patch }))
         }
+        onPreviewPreferencesChange={(patch) =>
+          setPreviewPreferences((current) => ({ ...current, ...patch }))
+        }
+        previewPreferences={previewPreferences}
       />
     );
   }
@@ -576,6 +637,48 @@ function orderedMediaSlots(mediaSlots: Map<number, MediaRecord>): MediaRecord[] 
   return Array.from(mediaSlots.entries())
     .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
     .map(([, item]) => item);
+}
+
+function previewBufferLimitMbToBytes(limitMb: number): number {
+  return Math.max(0, Math.round(limitMb * 1024 * 1024));
+}
+
+function thumbnailCacheLimitMbToBytes(limitMb: number): number {
+  return Math.max(0, Math.round(limitMb * 1024 * 1024));
+}
+
+function buildPreviewPrefetchWindow(
+  media: MediaRecord[],
+  selectedIndex: number,
+  bufferBytes: number
+): MediaRecord[] {
+  if (bufferBytes <= 0) {
+    return [];
+  }
+
+  const windowItems: MediaRecord[] = [];
+  let estimatedBytes = 0;
+  for (
+    let offset = 1;
+    selectedIndex + offset < media.length && windowItems.length < MAX_PREVIEW_PREFETCH_CANDIDATES;
+    offset += 1
+  ) {
+    const neighbor = media[selectedIndex + offset];
+    if (!neighbor || neighbor.kind !== "image") {
+      continue;
+    }
+    const neighborBytes =
+      neighbor.size > 0 ? neighbor.size : PREVIEW_PREFETCH_UNKNOWN_MEDIA_BYTES;
+    if (windowItems.length > 0 && estimatedBytes + neighborBytes > bufferBytes) {
+      break;
+    }
+    windowItems.push(neighbor);
+    estimatedBytes += neighborBytes;
+    if (estimatedBytes >= bufferBytes) {
+      break;
+    }
+  }
+  return windowItems;
 }
 
 function readStoredLibraryLayoutMode(): LibraryLayoutMode {

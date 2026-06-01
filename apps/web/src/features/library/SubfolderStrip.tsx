@@ -214,18 +214,21 @@ function FolderCoverPreview({
   const [failed, setFailed] = useState(false);
   const [retryTick, setRetryTick] = useState(0);
   const objectUrlRef = useRef<string | null>(src);
+  const cacheOwnsObjectUrlRef = useRef(src !== null);
 
   useEffect(() => {
     if (!coverMediaItem || !cacheKey) {
       setSrc(null);
       setFailed(false);
       objectUrlRef.current = null;
+      cacheOwnsObjectUrlRef.current = false;
       return undefined;
     }
 
     const cachedObjectUrl = readCachedThumbnailObjectUrl(cacheKey);
     if (cachedObjectUrl) {
       objectUrlRef.current = cachedObjectUrl;
+      cacheOwnsObjectUrlRef.current = true;
       setSrc(cachedObjectUrl);
       setFailed(false);
       return undefined;
@@ -268,7 +271,11 @@ function FolderCoverPreview({
           return;
         }
         objectUrlRef.current = objectUrl;
-        rememberThumbnailObjectUrl(cacheKey, objectUrl);
+        cacheOwnsObjectUrlRef.current = rememberThumbnailObjectUrl(
+          cacheKey,
+          objectUrl,
+          blob.size
+        );
         setSrc(objectUrl);
         setFailed(false);
       })
@@ -290,6 +297,10 @@ function FolderCoverPreview({
       controller.abort();
       if (objectUrl && objectUrlRef.current !== objectUrl) {
         URL.revokeObjectURL(objectUrl);
+      }
+      if (objectUrl && objectUrlRef.current === objectUrl && !cacheOwnsObjectUrlRef.current) {
+        URL.revokeObjectURL(objectUrl);
+        objectUrlRef.current = null;
       }
     };
   }, [cacheKey, coverMediaItem, retryTick]);

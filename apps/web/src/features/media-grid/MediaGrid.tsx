@@ -1547,7 +1547,7 @@ function ThumbnailStateView({
   const state = thumbnail?.state ?? rowState;
   const previewPlaceholderUrl = previewPlaceholderDataUrl(item);
   const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
-  const canLoadCurrentThumbnailBlob = hasLiveReadyThumbnail;
+  const canLoadCurrentThumbnailBlob = hasLiveReadyThumbnail || rowState === "ready";
   const presentationStyle = thumbnailPresentationStyle(layoutMode, thumbWidth, thumbHeight);
   const resourcePriority = selected
     ? "preview"
@@ -1564,10 +1564,7 @@ function ThumbnailStateView({
         alt={item.name}
         className={`tile-thumb tile-thumb--${layoutMode}`}
         fileId={item.id}
-        item={item}
         mediaSignature={mediaContentSignature(item)}
-        originalFallbackResourcePriority={originalFallbackResourcePriority}
-        allowOriginalFallback={allowOriginalFallback}
         previewPlaceholderUrl={previewPlaceholderUrl}
         requestPriority={requestPriority}
         resourcePriority={resourcePriority}
@@ -1951,12 +1948,9 @@ function OriginalFallbackThumbnail({
 
 function ReadyThumbnail({
   alt,
-  allowOriginalFallback,
   className,
   fileId,
-  item,
   mediaSignature,
-  originalFallbackResourcePriority,
   previewPlaceholderUrl,
   requestPriority,
   resourcePriority,
@@ -1964,12 +1958,9 @@ function ReadyThumbnail({
   thumbnailUpdatedAt
 }: {
   alt: string;
-  allowOriginalFallback: boolean;
   className: string;
   fileId: number;
-  item: MediaRecord;
   mediaSignature: string;
-  originalFallbackResourcePriority: "preview" | "visible" | "fallback";
   previewPlaceholderUrl: string | null;
   requestPriority: "interactive" | "resource";
   resourcePriority: "preview" | "visible" | "ahead";
@@ -1981,11 +1972,13 @@ function ReadyThumbnail({
   const [error, setError] = useState(false);
   const [retryToken, setRetryToken] = useState(0);
   const objectUrlRef = useRef<string | null>(src);
+  const cacheOwnsObjectUrlRef = useRef(src !== null);
 
   useEffect(() => {
     const cachedObjectUrl = readCachedThumbnailObjectUrl(cacheKey);
     if (cachedObjectUrl) {
       objectUrlRef.current = cachedObjectUrl;
+      cacheOwnsObjectUrlRef.current = true;
       setSrc(cachedObjectUrl);
       setError(false);
       return undefined;
@@ -2015,7 +2008,11 @@ function ReadyThumbnail({
             return;
           }
           objectUrlRef.current = nextObjectUrl;
-          rememberThumbnailObjectUrl(cacheKey, nextObjectUrl);
+          cacheOwnsObjectUrlRef.current = rememberThumbnailObjectUrl(
+            cacheKey,
+            nextObjectUrl,
+            blob.size
+          );
           setSrc(nextObjectUrl);
         };
 
@@ -2069,6 +2066,10 @@ function ReadyThumbnail({
       if (objectUrl && objectUrlRef.current !== objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
+      if (objectUrl && objectUrlRef.current === objectUrl && !cacheOwnsObjectUrlRef.current) {
+        URL.revokeObjectURL(objectUrl);
+        objectUrlRef.current = null;
+      }
     };
   }, [cacheKey, fileId, requestPriority, resourcePriority, retryToken, thumbnailUpdatedAt]);
 
@@ -2082,31 +2083,6 @@ function ReadyThumbnail({
   }
 
   if (!src) {
-    if (isLikelyImageMedia(item)) {
-      if (allowOriginalFallback) {
-        return (
-          <OriginalFallbackThumbnail
-            alt={alt}
-            className={className}
-            fallbackUrl={previewPlaceholderUrl}
-            item={item}
-            requestPriority={requestPriority}
-            resourcePriority={originalFallbackResourcePriority}
-            style={style}
-          />
-        );
-      }
-      if (previewPlaceholderUrl) {
-        return (
-          <PlaceholderThumbnail alt={alt} className={className} src={previewPlaceholderUrl} style={style} />
-        );
-      }
-      return (
-        <div className={`${className} tile-thumb-loading`} style={style}>
-          <ThumbnailInteractionRing />
-        </div>
-      );
-    }
     if (previewPlaceholderUrl) {
       return (
         <PlaceholderThumbnail alt={alt} className={className} src={previewPlaceholderUrl} style={style} />

@@ -7,6 +7,10 @@ import {
   type LibraryGridPreferences
 } from "../media-grid/gridPreferences";
 import {
+  PREVIEW_PREFERENCE_LIMITS,
+  type PreviewPreferences
+} from "../preview/previewPreferences";
+import {
   normalizeShortcutEvent,
   useShortcutBindings,
   type ShortcutActionId
@@ -17,13 +21,17 @@ interface SettingsViewProps {
   interfaceStyle: InterfaceStyleController;
   library: LibraryState;
   onGridPreferencesChange: (patch: Partial<LibraryGridPreferences>) => void;
+  onPreviewPreferencesChange: (patch: Partial<PreviewPreferences>) => void;
+  previewPreferences: PreviewPreferences;
 }
 
 export function SettingsView({
   gridPreferences,
   interfaceStyle,
   library,
-  onGridPreferencesChange
+  onGridPreferencesChange,
+  onPreviewPreferencesChange,
+  previewPreferences
 }: SettingsViewProps) {
   const diagnostics = library.diagnostics;
   const probed = library.diagnosticsProbed;
@@ -89,6 +97,11 @@ export function SettingsView({
           onGridPreferencesChange={onGridPreferencesChange}
         />
 
+        <PreviewBrowsingSection
+          onPreviewPreferencesChange={onPreviewPreferencesChange}
+          previewPreferences={previewPreferences}
+        />
+
         <LiquidGlassSurface
           as="section"
           className="settings-section"
@@ -98,7 +111,7 @@ export function SettingsView({
           tone="panel"
         >
           <h2 className="settings-section-title" id="settings-cache-title">
-            Thumbnail cache
+            Disk thumbnail cache
           </h2>
           <p className="settings-section-copy">
             The thumbnail cache holds generated WebP files used for the grid and preview.
@@ -200,6 +213,59 @@ function LibraryGridSection({
           step={LIBRARY_GRID_PREFERENCE_LIMITS.folderEdgeShadowAlpha.step}
           unit="%"
           value={gridPreferences.folderEdgeShadowAlpha}
+        />
+      </div>
+    </LiquidGlassSurface>
+  );
+}
+
+function PreviewBrowsingSection({
+  onPreviewPreferencesChange,
+  previewPreferences
+}: {
+  onPreviewPreferencesChange: (patch: Partial<PreviewPreferences>) => void;
+  previewPreferences: PreviewPreferences;
+}) {
+  return (
+    <LiquidGlassSurface
+      as="section"
+      className="settings-section"
+      aria-labelledby="settings-preview-browsing-title"
+      interactive
+      scrollable
+      tone="panel"
+    >
+      <h2 className="settings-section-title" id="settings-preview-browsing-title">
+        Preview browsing
+      </h2>
+      <p className="settings-section-copy">
+        Control how much original image data and grid thumbnail data Megle keeps in memory
+        while browsing.
+      </p>
+      <div className="settings-style-group">
+        <StyleSlider
+          id="preview-buffer-limit"
+          label="Preview buffer"
+          max={PREVIEW_PREFERENCE_LIMITS.previewBufferLimitMb.max}
+          min={PREVIEW_PREFERENCE_LIMITS.previewBufferLimitMb.min}
+          onChange={(previewBufferLimitMb) =>
+            onPreviewPreferencesChange({ previewBufferLimitMb })
+          }
+          step={PREVIEW_PREFERENCE_LIMITS.previewBufferLimitMb.step}
+          unit="MB"
+          value={previewPreferences.previewBufferLimitMb}
+        />
+        <StyleSlider
+          id="thumbnail-cache-limit"
+          label="Thumbnail cache"
+          max={PREVIEW_PREFERENCE_LIMITS.thumbnailCacheLimitMb.max}
+          min={PREVIEW_PREFERENCE_LIMITS.thumbnailCacheLimitMb.min}
+          onChange={(thumbnailCacheLimitMb) =>
+            onPreviewPreferencesChange({ thumbnailCacheLimitMb })
+          }
+          step={PREVIEW_PREFERENCE_LIMITS.thumbnailCacheLimitMb.step}
+          unit="MB"
+          value={previewPreferences.thumbnailCacheLimitMb}
         />
       </div>
     </LiquidGlassSurface>
@@ -563,7 +629,7 @@ function StyleSlider({
   min: number;
   onChange: (value: number) => void;
   step: number;
-  unit?: "%" | "px" | "x";
+  unit?: "%" | "MB" | "px" | "x";
   value: number;
 }) {
   return (
@@ -586,9 +652,10 @@ function StyleSlider({
   );
 }
 
-function formatStyleValue(value: number, unit: "%" | "px" | "x") {
+function formatStyleValue(value: number, unit: "%" | "MB" | "px" | "x") {
   const rounded = Number.isInteger(value) ? String(value) : value.toFixed(2);
   if (unit === "%") return `${rounded}%`;
+  if (unit === "MB") return `${rounded} MB`;
   return unit === "px" ? `${rounded}px` : `${rounded}x`;
 }
 

@@ -24,6 +24,7 @@ interface LibraryViewProps {
   onClosePreview: () => void;
   onPreviewPrevious: () => void;
   onPreviewNext: () => void;
+  onPreviewMediaSettled: (mediaId: number) => void;
   onPreviewViewStateChange: (state: { mode: "fit-long-edge" | "actual"; scale: number }) => void;
   onPreviewCommandChange: (commands: {
     reset: () => void;
@@ -52,6 +53,7 @@ export function LibraryView({
   onMediaContextMenu,
   onOpenPreview,
   onPreviewCommandChange,
+  onPreviewMediaSettled,
   onPreviewNext,
   onPreviewPrevious,
   onPreviewViewStateChange,
@@ -68,6 +70,7 @@ export function LibraryView({
         onMediaContextMenu={onMediaContextMenu}
         onOpenPreview={onOpenPreview}
         onPreviewCommandChange={onPreviewCommandChange}
+        onPreviewMediaSettled={onPreviewMediaSettled}
         onPreviewNext={onPreviewNext}
         onPreviewPrevious={onPreviewPrevious}
         onPreviewViewStateChange={onPreviewViewStateChange}
@@ -87,6 +90,7 @@ export function LibraryCenterPane({
   onMediaContextMenu,
   onOpenPreview,
   onPreviewCommandChange,
+  onPreviewMediaSettled,
   onPreviewNext,
   onPreviewPrevious,
   onPreviewViewStateChange,
@@ -125,7 +129,7 @@ export function LibraryCenterPane({
     ? library.loadingFolderIds.has(currentFolderId)
     : false;
   const showSubfolderStrip =
-    !previewMedia && (visibleSubfolderEntries.length > 0 || childFoldersLoading);
+    visibleSubfolderEntries.length > 0 || childFoldersLoading;
   const folderCoverPriorityFolders = useMemo(() => {
     const indexes = folderCoverPriorityIndexes;
     const seen = new Set<number>();
@@ -146,7 +150,7 @@ export function LibraryCenterPane({
   const contentCount = Math.max(library.mediaTotalCount, library.media.length);
   const contentCountLabel = `${contentCount}`;
   const folderSection =
-    !previewMedia && showSubfolderStrip
+    showSubfolderStrip
       ? {
           collapsed: subfolderStripCollapsed,
           header: (
@@ -228,7 +232,7 @@ export function LibraryCenterPane({
           }
         }
       : undefined;
-  const contentHeader = !previewMedia && contentCount > 0 ? (
+  const contentHeader = contentCount > 0 ? (
     <div className="library-browser-content-header">
       <div className="library-browser-content-title">{`内容 (${contentCountLabel})`}</div>
     </div>
@@ -339,47 +343,56 @@ export function LibraryCenterPane({
   return (
     <section className="workspace" aria-label="Library workbench">
       <section
-        className={previewMedia ? "grid-surface grid-surface-preview" : "grid-surface"}
+        className={previewMedia ? "grid-surface grid-surface-preview-active" : "grid-surface"}
         aria-label="Media workspace"
       >
         {library.error ? <div className="error-strip">{library.error}</div> : null}
         <div className="library-grid-content">
-          {previewMedia ? (
+          <div
+            aria-hidden={previewMedia ? true : undefined}
+            className={
+              previewMedia
+                ? "library-browser-layout library-browser-layout--preview-covered"
+                : "library-browser-layout"
+            }
+          >
+            <MediaGrid
+              aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
+              contentHeader={contentHeader}
+              emptyContent={undefined}
+              folderSection={folderSection}
+              gridPreferences={gridPreferences}
+              items={library.media}
+              layoutMode={layoutMode}
+              loading={library.loading}
+              loadingMore={library.loadingMoreMedia}
+              mediaSlots={library.mediaSlots}
+              onContextMenu={onMediaContextMenu}
+              onOpenPreview={handleOpenPreview}
+              onRequestMediaWindow={library.requestMediaWindow}
+              onRequestThumbnailStates={library.requestThumbnailStates}
+              onSelect={library.setSelectedMediaId}
+              scrollPositionKey={mediaScrollKey}
+              selectedMediaId={library.selectedMediaId}
+              thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
+              totalCount={library.mediaTotalCount}
+            />
+          </div>
+        </div>
+        {previewMedia ? (
+          <div className="central-preview-overlay">
             <CentralPreviewStage
               selectedMedia={previewMedia}
               thumbnail={library.thumbnailStatesByMediaId[previewMedia.id]}
               onClosePreview={onClosePreview}
               onCommandChange={onPreviewCommandChange}
+              onPreviewMediaSettled={onPreviewMediaSettled}
               onPreviewNext={onPreviewNext}
               onPreviewPrevious={onPreviewPrevious}
               onViewStateChange={onPreviewViewStateChange}
             />
-          ) : (
-            <div className="library-browser-layout">
-              <MediaGrid
-                aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
-                contentHeader={contentHeader}
-                emptyContent={undefined}
-                folderSection={folderSection}
-                gridPreferences={gridPreferences}
-                items={library.media}
-                layoutMode={layoutMode}
-                loading={library.loading}
-                loadingMore={library.loadingMoreMedia}
-                mediaSlots={library.mediaSlots}
-                onContextMenu={onMediaContextMenu}
-                onOpenPreview={handleOpenPreview}
-                onRequestMediaWindow={library.requestMediaWindow}
-                onRequestThumbnailStates={library.requestThumbnailStates}
-                onSelect={library.setSelectedMediaId}
-                scrollPositionKey={mediaScrollKey}
-                selectedMediaId={library.selectedMediaId}
-                thumbnailStatesByMediaId={library.thumbnailStatesByMediaId}
-                totalCount={library.mediaTotalCount}
-              />
-            </div>
-          )}
-        </div>
+          </div>
+        ) : null}
       </section>
     </section>
   );

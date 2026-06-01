@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import type { MediaRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
 import type { FileOpsController } from "../file-ops/useFileOps";
 import {
@@ -12,6 +11,8 @@ export interface UseShortcutsOptions {
   fileOps: FileOpsController;
   previewOpen: boolean;
   onClosePreview: () => void;
+  onPreviewNext?: () => void;
+  onPreviewPrevious?: () => void;
   onToggleSidebars: () => void;
 }
 
@@ -27,6 +28,8 @@ export function useShortcuts({
   fileOps,
   library,
   onClosePreview,
+  onPreviewNext,
+  onPreviewPrevious,
   onToggleSidebars,
   previewOpen
 }: UseShortcutsOptions): void {
@@ -95,7 +98,7 @@ export function useShortcuts({
       if (matchShortcut(event, bindings, "previewPrevious")) {
         if (previewOpen) {
           event.preventDefault();
-          selectPreviewNeighbor(library, -1);
+          onPreviewPrevious?.();
         }
         return;
       }
@@ -103,7 +106,7 @@ export function useShortcuts({
       if (matchShortcut(event, bindings, "previewNext")) {
         if (previewOpen) {
           event.preventDefault();
-          selectPreviewNeighbor(library, 1);
+          onPreviewNext?.();
         }
         return;
       }
@@ -151,25 +154,16 @@ export function useShortcuts({
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [bindings, fileOps, library, onClosePreview, onToggleSidebars, previewOpen]);
-}
-
-function selectPreviewNeighbor(library: LibraryState, offset: -1 | 1): void {
-  const orderedMedia = orderedMediaSlots(library.mediaSlots);
-  const previewMedia = orderedMedia.length > 0 ? orderedMedia : library.media;
-  const currentIndex = previewMedia.findIndex((item) => item.id === library.selectedMediaId);
-  if (currentIndex === -1) return;
-  const nextIndex = Math.min(previewMedia.length - 1, Math.max(0, currentIndex + offset));
-  const next = previewMedia[nextIndex];
-  if (next) {
-    library.setSelectedMediaId(next.id);
-  }
-}
-
-function orderedMediaSlots(mediaSlots: Map<number, MediaRecord>): MediaRecord[] {
-  return Array.from(mediaSlots.entries())
-    .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
-    .map(([, item]) => item);
+  }, [
+    bindings,
+    fileOps,
+    library,
+    onClosePreview,
+    onPreviewNext,
+    onPreviewPrevious,
+    onToggleSidebars,
+    previewOpen
+  ]);
 }
 
 function isShortcutCaptureTarget(target: EventTarget | null): boolean {

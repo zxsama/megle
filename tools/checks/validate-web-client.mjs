@@ -84,6 +84,7 @@ const shellTitlebar = read("apps/web/src/app-shell/ShellTopBar.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
 const librarySidebar = read("apps/web/src/features/library/LibrarySidebar.tsx");
 const subfolderStrip = read("apps/web/src/features/library/SubfolderStrip.tsx");
+const settingsView = read("apps/web/src/features/settings/SettingsView.tsx");
 const recentOpsPanel = read("apps/web/src/features/file-ops/RecentOpsPanel.tsx");
 const pluginsView = read("apps/web/src/features/plugins/PluginsView.tsx");
 const previewPanelPath = "apps/web/src/features/preview/PreviewPanel.tsx";
@@ -93,6 +94,10 @@ const previewPanel = existsSync(path.join(root, previewPanelPath))
 const mediaPreviewPath = "apps/web/src/features/preview/MediaPreview.tsx";
 const mediaPreview = existsSync(path.join(root, mediaPreviewPath))
   ? read(mediaPreviewPath)
+  : "";
+const previewPreferencesPath = "apps/web/src/features/preview/previewPreferences.ts";
+const previewPreferences = existsSync(path.join(root, previewPreferencesPath))
+  ? read(previewPreferencesPath)
   : "";
 const centralPreviewStagePath = "apps/web/src/features/preview/CentralPreviewStage.tsx";
 const centralPreviewStage = existsSync(path.join(root, centralPreviewStagePath))
@@ -1107,11 +1112,13 @@ if (!/previewPlaceholderDataUrl\(item\)/.test(mediaGrid) || /usePreviewPlacehold
 if (!/requestThumbnailBlob\(fileId/.test(mediaGrid) || /createCoreClient/.test(mediaGrid)) {
   fail("MediaGrid must load grid_320 bytes through the shared media resource helper");
 }
-if (/thumbnailUpdatedAt=\{thumbnail\?\.updatedAt\s*\?\?\s*null\}/.test(mediaGrid) || !/hasLiveReadyThumbnail/.test(mediaGrid)) {
-  fail("MediaGrid must not request thumbnail blobs from media-row ready state without a live updatedAt");
-}
-if (/canLoadCurrentThumbnailBlob\s*=[^;]*rowState\s*===\s*"ready"/.test(mediaGrid)) {
-  fail("MediaGrid must only request thumbnail blobs after live ready thumbnail metadata is available");
+if (
+  !/const\s+canLoadCurrentThumbnailBlob\s*=\s*hasLiveReadyThumbnail\s*\|\|\s*rowState\s*===\s*"ready"/.test(
+    mediaGrid
+  ) ||
+  !/thumbnailUpdatedAt=\{hasLiveReadyThumbnail\s*\?\s*thumbnail\.updatedAt\s*:\s*null\}/.test(mediaGrid)
+) {
+  fail("MediaGrid must load current grid_320 blobs from media-row ready state while using live updatedAt when available");
 }
 if (!/hasLiveThumbnailMetadata/.test(mediaGrid) || !/rowState\s*===\s*"ready"/.test(mediaGrid)) {
   fail("MediaGrid must keep requesting state for pending, queued, or ready rows without live thumbnail metadata");
@@ -1197,8 +1204,86 @@ if (
 if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{[\s\S]*?signal:\s*controller\.signal/.test(mediaPreview)) {
   fail("MediaPreview original-media requests must use an abortable shared cache request when central preview switches");
 }
-if (/return\s+preloadImageObjectUrl\(objectUrl\)\.then/.test(mediaPreview)) {
-  fail("MediaPreview must insert the preview object URL before image decode so large clicked images do not leave the preview blank");
+if (
+  !/const\s+initialNaturalSize\s*=[\s\S]*?source\s*===\s*"original"[\s\S]*?preserveNaturalFrame[\s\S]*?media\.width[\s\S]*?media\.height[\s\S]*?\?\s*\{\s*naturalHeight:\s*media\.height,\s*naturalWidth:\s*media\.width\s*\}/.test(
+    mediaPreview
+  ) ||
+  !/if\s*\(\s*initialNaturalSize\s*\)\s*\{[\s\S]*?onNaturalSize\?\.\(initialNaturalSize\);[\s\S]*?setNaturalFrameStyle\(\{[\s\S]*?initialNaturalSize\.naturalHeight[\s\S]*?initialNaturalSize\.naturalWidth[\s\S]*?\}\);[\s\S]*?\}[\s\S]*?setSrc\(nextObjectUrl\);/.test(
+    mediaPreview
+  )
+) {
+  fail("MediaPreview central original switching must publish known dimensions before committing src to avoid scale flicker");
+}
+if (
+  !/shouldUseBufferedSwap/.test(mediaPreview) ||
+  !/pendingPreview/.test(mediaPreview) ||
+  !/commitBufferedPreview/.test(mediaPreview) ||
+  !/preview-image-pending/.test(mediaPreview)
+) {
+  fail("MediaPreview central original switching must keep the displayed image mounted while a hidden pending image loads");
+}
+if (
+  !/import\s+\{\s*flushSync\s*\}\s+from\s+"react-dom";/.test(mediaPreview) ||
+  !/function\s+decodePendingPreviewImage\(/.test(mediaPreview) ||
+  !/decodePendingPreviewImage\(image\)[\s\S]*?\.then\(\(\)\s*=>\s*\{[\s\S]*?commitBufferedPreview\(pendingPreview,\s*naturalSize\);/.test(
+    mediaPreview
+  ) ||
+  !/flushSync\(\(\)\s*=>\s*\{[\s\S]*?setNaturalFrameStyle\(naturalFrameStyleForSize\(size\)\);[\s\S]*?setSrc\(preview\.src\);[\s\S]*?onNaturalSize\?\.\(size\);[\s\S]*?\}\);/.test(
+    mediaPreview
+  )
+) {
+  fail("MediaPreview central original switching must decode the hidden pending image and atomically commit src, frame, and transform state");
+}
+if (
+  !/const\s+effectiveFrameStyle\s*=\s*shouldUseBufferedSwap\s*\?\s*naturalFrameStyle\s*\?\?\s*frameStyle\s*:\s*frameStyle\s*\?\?\s*naturalFrameStyle;/.test(
+    mediaPreview
+  )
+) {
+  fail("MediaPreview buffered central switching must keep the displayed image frame until the pending image commits");
+}
+if (
+  !/DEFAULT_PREVIEW_BUFFER_LIMIT_MB\s*=\s*1200/.test(previewPreferences) ||
+  !/previewBufferLimitMb/.test(previewPreferences) ||
+  !/readStoredPreviewPreferences/.test(app) ||
+  !/storePreviewPreferences/.test(app) ||
+  !/configureOriginalPreviewBuffer/.test(app) ||
+  !/previewPreferences\.previewBufferLimitMb/.test(app) ||
+  !/Preview browsing/.test(settingsView) ||
+  !/Preview buffer/.test(settingsView)
+) {
+  fail("Preview browsing must expose a persisted 1200MB default original-image buffer preference in Settings");
+}
+if (
+  !/DEFAULT_THUMBNAIL_CACHE_LIMIT_MB\s*=\s*5120/.test(previewPreferences) ||
+  !/thumbnailCacheLimitMb/.test(previewPreferences) ||
+  !/PREVIEW_PREFERENCE_LIMITS[\s\S]*?thumbnailCacheLimitMb/.test(previewPreferences) ||
+  !/configureThumbnailCache/.test(app) ||
+  !/previewPreferences\.thumbnailCacheLimitMb/.test(app) ||
+  !/Thumbnail cache/.test(settingsView) ||
+  !/thumbnailObjectUrlCacheBytes/.test(mediaResources) ||
+  !/configureThumbnailCache/.test(mediaResources) ||
+  /THUMBNAIL_OBJECT_URL_CACHE_LIMIT\s*=\s*512/.test(mediaResources) ||
+  !/rememberThumbnailObjectUrl\([\s\S]*?byteSize/.test(mediaResources) ||
+  !/while\s*\(\s*thumbnailObjectUrlCacheBytes\s*>\s*thumbnailObjectUrlCacheLimitBytes/.test(mediaResources)
+) {
+  fail("Preview browsing must expose a persisted 5120MB thumbnail cache and enforce it with an LRU byte budget");
+}
+if (
+  !/originalPreviewBlobCacheBytes/.test(mediaResources) ||
+  !/configureOriginalPreviewBuffer/.test(mediaResources) ||
+  !/blob\.size/.test(mediaResources) ||
+  !/deleteOriginalPreviewCacheEntry/.test(mediaResources) ||
+  !/while\s*\(\s*originalPreviewBlobCacheBytes\s*>\s*originalPreviewBlobCacheLimitBytes/.test(mediaResources)
+) {
+  fail("Original preview cache must be an LRU byte-budget buffer instead of a fixed item-count cache");
+}
+if (
+  !/buildPreviewPrefetchWindow/.test(app) ||
+  !/selectedIndex\s*\+\s*offset/.test(app) ||
+  !/previewBufferLimitMbToBytes/.test(app) ||
+  !/prefetchOriginalPreview\(neighbor/.test(app)
+) {
+  fail("Central preview must prefetch subsequent images up to the configured preview buffer budget");
 }
 if (/\},\s*\[media,\s*source,\s*versionKey\]\);/.test(mediaPreview)) {
   fail("MediaPreview original-media effect must not reset shared-preview loading for unchanged media object identity churn");
@@ -1254,6 +1339,24 @@ if (
 if (!centralPreviewStage.includes('source="original"')) {
   fail("CentralPreviewStage must request original media bytes through MediaPreview");
 }
+if (
+  /useLayoutEffect\(\(\)\s*=>\s*\{[\s\S]*?resetTransform\(\);[\s\S]*?\},\s*\[resetTransform,\s*selectedMedia\.id\]\);/.test(
+    centralPreviewStage
+  ) ||
+  /\},\s*\[fitSyncTick,\s*previewReadyTick,\s*selectedMedia\.id,\s*viewMode\]\);/.test(
+    centralPreviewStage
+  ) ||
+  !/fittedMediaIdRef/.test(centralPreviewStage) ||
+  !/fittedMediaIdRef\.current\s*=\s*null/.test(centralPreviewStage) ||
+  !/const\s+shouldResetTransform\s*=\s*fittedMediaIdRef\.current\s*!==\s*selectedMedia\.id/.test(
+    centralPreviewStage
+  ) ||
+  !/setViewMode\("fit-long-edge"\);[\s\S]*?setScale\(nextScale\);[\s\S]*?setPan\(\{\s*x:\s*0,\s*y:\s*0\s*\}\);/.test(
+    centralPreviewStage
+  )
+) {
+  fail("CentralPreviewStage must keep the current image transform stable until the next image has a decoded natural size");
+}
 if (!/thumbnail=\{thumbnail\}/.test(centralPreviewStage)) {
   fail("CentralPreviewStage must pass thumbnail state only as fallback while original media loads");
 }
@@ -1297,9 +1400,9 @@ if (!/MediaPreview[\s\S]{0,320}source="thumbnail"[\s\S]{0,320}preserveNaturalFra
 }
 if (
   !/prefetchOriginalPreview/.test(app) ||
-  !/previewOpen[\s\S]*selectedMediaIndex[\s\S]*CENTER_PREVIEW_PREFETCH_RADIUS[\s\S]*orderedPreviewMedia\[selectedMediaIndex \+ offset\][\s\S]*prefetchOriginalPreview/.test(app)
+  !/previewOpen[\s\S]*selectedMediaIndex[\s\S]*buildPreviewPrefetchWindow[\s\S]*prefetchOriginalPreview/.test(app)
 ) {
-  fail("App must prefetch previous and next original previews when center preview is open");
+  fail("App must prefetch buffered subsequent original previews when center preview is open");
 }
 if (
   !/const\s+controller\s*=\s*new\s+AbortController\(\)/.test(app) ||
@@ -1312,11 +1415,30 @@ if (!/orderedPreviewMedia/.test(app) || /library\.media\[selectedMediaIndex [+-]
   fail("App preview navigation must use the current sorted/windowed mediaSlots order instead of append-loaded library.media order");
 }
 if (
-  !/CENTER_PREVIEW_PREFETCH_RADIUS\s*=\s*1/.test(app) ||
-  !/for\s*\([\s\S]*?offset[\s\S]*?CENTER_PREVIEW_PREFETCH_RADIUS/.test(app) ||
-  !/selectedMediaIndex\s*\+\s*offset/.test(app)
+  !/previewNavigationLockedRef/.test(app) ||
+  !/previewDisplayedMediaId/.test(app) ||
+  !/const\s+previewNavigationReady\s*=[\s\S]*?previewDisplayedMediaId\s*===\s*library\.selectedMediaId/.test(app) ||
+  !/function\s+startPreviewNavigation/.test(app) ||
+  !/previewNavigationLockedRef\.current\s*=\s*true[\s\S]*?library\.setSelectedMediaId/.test(app) ||
+  !/onPreviewMediaSettled=\{handlePreviewMediaSettled\}/.test(app)
 ) {
-  fail("App must keep center original preview prefetch explicitly bounded to previous/next neighbors");
+  fail("App preview navigation must lock wheel/key/button next/previous until the newly selected preview media has displayed");
+}
+if (
+  !/onPreviewNext\??:\s*\(\)\s*=>\s*void/.test(useShortcuts) ||
+  !/onPreviewPrevious\??:\s*\(\)\s*=>\s*void/.test(useShortcuts) ||
+  /selectPreviewNeighbor\(library,\s*[-\d]+\)/.test(useShortcuts) ||
+  !/onPreviewNext\?\.\(\)/.test(useShortcuts) ||
+  !/onPreviewPrevious\?\.\(\)/.test(useShortcuts)
+) {
+  fail("Global preview shortcuts must route through App preview navigation locking instead of selecting neighbors directly");
+}
+if (
+  !/MAX_PREVIEW_PREFETCH_CANDIDATES/.test(app) ||
+  !/previewBufferLimitMbToBytes/.test(app) ||
+  !/buildPreviewPrefetchWindow[\s\S]*selectedIndex\s*\+\s*offset/.test(app)
+) {
+  fail("App must keep center original preview prefetch bounded by buffer budget and max candidate count");
 }
 if (!shortcutBindings.includes("toggleSidebars") || !shortcutBindings.includes('defaultBinding: "Tab"')) {
   fail("shortcut bindings must expose editable Tab binding for toggling both sidebars");
@@ -1324,12 +1446,8 @@ if (!shortcutBindings.includes("toggleSidebars") || !shortcutBindings.includes('
 if (!useShortcuts.includes("onToggleSidebars") || !useShortcuts.includes('"toggleSidebars"')) {
   fail("global shortcut handler must invoke onToggleSidebars from the editable shortcut binding");
 }
-if (
-  /library\.media\.findIndex/.test(useShortcuts) ||
-  !/orderedMediaSlots\(library\.mediaSlots\)/.test(useShortcuts) ||
-  !/Array\.from\(mediaSlots\.entries\(\)\)[\s\S]*?sort\(\(\[leftIndex\],\s*\[rightIndex\]\)\s*=>\s*leftIndex\s*-\s*rightIndex\)/.test(useShortcuts)
-) {
-  fail("useShortcuts preview navigation must use the current virtual mediaSlots order before falling back to library.media");
+if (/selectPreviewNeighbor/.test(useShortcuts) || /library\.media\.findIndex/.test(useShortcuts)) {
+  fail("useShortcuts must not implement its own preview ordering because App owns locked preview navigation");
 }
 if (!app.includes("sidebarsHidden") || !app.includes("onToggleSidebars") || !shellTitlebar.includes("ShellSidebarToggle")) {
   fail("App must wire hidden sidebar state through shell titlebar controls");

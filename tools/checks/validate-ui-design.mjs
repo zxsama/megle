@@ -2170,9 +2170,16 @@ if (gridSurfaceBlocks.some((block) => /backdrop-filter\s*:/.test(block))) {
 }
 
 if (
-  !libraryView.includes('className={previewMedia ? "grid-surface grid-surface-preview" : "grid-surface"}')
+  !libraryView.includes('className={previewMedia ? "grid-surface grid-surface-preview-active" : "grid-surface"}') ||
+  !libraryView.includes('className="central-preview-overlay"')
 ) {
-  fail("LibraryView center content column must render .grid-surface in both browsing and preview states");
+  fail("LibraryView center content column must keep the browsing grid mounted and use a preview overlay");
+}
+if (
+  !/\.central-preview-overlay\s*\{[\s\S]*?background:\s*transparent;/.test(stylesForChecks) ||
+  !/\.library-browser-layout--preview-covered\s*\{[\s\S]*?visibility:\s*hidden;/.test(stylesForChecks)
+) {
+  fail("Central preview overlay must preserve the transparent preview background while hiding the mounted browsing grid");
 }
 
 if (libraryView.includes("<LiquidGlassSurface") && libraryView.includes("grid-surface")) {
@@ -2373,7 +2380,7 @@ for (const [source, value, message] of [
   }
 }
 
-if (!/const\s+contentHeader\s*=\s*!\s*previewMedia\s*&&\s*contentCount\s*>\s*0\s*\?/.test(libraryView)) {
+if (!/const\s+contentHeader\s*=\s*contentCount\s*>\s*0\s*\?/.test(libraryView)) {
   fail("LibraryView must hide the content section header when the current content area has no files");
 }
 
