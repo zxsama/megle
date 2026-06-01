@@ -24,3 +24,7 @@ pub const PREVIEW_PIPELINE_REFACTOR_MIGRATION: &str =
     include_str!("../../migrations/0012_preview_pipeline_refactor.sql");
 pub const PREVIEW_SERVED_BY_MIGRATION: &str =
     include_str!("../../migrations/0013_preview_served_by.sql");
+pub const ROOT_STATUS_BROWSING_INDEXES_MIGRATION: &str =
+    include_str!("../../migrations/0015_root_status_browsing_indexes.sql");
+pub const FOLDER_STATUS_BROWSING_INDEXES_MIGRATION: &str =
+    include_str!("../../migrations/0016_folder_status_browsing_indexes.sql");

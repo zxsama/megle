@@ -36,6 +36,12 @@ const PERSIST_DEBOUNCE_MS = 500;
 const SHELL_READY_FAILURE_TIMEOUT_MS = 4000;
 const AUTO_CORE_STARTUP_MAX_ATTEMPTS = 3;
 const WINDOW_COMPOSITION_REFRESH_DELAYS_MS = [34, 140, 420] as const;
+const CHROMIUM_OVERLAY_SCROLLBAR_FEATURES = [
+  "OverlayScrollbar",
+  "FluentOverlayScrollbar"
+].join(",");
+
+app.commandLine.appendSwitch("enable-features", CHROMIUM_OVERLAY_SCROLLBAR_FEATURES);
 
 interface WindowState {
   width: number;

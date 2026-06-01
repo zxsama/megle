@@ -5,14 +5,17 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::Query as ExtraQuery;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path as FilePath;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::api::AppState;
 use crate::db::{
-    FolderRecord, MediaPageQuery, MediaRecord, NewRoot, PluginRecord, RootRecord, SearchQuery,
-    TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailRecord, ThumbnailTaskPriority,
-    UserMetadataPatch, UserMetadataRecord,
+    Database, FolderRecord, MediaPageQuery, MediaRecord, NewRoot, PluginRecord, RootRecord,
+    SearchQuery, TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailRecord,
+    ThumbnailTaskPriority, UserMetadataPatch, UserMetadataRecord, THUMBNAIL_BACKGROUND_PRIORITY,
 };
 use crate::fsops::{
     self, DeleteRequest, FileOperationRecord, FsOpsError, FsOpsErrorCode, MoveRequest,
@@ -21,6 +24,10 @@ use crate::fsops::{
 use crate::plugins;
 use crate::scan::ScanSummary;
 use crate::thumbnails::{is_pending_status, normalize_profile};
+
+const THUMBNAIL_TASK_WAKE_DEDUPE_WINDOW: Duration = Duration::from_millis(750);
+static RECENT_THUMBNAIL_TASK_WAKEUPS: LazyLock<Mutex<HashMap<(usize, i64, i64), Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[allow(dead_code)]
 pub const MEDIA_SORT_VALUES: &[&str] = &["mtime_desc", "mtime_asc", "name_asc", "name_desc"];
@@ -441,6 +448,53 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn run_read_database<T, F>(state: AppState, operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Database) -> ApiResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        if let Some(database) = state.open_read_database()? {
+            operation(&database)
+        } else {
+            let database = state.database.lock().expect("database mutex poisoned");
+            operation(&database)
+        }
+    })
+    .await
+    .map_err(|error| CoreError::from(anyhow::anyhow!("database task failed: {error}")))?
+}
+
+async fn run_shared_database<T, F>(state: AppState, operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Database) -> ApiResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let database = state.database.lock().expect("database mutex poisoned");
+        operation(&database)
+    })
+    .await
+    .map_err(|error| CoreError::from(anyhow::anyhow!("database task failed: {error}")))?
+}
+
+async fn run_dedicated_or_shared_database<T, F>(state: AppState, operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Database) -> ApiResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        if let Some(database) = state.open_read_database()? {
+            operation(&database)
+        } else {
+            let database = state.database.lock().expect("database mutex poisoned");
+            operation(&database)
+        }
+    })
+    .await
+    .map_err(|error| CoreError::from(anyhow::anyhow!("database task failed: {error}")))?
+}
+
 async fn get_health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
@@ -450,8 +504,7 @@ async fn get_health() -> Json<HealthResponse> {
 }
 
 async fn list_roots(State(state): State<AppState>) -> ApiResult<Json<ListResponse<RootRecord>>> {
-    let database = state.database.lock().expect("database mutex poisoned");
-    let items = database.list_roots()?;
+    let items = run_read_database(state, |database| Ok(database.list_roots()?)).await?;
     Ok(Json(ListResponse {
         items,
         next_cursor: None,
@@ -516,20 +569,21 @@ async fn list_folder_children(
     Path(folder_id): Path<i64>,
     Query(query): Query<ListFolderChildrenQuery>,
 ) -> ApiResult<Json<ListResponse<FolderRecord>>> {
-    let database = state.database.lock().expect("database mutex poisoned");
-    if !database.folder_exists(folder_id)? {
-        return Err(CoreError::not_found(format!(
-            "folder not found: {folder_id}"
-        )));
-    }
-    let page = database
-        .list_folder_children_page(
-            folder_id,
-            query.limit.unwrap_or(200),
-            query.cursor,
-            query.include_descendants.unwrap_or(false),
-        )
-        .map_err(map_cursor_error)?;
+    let limit = query.limit.unwrap_or(200);
+    let cursor = query.cursor;
+    let include_descendants = query.include_descendants.unwrap_or(false);
+    let page = run_read_database(state, move |database| {
+        if !database.folder_exists(folder_id)? {
+            return Err(CoreError::not_found(format!(
+                "folder not found: {folder_id}"
+            )));
+        }
+        let page = database
+            .list_folder_children_page(folder_id, limit, cursor, include_descendants)
+            .map_err(map_cursor_error)?;
+        Ok(page)
+    })
+    .await?;
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
@@ -543,19 +597,22 @@ async fn list_media(
 ) -> ApiResult<Json<ListResponse<MediaRecord>>> {
     let sort = parse_media_sort(query.sort.as_deref())?.to_string();
     let kind = parse_media_kind(query.kind.as_deref())?.map(str::to_string);
-    let database = state.database.lock().expect("database mutex poisoned");
-    let page = database
-        .list_media_page(MediaPageQuery {
-            root_id: query.root_id,
-            folder_id: query.folder_id,
-            include_descendants: query.include_descendants.unwrap_or(false),
-            limit: query.limit.unwrap_or(200),
-            offset: query.offset,
-            cursor: query.cursor,
-            sort,
-            kind,
-        })
-        .map_err(map_cursor_error)?;
+    let media_query = MediaPageQuery {
+        root_id: query.root_id,
+        folder_id: query.folder_id,
+        include_descendants: query.include_descendants.unwrap_or(false),
+        limit: query.limit.unwrap_or(200),
+        offset: query.offset,
+        cursor: query.cursor,
+        sort,
+        kind,
+    };
+    let page = run_read_database(state, move |database| {
+        database
+            .list_media_page(media_query)
+            .map_err(map_cursor_error)
+    })
+    .await?;
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
@@ -567,10 +624,12 @@ async fn get_media(
     State(state): State<AppState>,
     Path(file_id): Path<i64>,
 ) -> ApiResult<Json<MediaRecord>> {
-    let database = state.database.lock().expect("database mutex poisoned");
-    let item = database
-        .get_media(file_id)?
-        .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
+    let item = run_read_database(state, move |database| {
+        database
+            .get_media(file_id)?
+            .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))
+    })
+    .await?;
     Ok(Json(item))
 }
 
@@ -583,8 +642,66 @@ async fn get_thumbnail(
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
     let priority = ThumbnailTaskPriority::from_query_value(query.priority.as_deref())
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail priority".to_string()))?;
-    let (thumbnail, blob, queued_task) = {
-        let database = state.database.lock().expect("database mutex poisoned");
+    let requested_task_priority = priority.task_priority();
+    let read_snapshot = run_read_database(state.clone(), move |database| {
+        let thumbnail = database
+            .get_thumbnail(file_id, target)?
+            .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
+        let active_task = if is_pending_status(&thumbnail.state) {
+            database.active_thumbnail_task(file_id)?
+        } else {
+            None
+        };
+        let blob = if thumbnail.state.as_str() == "ready" {
+            database.get_thumb_blob(file_id, target)?
+        } else {
+            None
+        };
+        Ok((thumbnail, blob, active_task))
+    })
+    .await?;
+    let (thumbnail, blob, active_task) = read_snapshot;
+    if !is_pending_status(&thumbnail.state)
+        || active_task
+            .as_ref()
+            .is_some_and(|task| task.priority >= requested_task_priority)
+    {
+        let active_task = if let Some(task) = active_task.as_ref().filter(|task| {
+            task.status == "pending"
+                && task.priority >= requested_task_priority
+                && requested_task_priority > THUMBNAIL_BACKGROUND_PRIORITY
+        }) {
+            let task_id = task.id;
+            run_dedicated_or_shared_database(state.clone(), move |database| {
+                Ok(database
+                    .touch_pending_foreground_thumbnail_task(task_id, requested_task_priority)?)
+            })
+            .await?
+        } else {
+            active_task
+        };
+        if let Some(task) = active_task
+            .as_ref()
+            .filter(|task| task.status == "pending" && task.priority >= requested_task_priority)
+        {
+            enqueue_thumbnail_task_wakeup(
+                &state,
+                task.id,
+                task.attempt_generation,
+                task.priority,
+                true,
+            )
+            .await?;
+        }
+        let status = if is_pending_status(&thumbnail.state) {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        return Ok((status, Json(thumbnail_response(thumbnail, blob))));
+    }
+
+    let (thumbnail, blob, queued_task) = run_shared_database(state.clone(), move |database| {
         let thumbnail = database
             .get_thumbnail(file_id, target)?
             .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
@@ -592,7 +709,7 @@ async fn get_thumbnail(
             let request = database
                 .request_thumbnail_task(file_id, target, priority)
                 .map_err(map_thumbnail_request_error)?;
-            let queued_task_id = if request.queued {
+            let queued_task_id = if request.should_enqueue {
                 request.task_id
             } else {
                 None
@@ -601,7 +718,7 @@ async fn get_thumbnail(
                 .map(|task_id| {
                     database
                         .current_task_attempt_generation(task_id)
-                        .map(|attempt| (task_id, attempt))
+                        .map(|attempt| (task_id, attempt, requested_task_priority))
                 })
                 .transpose()?;
             (request.thumbnail, queued_task)
@@ -613,10 +730,12 @@ async fn get_thumbnail(
         } else {
             None
         };
-        (thumbnail, blob, queued_task)
-    };
-    if let Some((task_id, attempt_generation)) = queued_task {
-        enqueue_task(&state, task_id, attempt_generation).await?;
+        Ok((thumbnail, blob, queued_task))
+    })
+    .await?;
+    if let Some((task_id, attempt_generation, task_priority)) = queued_task {
+        enqueue_thumbnail_task_wakeup(&state, task_id, attempt_generation, task_priority, false)
+            .await?;
     }
     let status = if is_pending_status(&thumbnail.state) {
         StatusCode::ACCEPTED
@@ -635,8 +754,7 @@ async fn get_thumbnail_blob(
     use axum::response::Response;
     let target = normalize_profile(query.target.as_deref())
         .ok_or_else(|| CoreError::bad_request("unsupported thumbnail target".to_string()))?;
-    let blob = {
-        let database = state.database.lock().expect("database mutex poisoned");
+    let blob = run_read_database(state, move |database| {
         let thumbnail = database
             .get_thumbnail(file_id, target)?
             .ok_or_else(|| CoreError::not_found("media item not found".to_string()))?;
@@ -646,10 +764,12 @@ async fn get_thumbnail_blob(
                 thumbnail.state
             )));
         }
-        database
+        let blob = database
             .get_thumb_blob(file_id, target)?
-            .ok_or_else(|| CoreError::not_found("thumbnail blob missing".to_string()))?
-    };
+            .ok_or_else(|| CoreError::not_found("thumbnail blob missing".to_string()))?;
+        Ok(blob)
+    })
+    .await?;
     Response::builder()
         .header(CONTENT_TYPE, blob.output_format)
         .header(CACHE_CONTROL, "public, max-age=31536000, immutable")
@@ -666,16 +786,16 @@ async fn get_preview(
     use axum::http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
     use tokio_util::io::ReaderStream;
 
-    let (source_path, media_kind) = {
-        let database = state.database.lock().expect("database mutex poisoned");
+    let (source_path, media_kind) = run_read_database(state, move |database| {
         let media = database
             .get_media(file_id)?
             .ok_or_else(|| CoreError::not_found(format!("media item not found: {file_id}")))?;
         let source_path = database
             .resolve_file_source_path(file_id)?
             .ok_or_else(|| CoreError::not_found(format!("media source not found: {file_id}")))?;
-        (source_path, media.kind)
-    };
+        Ok((source_path, media.kind))
+    })
+    .await?;
 
     let file = tokio::fs::File::open(&source_path)
         .await
@@ -705,8 +825,7 @@ async fn get_preview(
 }
 
 async fn list_tasks(State(state): State<AppState>) -> ApiResult<Json<ListResponse<TaskRecord>>> {
-    let database = state.database.lock().expect("database mutex poisoned");
-    let items = database.list_tasks()?;
+    let items = run_read_database(state, |database| Ok(database.list_tasks()?)).await?;
     Ok(Json(ListResponse {
         items,
         next_cursor: None,
@@ -749,24 +868,26 @@ async fn enqueue_interactive_folder_scan(
     State(state): State<AppState>,
     Json(payload): Json<InteractiveFolderScanTaskRequest>,
 ) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
-    let (task_id, attempt_generation, root_id) = {
-        let database = state.database.lock().expect("database mutex poisoned");
-        if !database.folder_exists(payload.folder_id)? {
-            return Err(CoreError::not_found(format!(
-                "folder not found: {}",
-                payload.folder_id
-            )));
-        }
-        let task_id = database.create_interactive_folder_scan_task(payload.folder_id)?;
-        let task = database
-            .get_task(task_id)?
-            .ok_or_else(|| CoreError::not_found(format!("task not found: {task_id}")))?;
-        let attempt_generation = database.current_task_attempt_generation(task_id)?;
-        let root_id = task
-            .root_id
-            .ok_or_else(|| CoreError::conflict(format!("task missing root id: {task_id}")))?;
-        (task_id, attempt_generation, root_id)
-    };
+    let folder_id = payload.folder_id;
+    let (task_id, attempt_generation, root_id) =
+        run_shared_database(state.clone(), move |database| {
+            if !database.folder_exists(folder_id)? {
+                return Err(CoreError::not_found(format!(
+                    "folder not found: {}",
+                    folder_id
+                )));
+            }
+            let task_id = database.create_interactive_folder_scan_task(folder_id)?;
+            let task = database
+                .get_task(task_id)?
+                .ok_or_else(|| CoreError::not_found(format!("task not found: {task_id}")))?;
+            let attempt_generation = database.current_task_attempt_generation(task_id)?;
+            let root_id = task
+                .root_id
+                .ok_or_else(|| CoreError::conflict(format!("task missing root id: {task_id}")))?;
+            Ok((task_id, attempt_generation, root_id))
+        })
+        .await?;
     enqueue_task(&state, task_id, attempt_generation).await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -783,27 +904,40 @@ async fn sync_thumbnail_priority_scope(
     State(state): State<AppState>,
     Json(payload): Json<ThumbnailPriorityScopeSyncRequest>,
 ) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
-    {
-        let database = state.database.lock().expect("database mutex poisoned");
-        if database.get_root(payload.root_id)?.is_none() {
-            return Err(CoreError::not_found(format!(
-                "root not found: {}",
-                payload.root_id
-            )));
+    let root_id = payload.root_id;
+    let selected_file_ids = payload.selected_file_ids;
+    let visible_file_ids = payload.visible_file_ids;
+    let ahead_file_ids = payload.ahead_file_ids;
+    let promoted_tasks = run_shared_database(state.clone(), move |database| {
+        if database.get_root(root_id)?.is_none() {
+            return Err(CoreError::not_found(format!("root not found: {}", root_id)));
         }
-        database.sync_thumbnail_priority_scope(
-            payload.root_id,
-            &payload.selected_file_ids,
-            &payload.visible_file_ids,
-            &payload.ahead_file_ids,
+        let result = database.sync_thumbnail_priority_scope_with_promotions(
+            root_id,
+            &selected_file_ids,
+            &visible_file_ids,
+            &ahead_file_ids,
         )?;
+        Ok(result
+            .promoted_pending_task_ids
+            .into_iter()
+            .map(|task_id| {
+                database
+                    .current_task_attempt_generation(task_id)
+                    .map(|attempt| (task_id, attempt))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?)
+    })
+    .await?;
+    for (task_id, attempt_generation) in promoted_tasks {
+        enqueue_task(&state, task_id, attempt_generation).await?;
     }
     Ok((
         StatusCode::ACCEPTED,
         Json(AcceptedResponse {
             accepted: true,
             task_id: None,
-            root_id: Some(payload.root_id),
+            root_id: Some(root_id),
             scan: None,
         }),
     ))
@@ -1152,23 +1286,26 @@ async fn search_media(
             "limit must be between 1 and 500: {limit}"
         )));
     }
-    let database = state.database.lock().expect("database mutex poisoned");
-    let page = database
-        .search_media_page(SearchQuery {
-            q: query.q,
-            root_id: query.root_id,
-            folder_id: query.folder_id,
-            include_descendants: query.include_descendants.unwrap_or(false),
-            kind,
-            min_rating: query.min_rating,
-            favorite: query.favorite,
-            tag_ids: query.tag_id,
-            sort,
-            limit,
-            offset: query.offset,
-            cursor: query.cursor,
-        })
-        .map_err(map_cursor_error)?;
+    let search_query = SearchQuery {
+        q: query.q,
+        root_id: query.root_id,
+        folder_id: query.folder_id,
+        include_descendants: query.include_descendants.unwrap_or(false),
+        kind,
+        min_rating: query.min_rating,
+        favorite: query.favorite,
+        tag_ids: query.tag_id,
+        sort,
+        limit,
+        offset: query.offset,
+        cursor: query.cursor,
+    };
+    let page = run_read_database(state, move |database| {
+        database
+            .search_media_page(search_query)
+            .map_err(map_cursor_error)
+    })
+    .await?;
     Ok(Json(ListResponse {
         items: page.items,
         next_cursor: page.next_cursor,
@@ -1300,6 +1437,74 @@ fn map_thumbnail_request_error(error: anyhow::Error) -> CoreError {
         return CoreError::bad_request(message.replace("profile", "target"));
     }
     error.into()
+}
+
+async fn enqueue_thumbnail_task_wakeup(
+    state: &AppState,
+    task_id: i64,
+    attempt_generation: i64,
+    task_priority: i64,
+    dedupe_recent: bool,
+) -> ApiResult<()> {
+    let wakeup_key = thumbnail_task_wakeup_key(state, task_id, attempt_generation, task_priority);
+    if dedupe_recent && !claim_thumbnail_task_wakeup(wakeup_key) {
+        return Ok(());
+    }
+
+    let result = enqueue_task(state, task_id, attempt_generation).await;
+    match result {
+        Ok(()) => {
+            remember_thumbnail_task_wakeup(wakeup_key);
+            Ok(())
+        }
+        Err(error) => {
+            forget_thumbnail_task_wakeup(wakeup_key);
+            Err(error)
+        }
+    }
+}
+
+fn thumbnail_task_wakeup_key(
+    state: &AppState,
+    task_id: i64,
+    _attempt_generation: i64,
+    task_priority: i64,
+) -> (usize, i64, i64) {
+    (
+        std::sync::Arc::as_ptr(&state.database) as usize,
+        task_id,
+        task_priority,
+    )
+}
+
+fn claim_thumbnail_task_wakeup(key: (usize, i64, i64)) -> bool {
+    let now = Instant::now();
+    let mut wakeups = RECENT_THUMBNAIL_TASK_WAKEUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    wakeups.retain(|_, last_wakeup| {
+        now.duration_since(*last_wakeup) <= THUMBNAIL_TASK_WAKE_DEDUPE_WINDOW
+    });
+    if wakeups.contains_key(&key) {
+        return false;
+    }
+    wakeups.insert(key, now);
+    true
+}
+
+fn remember_thumbnail_task_wakeup(key: (usize, i64, i64)) {
+    let now = Instant::now();
+    let mut wakeups = RECENT_THUMBNAIL_TASK_WAKEUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    wakeups.insert(key, now);
+}
+
+fn forget_thumbnail_task_wakeup(key: (usize, i64, i64)) {
+    let mut wakeups = RECENT_THUMBNAIL_TASK_WAKEUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    wakeups.remove(&key);
 }
 
 fn preview_content_type(path: &FilePath, media_kind: Option<&str>) -> &'static str {
@@ -1445,13 +1650,25 @@ fn parse_user_metadata_patch(value: &serde_json::Value) -> ApiResult<UserMetadat
 }
 
 async fn enqueue_task(state: &AppState, task_id: i64, attempt_generation: i64) -> ApiResult<()> {
-    if let Err(error) = state.task_queue.send(task_id).await {
-        let error = anyhow::anyhow!("background task queue is closed: {error}");
-        let database = state.database.lock().expect("database mutex poisoned");
-        database.mark_task_failed_for_attempt(task_id, attempt_generation, &error.to_string())?;
-        return Err(error.into());
+    match state.task_queue.try_send(task_id) {
+        Ok(()) => Ok(()),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            // The task row is already durable. If the worker channel is full,
+            // returning immediately keeps foreground browsing responsive; the
+            // worker drains persisted pending tasks after each queued message.
+            Ok(())
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            let error = anyhow::anyhow!("background task queue is closed");
+            let database = state.database.lock().expect("database mutex poisoned");
+            database.mark_task_failed_for_attempt(
+                task_id,
+                attempt_generation,
+                &error.to_string(),
+            )?;
+            Err(error.into())
+        }
     }
-    Ok(())
 }
 
 impl CoreError {
@@ -1509,7 +1726,7 @@ mod tests {
 
     use super::{fallback_display_name, router};
     use crate::api::{router_with_config, ApiConfig, AppState, BasicAuthCredentials};
-    use crate::db::{Database, NewRoot};
+    use crate::db::{Database, NewRoot, ThumbnailTaskPriority};
 
     #[test]
     fn fallback_display_name_uses_last_path_component() {
@@ -1674,6 +1891,7 @@ mod tests {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
             plugins_dir: None,
+            read_database_path: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -1796,6 +2014,7 @@ mod tests {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
             plugins_dir: None,
+            read_database_path: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -1841,6 +2060,198 @@ mod tests {
         assert_eq!(tasks[0].id, queued_task_id);
         assert_eq!(tasks[0].kind, "thumbnail");
         assert_eq!(tasks[0].file_id, Some(file_id));
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_reenqueues_promoted_pending_thumbnail_task() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+            plugins_dir: None,
+            read_database_path: None,
+            _watcher: None,
+        };
+        let app = router(state.clone());
+
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{file_id}/thumbnail?target=grid_320&priority=background"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get background thumbnail state");
+        assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+        let queued_task_id = receiver
+            .try_recv()
+            .expect("initial background request should enqueue the task");
+
+        let second_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{file_id}/thumbnail?target=grid_320&priority=selected"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("promote thumbnail task");
+        assert_eq!(second_response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("selected promotion should wake the task queue"),
+            queued_task_id
+        );
+
+        let database = state.database.lock().expect("database mutex poisoned");
+        let task = database
+            .get_task(queued_task_id)
+            .expect("get promoted thumbnail task")
+            .expect("promoted task exists");
+        assert_eq!(task.priority, crate::db::THUMBNAIL_SELECTED_PRIORITY);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_route_wakes_existing_pending_thumbnail_task() {
+        let database = test_database();
+        let file_id = seed_media_file(&database);
+        let queued_task_id = database
+            .request_thumbnail_task(
+                file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                ThumbnailTaskPriority::Visible,
+            )
+            .expect("create pending visible thumbnail task")
+            .task_id
+            .expect("pending task id");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+            plugins_dir: None,
+            read_database_path: None,
+            _watcher: None,
+        };
+        let app = router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{file_id}/thumbnail?target=grid_320&priority=visible"
+                    ))
+                    .body(Body::empty())
+                    .expect("build wake request"),
+            )
+            .await
+            .expect("wake existing pending thumbnail task");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("existing pending task should be woken"),
+            queued_task_id
+        );
+
+        let repeated = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{file_id}/thumbnail?target=grid_320&priority=visible"
+                    ))
+                    .body(Body::empty())
+                    .expect("build repeated wake request"),
+            )
+            .await
+            .expect("repeat wake existing pending thumbnail task");
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_priority_scope_route_reenqueues_promoted_pending_tasks() {
+        let database = test_database();
+        let (root_id, file_ids) =
+            seed_media_files_in_one_root(&database, &["selected.jpg", "visible.jpg"]);
+        let selected_file_id = file_ids[0];
+        let visible_file_id = file_ids[1];
+        let selected_task_id = database
+            .request_thumbnail_task(
+                selected_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Background,
+            )
+            .expect("queue selected file as background")
+            .task_id
+            .expect("selected task id");
+        let visible_task_id = database
+            .request_thumbnail_task(
+                visible_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Background,
+            )
+            .expect("queue visible file as background")
+            .task_id
+            .expect("visible task id");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+            plugins_dir: None,
+            read_database_path: None,
+            _watcher: None,
+        };
+        let app = router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-priority-scope")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "rootId": root_id,
+                            "selectedFileIds": [selected_file_id],
+                            "visibleFileIds": [visible_file_id],
+                            "aheadFileIds": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build sync request"),
+            )
+            .await
+            .expect("sync priority scope");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let mut enqueued = vec![
+            receiver
+                .try_recv()
+                .expect("selected promotion should wake task queue"),
+            receiver
+                .try_recv()
+                .expect("visible promotion should wake task queue"),
+        ];
+        enqueued.sort();
+        let mut expected = vec![selected_task_id, visible_task_id];
+        expected.sort();
+        assert_eq!(enqueued, expected);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2227,6 +2638,7 @@ mod tests {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
             plugins_dir: None,
+            read_database_path: None,
             _watcher: None,
         };
         let app = router(state);
@@ -2313,6 +2725,238 @@ mod tests {
         let _ = fs::remove_dir_all(temp_root);
         drop(app);
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn roots_route_uses_read_database_when_shared_handle_is_busy() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        database
+            .add_root(crate::db::NewRoot {
+                path: "D:/Pictures".to_string(),
+                display_name: "Pictures".to_string(),
+            })
+            .expect("add root");
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+            plugins_dir: None,
+            read_database_path: Some(db_path.clone()),
+            _watcher: None,
+        };
+        let app = router(state.clone());
+
+        let (locked_sender, locked_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let locked_database = state.database.clone();
+        let blocker = std::thread::spawn(move || {
+            let _guard = locked_database.lock().expect("lock shared database");
+            locked_sender.send(()).expect("notify locked database");
+            release_receiver.recv().expect("wait to release database");
+        });
+        locked_receiver.recv().expect("database lock acquired");
+
+        let request = tokio::spawn(
+            app.oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/roots")
+                    .body(Body::empty())
+                    .expect("build request"),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let finished_before_release = request.is_finished();
+        release_sender.send(()).expect("release database lock");
+        blocker.join().expect("join database blocker");
+        assert!(
+            finished_before_release,
+            "GET /api/roots should not wait for the shared database handle"
+        );
+        let response = request
+            .await
+            .expect("join list roots request")
+            .expect("list roots response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thumbnail_route_reuses_existing_queued_task_without_shared_handle() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let file_id = seed_media_file(&database);
+        database
+            .request_thumbnail_task(
+                file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                ThumbnailTaskPriority::Visible,
+            )
+            .expect("queue visible thumbnail task");
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+            plugins_dir: None,
+            read_database_path: Some(db_path.clone()),
+            _watcher: None,
+        };
+        let app = router(state.clone());
+
+        let (locked_sender, locked_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let locked_database = state.database.clone();
+        let blocker = std::thread::spawn(move || {
+            let _guard = locked_database.lock().expect("lock shared database");
+            locked_sender.send(()).expect("notify locked database");
+            release_receiver.recv().expect("wait to release database");
+        });
+        locked_receiver.recv().expect("database lock acquired");
+
+        let request = tokio::spawn(
+            app.oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/media/{file_id}/thumbnail?target=grid_320&priority=visible"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let finished_before_release = request.is_finished();
+        release_sender.send(()).expect("release database lock");
+        blocker.join().expect("join database blocker");
+        assert!(
+            finished_before_release,
+            "GET /thumbnail should reuse the existing queued task without waiting for the shared database handle"
+        );
+        let response = request
+            .await
+            .expect("join thumbnail request")
+            .expect("thumbnail response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enqueue_scan_route_does_not_wait_for_full_worker_channel() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        let database = test_database();
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Queued Root".to_string(),
+            })
+            .expect("add root");
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender.try_send(-1).expect("fill worker queue");
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+            plugins_dir: None,
+            read_database_path: None,
+            _watcher: None,
+        };
+        let app = router(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            app.oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "rootId": root_id }).to_string(),
+                    ))
+                    .expect("build request"),
+            ),
+        )
+        .await;
+        drop(receiver);
+        let response = response
+            .expect("POST /api/tasks/scan should persist the task without waiting for queue space")
+            .expect("enqueue scan response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tasks_route_uses_read_database_when_shared_handle_is_busy() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: temp_root.to_string_lossy().into_owned(),
+                display_name: "Task Root".to_string(),
+            })
+            .expect("add root");
+        database
+            .create_root_scan_task(root_id)
+            .expect("create scan task");
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let state = AppState {
+            database: std::sync::Arc::new(std::sync::Mutex::new(database)),
+            task_queue: sender,
+            plugins_dir: None,
+            read_database_path: Some(db_path.clone()),
+            _watcher: None,
+        };
+        let app = router(state.clone());
+
+        let (locked_sender, locked_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let locked_database = state.database.clone();
+        let blocker = std::thread::spawn(move || {
+            let _guard = locked_database.lock().expect("lock shared database");
+            locked_sender.send(()).expect("notify locked database");
+            release_receiver.recv().expect("wait to release database");
+        });
+        locked_receiver.recv().expect("database lock acquired");
+
+        let request = tokio::spawn(
+            app.oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/tasks")
+                    .body(Body::empty())
+                    .expect("build request"),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let finished_before_release = request.is_finished();
+        release_sender.send(()).expect("release database lock");
+        blocker.join().expect("join database blocker");
+        assert!(
+            finished_before_release,
+            "GET /api/tasks should not wait for the shared database handle"
+        );
+        let response = request
+            .await
+            .expect("join list tasks request")
+            .expect("list tasks response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
         let _ = fs::remove_dir_all(db_dir);
     }
 
@@ -2801,6 +3445,7 @@ mod tests {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: _sender,
             plugins_dir: None,
+            read_database_path: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -2842,6 +3487,7 @@ mod tests {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: _sender,
             plugins_dir: None,
+            read_database_path: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -2888,6 +3534,7 @@ mod tests {
             database: std::sync::Arc::new(std::sync::Mutex::new(database)),
             task_queue: sender,
             plugins_dir: None,
+            read_database_path: None,
             _watcher: None,
         };
         let app = router(state.clone());
@@ -4086,6 +4733,44 @@ mod tests {
             .upsert_media_kind(file_id, "image")
             .expect("insert media kind");
         file_id
+    }
+
+    fn seed_media_files_in_one_root(database: &Database, names: &[&str]) -> (i64, Vec<i64>) {
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: "D:/Pictures/scope-priority".to_string(),
+                display_name: "Scope Priority".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "scope-priority-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let mut file_ids = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            let file_id = database
+                .upsert_file(crate::db::FileUpsert {
+                    root_id,
+                    folder_id,
+                    name: (*name).to_string(),
+                    ext: ".jpg".to_string(),
+                    size: 1000 + index as i64,
+                    mtime: 2 + index as i64,
+                    ctime: None,
+                    file_key: Some(format!("scope-priority-{name}")),
+                })
+                .expect("insert file");
+            database
+                .upsert_media_kind(file_id, "image")
+                .expect("insert media kind");
+            file_ids.push(file_id);
+        }
+        (root_id, file_ids)
     }
 
     fn unique_temp_dir() -> PathBuf {

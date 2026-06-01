@@ -43,6 +43,7 @@ const POINTER_RESET = "50%";
 const POINTER_OPACITY_HIDDEN = "0";
 const GLASS_POINTER_EDGE_PROXIMITY_PX = 112;
 const WINDOW_EDGE_SURFACE_SELECTOR = '[data-window-edge-surface="true"]';
+const INTERACTIVE_POINTER_TARGET_SELECTOR_ATTRIBUTE = "data-interactive-pointer-target-selector";
 const INTERACTIVE_AFFORDANCE_OWNER_SELECTOR = [
   ".tree-item",
   ".tile-thumb",
@@ -525,16 +526,30 @@ function interactiveAffordanceTargets() {
   const targets = new Set<HTMLElement>();
   for (const candidate of candidates) {
     const owner = candidate.closest<HTMLElement>(INTERACTIVE_AFFORDANCE_OWNER_SELECTOR);
+    let target = candidate;
     if (owner && owner !== candidate) {
-      candidate.removeAttribute("data-interactive-pointer-target");
-      candidate.removeAttribute("data-interactive-pointer");
-      candidate.style.setProperty("--interactive-pointer-opacity", POINTER_OPACITY_HIDDEN);
-      targets.add(owner);
-      continue;
+      clearInteractiveAffordancePointer(candidate);
+      target = owner;
     }
-    targets.add(candidate);
+    const visualTarget = interactiveAffordanceVisualTarget(target);
+    if (visualTarget !== target) {
+      clearInteractiveAffordancePointer(target);
+    }
+    targets.add(visualTarget);
   }
   return targets;
+}
+
+function interactiveAffordanceVisualTarget(target: HTMLElement) {
+  const selector = target.getAttribute(INTERACTIVE_POINTER_TARGET_SELECTOR_ATTRIBUTE);
+  if (!selector) {
+    return target;
+  }
+  try {
+    return target.querySelector<HTMLElement>(selector) ?? target;
+  } catch {
+    return target;
+  }
 }
 
 function interactiveAffordanceDisabled(target: HTMLElement) {
@@ -568,6 +583,12 @@ function hideGlassPointer(target: HTMLElement) {
 
 function hideInteractiveAffordancePointer(target: HTMLElement) {
   target.dataset.interactivePointer = "idle";
+  target.style.setProperty("--interactive-pointer-opacity", POINTER_OPACITY_HIDDEN);
+}
+
+function clearInteractiveAffordancePointer(target: HTMLElement) {
+  target.removeAttribute("data-interactive-pointer-target");
+  target.removeAttribute("data-interactive-pointer");
   target.style.setProperty("--interactive-pointer-opacity", POINTER_OPACITY_HIDDEN);
 }
 

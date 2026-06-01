@@ -3,11 +3,16 @@ import type { CSSProperties } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import {
   mediaContentSignature,
+  mediaFileContentSignature,
   preloadImageObjectUrl,
   previewPlaceholderDataUrl,
+  readCachedThumbnailObjectUrl,
   requestOriginalPreviewBlob,
-  requestThumbnailBlob
+  requestThumbnailBlob,
+  thumbnailObjectUrlCacheKey
 } from "../../core/mediaResources";
+
+const STALE_PREVIEW_OBJECT_URL_REVOKE_DELAY_MS = 8000;
 
 export function MediaPreview({
   media,
@@ -15,6 +20,7 @@ export function MediaPreview({
   onMediaReady,
   onNaturalSize,
   preferOriginalWhilePending = false,
+  preserveNaturalFrame,
   source = "thumbnail",
   stableFrame = false,
   thumbnail
@@ -24,14 +30,16 @@ export function MediaPreview({
   onMediaReady?: () => void;
   onNaturalSize?: (size: { naturalHeight: number; naturalWidth: number }) => void;
   preferOriginalWhilePending?: boolean;
+  preserveNaturalFrame?: boolean;
   source?: "thumbnail" | "original";
   stableFrame?: boolean;
   thumbnail?: ThumbnailResponse;
 }) {
   const previewPlaceholderUrl = previewPlaceholderDataUrl(media);
   const stableFrameStyle = stableFrame ? previewStableFrameStyle(media) : undefined;
-  const originalVersionKey = mediaContentSignature(media);
-  const rowThumbnailReady = normalizeMediaThumbnailState(media.thumbnailState) === "ready";
+  const shouldPreserveNaturalFrame =
+    preserveNaturalFrame ?? (source === "original" && stableFrame);
+  const originalVersionKey = mediaFileContentSignature(media);
   const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
   const shouldUseOriginalWhilePending =
     source === "thumbnail" &&
@@ -41,7 +49,8 @@ export function MediaPreview({
     thumbnail?.state !== "skipped_small" &&
     !hasLiveReadyThumbnail;
   const fallbackThumbnail = useThumbnailFallbackUrl(
-    source === "original" && (hasLiveReadyThumbnail || rowThumbnailReady) ? media.id : null,
+    source === "original" && hasLiveReadyThumbnail ? media.id : null,
+    mediaContentSignature(media),
     hasLiveReadyThumbnail ? thumbnail.updatedAt : null
   );
   const fallbackUrl = fallbackThumbnail ?? previewPlaceholderUrl;
@@ -57,13 +66,14 @@ export function MediaPreview({
         onLoadingChange={onLoadingChange}
         onMediaReady={onMediaReady}
         onNaturalSize={onNaturalSize}
+        preserveNaturalFrame={shouldPreserveNaturalFrame}
         source="original"
         versionKey={originalVersionKey}
       />
     );
   }
 
-  if (hasLiveReadyThumbnail || rowThumbnailReady) {
+  if (hasLiveReadyThumbnail) {
     return (
       <ReadyPreviewMedia
         alt={media.name}
@@ -72,6 +82,7 @@ export function MediaPreview({
         media={media}
         onLoadingChange={onLoadingChange}
         onMediaReady={onMediaReady}
+        preserveNaturalFrame={false}
         source="thumbnail"
         versionKey={hasLiveReadyThumbnail ? thumbnail.updatedAt : null}
       />
@@ -118,32 +129,43 @@ export function MediaPreview({
   return <div className="preview-placeholder pending preview-placeholder-empty" style={stableFrameStyle} />;
 }
 
-function normalizeMediaThumbnailState(value: string | null | undefined): ThumbnailResponse["state"] {
-  if (
-    value === "pending" ||
-    value === "queued" ||
-    value === "ready" ||
-    value === "failed" ||
-    value === "skipped_small"
-  ) {
-    return value;
-  }
-  return "pending";
+function schedulePreviewObjectUrlRevoke(objectUrl: string): void {
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), STALE_PREVIEW_OBJECT_URL_REVOKE_DELAY_MS);
 }
 
-function useThumbnailFallbackUrl(fileId: number | null, versionKey: number | null): string | null {
-  const [fallbackThumbnail, setFallbackThumbnail] = useState<string | null>(null);
+function useThumbnailFallbackUrl(
+  fileId: number | null,
+  mediaSignature: string,
+  versionKey: number | null
+): string | null {
+  const cacheKey =
+    fileId === null ? null : thumbnailObjectUrlCacheKey(fileId, mediaSignature, versionKey);
+  const [fallbackThumbnail, setFallbackThumbnail] = useState<string | null>(() =>
+    cacheKey ? readCachedThumbnailObjectUrl(cacheKey) : null
+  );
 
   useEffect(() => {
-    if (fileId === null) {
+    if (fileId === null || cacheKey === null) {
       setFallbackThumbnail(null);
+      return undefined;
+    }
+
+    const cachedObjectUrl = readCachedThumbnailObjectUrl(cacheKey);
+    if (cachedObjectUrl) {
+      setFallbackThumbnail(cachedObjectUrl);
       return undefined;
     }
 
     let revoked = false;
     let objectUrl: string | null = null;
+    const controller = new AbortController();
+    setFallbackThumbnail(null);
 
-    requestThumbnailBlob(fileId, versionKey)
+    requestThumbnailBlob(fileId, versionKey, {
+      requestPriority: "interactive",
+      resourcePriority: "preview",
+      signal: controller.signal
+    })
       .then((blob) => {
         if (revoked) return;
         objectUrl = URL.createObjectURL(blob);
@@ -155,9 +177,10 @@ function useThumbnailFallbackUrl(fileId: number | null, versionKey: number | nul
 
     return () => {
       revoked = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      controller.abort();
+      if (objectUrl) schedulePreviewObjectUrlRevoke(objectUrl);
     };
-  }, [fileId, versionKey]);
+  }, [cacheKey, fileId, versionKey]);
 
   return fallbackThumbnail;
 }
@@ -193,6 +216,7 @@ function ReadyPreviewMedia({
   onLoadingChange,
   onMediaReady,
   onNaturalSize,
+  preserveNaturalFrame,
   source,
   versionKey
 }: {
@@ -204,18 +228,20 @@ function ReadyPreviewMedia({
   onLoadingChange?: (loading: boolean) => void;
   onMediaReady?: () => void;
   onNaturalSize?: (size: { naturalHeight: number; naturalWidth: number }) => void;
+  preserveNaturalFrame: boolean;
   source: "thumbnail" | "original";
   versionKey?: number | string | null;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [containedMediaStyle, setContainedMediaStyle] = useState<CSSProperties | undefined>(undefined);
   const [naturalFrameStyle, setNaturalFrameStyle] = useState<CSSProperties | undefined>(undefined);
   const objectUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
       if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
+        schedulePreviewObjectUrlRevoke(objectUrlRef.current);
         objectUrlRef.current = null;
       }
     };
@@ -224,55 +250,68 @@ function ReadyPreviewMedia({
   useEffect(() => {
     let revoked = false;
     let objectUrl: string | null = null;
-    let naturalSize: { naturalHeight: number; naturalWidth: number } | null = null;
     onLoadingChange?.(true);
     setError(false);
 
-    const controller = source === "original" ? new AbortController() : null;
-    const request = controller
-      ? requestOriginalPreviewBlob(media, { signal: controller.signal })
-      : requestThumbnailBlob(media.id, typeof versionKey === "number" ? versionKey : null);
+    const controller = new AbortController();
+    const request = source === "original"
+      ? requestOriginalPreviewBlob(media, {
+          requestPriority: "interactive",
+          resourcePriority: "preview",
+          signal: controller.signal
+        })
+      : requestThumbnailBlob(media.id, typeof versionKey === "number" ? versionKey : null, {
+          requestPriority: "interactive",
+          resourcePriority: "preview",
+          signal: controller.signal
+        });
     request
       .then((blob) => {
         objectUrl = URL.createObjectURL(blob);
-        if (source === "original" && kind === "video") {
-          return undefined;
-        }
-        return preloadImageObjectUrl(objectUrl).then((size) => {
-          naturalSize = size;
-        });
-      })
-      .then(() => {
-        if (!objectUrl) {
-          return;
-        }
         if (revoked) {
           URL.revokeObjectURL(objectUrl);
           return;
         }
-        if (naturalSize && source === "original") {
-          onNaturalSize?.(naturalSize);
-          setNaturalFrameStyle({
-            height: `${naturalSize.naturalHeight}px`,
-            width: `${naturalSize.naturalWidth}px`
-          });
-        } else if (source !== "original") {
+        const nextObjectUrl = objectUrl;
+        if (source !== "original" || !preserveNaturalFrame) {
           setNaturalFrameStyle(undefined);
+          setContainedMediaStyle(undefined);
         }
         const previousObjectUrl = objectUrlRef.current;
-        objectUrlRef.current = objectUrl;
-        setSrc(objectUrl);
+        objectUrlRef.current = nextObjectUrl;
+        setSrc(nextObjectUrl);
         onLoadingChange?.(false);
         if (previousObjectUrl) {
-          window.setTimeout(() => URL.revokeObjectURL(previousObjectUrl), 1000);
+          schedulePreviewObjectUrlRevoke(previousObjectUrl);
         }
+        if (source === "original" && kind === "video") {
+          return;
+        }
+        void preloadImageObjectUrl(nextObjectUrl)
+          .then((naturalSize) => {
+            if (revoked || objectUrlRef.current !== nextObjectUrl) {
+              return;
+            }
+            if (source === "original" && preserveNaturalFrame) {
+              onNaturalSize?.(naturalSize);
+              setContainedMediaStyle(undefined);
+              setNaturalFrameStyle({
+                height: `${naturalSize.naturalHeight}px`,
+                width: `${naturalSize.naturalWidth}px`
+              });
+            } else if (!preserveNaturalFrame) {
+              setNaturalFrameStyle(undefined);
+              setContainedMediaStyle(containedPreviewMediaStyle(naturalSize));
+            }
+          })
+          .catch(() => undefined);
       })
       .catch(() => {
         if (objectUrl && objectUrlRef.current !== objectUrl) {
-          URL.revokeObjectURL(objectUrl);
+          schedulePreviewObjectUrlRevoke(objectUrl);
           objectUrl = null;
         }
-        if (!revoked && !controller?.signal.aborted) {
+        if (!revoked && !controller.signal.aborted) {
           setError(true);
           onLoadingChange?.(false);
         }
@@ -280,12 +319,12 @@ function ReadyPreviewMedia({
 
     return () => {
       revoked = true;
-      controller?.abort();
+      controller.abort();
       if (objectUrl && objectUrlRef.current !== objectUrl) {
-        URL.revokeObjectURL(objectUrl);
+        schedulePreviewObjectUrlRevoke(objectUrl);
       }
     };
-  }, [kind, media.id, onLoadingChange, onNaturalSize, source, versionKey]);
+  }, [kind, media.id, onLoadingChange, onNaturalSize, preserveNaturalFrame, source, versionKey]);
 
   const effectiveFrameStyle = frameStyle ?? naturalFrameStyle;
 
@@ -323,9 +362,50 @@ function ReadyPreviewMedia({
 
   return (
     <div className="preview-placeholder ready" data-preview-source={source} style={effectiveFrameStyle}>
-      <img alt={alt} className="preview-image" onLoad={onMediaReady} src={src} />
+        <img
+          alt={alt}
+          className="preview-image"
+          decoding="async"
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            const naturalSize = {
+              naturalHeight: image.naturalHeight,
+              naturalWidth: image.naturalWidth
+            };
+            if (source === "original" && preserveNaturalFrame) {
+              onNaturalSize?.(naturalSize);
+              setContainedMediaStyle(undefined);
+              setNaturalFrameStyle({
+                height: `${naturalSize.naturalHeight}px`,
+                width: `${naturalSize.naturalWidth}px`
+              });
+            } else if (!preserveNaturalFrame) {
+              setNaturalFrameStyle(undefined);
+              setContainedMediaStyle(containedPreviewMediaStyle(naturalSize));
+            }
+            onMediaReady?.();
+          }}
+          onError={() => {
+            setError(true);
+            onLoadingChange?.(false);
+          }}
+          src={src}
+          style={containedMediaStyle}
+        />
     </div>
   );
+}
+
+function containedPreviewMediaStyle(size: {
+  naturalHeight: number;
+  naturalWidth: number;
+}): CSSProperties {
+  return {
+    height: "auto",
+    maxHeight: "100cqh",
+    maxWidth: "100cqw",
+    width: "auto"
+  };
 }
 
 function previewStableFrameStyle(media: MediaRecord): CSSProperties | undefined {

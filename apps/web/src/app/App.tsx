@@ -8,9 +8,10 @@ import {
   RefreshCw,
   Trash2
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FolderRecord, MediaRecord, RootRecord } from "@megle/core-client";
 import { AppShell } from "../app-shell/AppShell";
+import { useOverlayScrollbars } from "../app-shell/useOverlayScrollbars";
 import {
   ShellOverlayHost,
   type ShellContextMenuState
@@ -71,6 +72,7 @@ const CENTER_PREVIEW_PREFETCH_RADIUS = 1;
 const LIBRARY_LAYOUT_STORAGE_KEY = "megle.library.layout-mode";
 
 export function App() {
+  useOverlayScrollbars();
   const [activeView, setActiveView] = useState<AppView>("library");
   const interfaceStyle = useInterfaceStyle();
   const library = useLibraryData();
@@ -80,6 +82,7 @@ export function App() {
     useState<CompactPopover>(null);
   const [taskCenterOpen, setTaskCenterOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [sidebarsHidden, setSidebarsHidden] = useState(false);
   const [previewViewState, setPreviewViewState] =
     useState<PreviewViewState>(DEFAULT_PREVIEW_VIEW_STATE);
   const [previewViewCommands, setPreviewViewCommands] =
@@ -90,25 +93,31 @@ export function App() {
   const [gridPreferences, setGridPreferences] = useState<LibraryGridPreferences>(() =>
     readStoredLibraryGridPreferences()
   );
-  const selectedMediaIndex = library.media.findIndex(
+  const orderedPreviewMedia = useMemo(() => {
+    const orderedWindowMedia = orderedMediaSlots(library.mediaSlots);
+    return orderedWindowMedia.length > 0 ? orderedWindowMedia : library.media;
+  }, [library.media, library.mediaSlots]);
+  const selectedMediaIndex = orderedPreviewMedia.findIndex(
     (item) => item.id === library.selectedMediaId
   );
   const canPreviewPrevious = selectedMediaIndex > 0;
   const canPreviewNext =
-    selectedMediaIndex >= 0 && selectedMediaIndex < library.media.length - 1;
+    selectedMediaIndex >= 0 && selectedMediaIndex < orderedPreviewMedia.length - 1;
 
   useEffect(() => {
     if (!previewOpen || selectedMediaIndex < 0) return;
+    const controller = new AbortController();
     for (
       let offset = -CENTER_PREVIEW_PREFETCH_RADIUS;
       offset <= CENTER_PREVIEW_PREFETCH_RADIUS;
       offset += 1
     ) {
       if (offset === 0) continue;
-      const neighbor = library.media[selectedMediaIndex + offset];
-      if (neighbor) prefetchOriginalPreview(neighbor);
+      const neighbor = orderedPreviewMedia[selectedMediaIndex + offset];
+      if (neighbor) prefetchOriginalPreview(neighbor, { signal: controller.signal });
     }
-  }, [library.media, previewOpen, selectedMediaIndex]);
+    return () => controller.abort();
+  }, [orderedPreviewMedia, previewOpen, selectedMediaIndex]);
 
   const handleClosePreview = useCallback(() => {
     setPreviewOpen(false);
@@ -116,10 +125,15 @@ export function App() {
     setPreviewViewState(DEFAULT_PREVIEW_VIEW_STATE);
   }, []);
 
+  const toggleSidebars = useCallback(() => {
+    setSidebarsHidden((current) => !current);
+  }, []);
+
   useShortcuts({
     fileOps,
     library,
     onClosePreview: handleClosePreview,
+    onToggleSidebars: toggleSidebars,
     previewOpen
   });
 
@@ -226,6 +240,17 @@ export function App() {
     toggleCompactPopover("recent");
   }, [toggleCompactPopover]);
 
+  const shellRightActions = (
+    <ShellRightActions
+      recentOpsOpen={recentOpsOpen}
+      scanActive={library.scanActive}
+      taskPaletteOpen={taskDrawerOpen}
+      onCloseTasks={closeTaskPalette}
+      onOpenTasks={openTaskPalette}
+      onToggleRecent={onToggleRecent}
+    />
+  );
+
   const openTaskCenter = useCallback(() => {
     setCompactPopover(null);
     setTaskCenterOpen(true);
@@ -248,19 +273,19 @@ export function App() {
 
   const handlePreviewPrevious = useCallback(() => {
     if (selectedMediaIndex <= 0) return;
-    const previous = library.media[selectedMediaIndex - 1];
+    const previous = orderedPreviewMedia[selectedMediaIndex - 1];
     if (previous) {
       library.setSelectedMediaId(previous.id);
     }
-  }, [library, selectedMediaIndex]);
+  }, [library, orderedPreviewMedia, selectedMediaIndex]);
 
   const handlePreviewNext = useCallback(() => {
-    if (selectedMediaIndex < 0 || selectedMediaIndex >= library.media.length - 1) return;
-    const next = library.media[selectedMediaIndex + 1];
+    if (selectedMediaIndex < 0 || selectedMediaIndex >= orderedPreviewMedia.length - 1) return;
+    const next = orderedPreviewMedia[selectedMediaIndex + 1];
     if (next) {
       library.setSelectedMediaId(next.id);
     }
-  }, [library, selectedMediaIndex]);
+  }, [library, orderedPreviewMedia, selectedMediaIndex]);
 
   const handleMediaContextMenu = useCallback(
     ({
@@ -368,9 +393,12 @@ export function App() {
           mode={previewViewState.mode}
           scale={previewViewState.scale}
           selectedName={library.selectedMedia.name}
+          shellActions={sidebarsHidden ? shellRightActions : undefined}
+          sidebarsHidden={sidebarsHidden}
           onBack={handleClosePreview}
           onGoNext={handlePreviewNext}
           onGoPrevious={handlePreviewPrevious}
+          onToggleSidebars={toggleSidebars}
           onToggleActualSize={() => previewViewCommands?.toggleActualSize()}
         />
       );
@@ -384,6 +412,8 @@ export function App() {
       );
       return (
         <LibraryTitlebarToolbar
+          canNavigateFolderBack={library.canNavigateFolderBack}
+          canNavigateFolderForward={library.canNavigateFolderForward}
           favorite={library.searchState.favorite}
           filterOpen={filterMenuOpen}
           kind={library.searchState.kind}
@@ -393,6 +423,8 @@ export function App() {
           onClearFilters={library.clearFilters}
           onFilterOpenChange={setFilterOpen}
           onLayoutModeChange={setLayoutMode}
+          onNavigateFolderBack={library.navigateFolderBack}
+          onNavigateFolderForward={library.navigateFolderForward}
           onSetKind={library.setKind}
           onSetMinRating={library.setMinRating}
           onSetQ={library.setQ}
@@ -403,18 +435,35 @@ export function App() {
           q={library.searchState.q}
           scanActive={library.scanActive}
           searchActive={library.searchActive}
+          shellActions={sidebarsHidden ? shellRightActions : undefined}
+          sidebarsHidden={sidebarsHidden}
           sort={library.searchState.sort}
           sortOpen={sortMenuOpen}
           tagIds={library.searchState.tagIds}
           tags={library.tags}
           title={selectedFolder?.name ?? selectedRoot?.displayName ?? "Library"}
+          onToggleSidebars={toggleSidebars}
         />
       );
     }
     if (activeView === "plugins") {
-      return <ShellTitlebarPlaceholder label="Plugins" />;
+      return (
+        <ShellTitlebarPlaceholder
+          label="Plugins"
+          shellActions={sidebarsHidden ? shellRightActions : undefined}
+          sidebarsHidden={sidebarsHidden}
+          onToggleSidebars={toggleSidebars}
+        />
+      );
     }
-    return <ShellTitlebarPlaceholder label="Settings" />;
+    return (
+      <ShellTitlebarPlaceholder
+        label="Settings"
+        shellActions={sidebarsHidden ? shellRightActions : undefined}
+        sidebarsHidden={sidebarsHidden}
+        onToggleSidebars={toggleSidebars}
+      />
+    );
   }
 
   function renderSidebar() {
@@ -504,18 +553,16 @@ export function App() {
     <LiquidGlassLayer>
       <AppShell
         layout={activeView === "library" ? "library" : "simple"}
-        titlebarLeft={<ShellPrimaryNav activeView={activeView} onSelectView={setActiveView} />}
-        titlebarCenter={renderCenterTitlebar()}
-        titlebarRight={
-          <ShellRightActions
-            recentOpsOpen={recentOpsOpen}
-            scanActive={library.scanActive}
-            taskPaletteOpen={taskDrawerOpen}
-            onCloseTasks={closeTaskPalette}
-            onOpenTasks={openTaskPalette}
-            onToggleRecent={onToggleRecent}
+        sidebarsHidden={sidebarsHidden}
+        titlebarLeft={
+          <ShellPrimaryNav
+            activeView={activeView}
+            onSelectView={setActiveView}
+            onToggleSidebars={toggleSidebars}
           />
         }
+        titlebarCenter={renderCenterTitlebar()}
+        titlebarRight={sidebarsHidden ? null : shellRightActions}
         sidebar={renderSidebar()}
         centerPane={renderCenterPane()}
         rightPane={renderRightPane()}
@@ -523,6 +570,12 @@ export function App() {
       />
     </LiquidGlassLayer>
   );
+}
+
+function orderedMediaSlots(mediaSlots: Map<number, MediaRecord>): MediaRecord[] {
+  return Array.from(mediaSlots.entries())
+    .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
+    .map(([, item]) => item);
 }
 
 function readStoredLibraryLayoutMode(): LibraryLayoutMode {

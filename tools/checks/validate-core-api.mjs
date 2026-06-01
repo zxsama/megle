@@ -489,6 +489,32 @@ if (!folderChildrenOperation.includes('"400"') || !folderChildrenOperation.inclu
 if (!functionBody("list_tasks").includes("database.list_tasks")) {
   fail("GET /api/tasks must return persisted task rows");
 }
+if (
+  !routesRs.includes("tokio::task::spawn_blocking") ||
+  !routesRs.includes("run_read_database") ||
+  !routesRs.includes("run_shared_database")
+) {
+  fail("Core database route helpers must offload synchronous SQLite work with spawn_blocking");
+}
+for (const name of [
+  "list_roots",
+  "list_folder_children",
+  "list_media",
+  "get_media",
+  "get_thumbnail_blob",
+  "get_preview",
+  "list_tasks",
+  "search_media"
+]) {
+  if (!functionBody(name).includes("run_read_database")) {
+    fail(`${name} route must use the read database spawn_blocking helper`);
+  }
+}
+for (const name of ["get_thumbnail", "enqueue_interactive_folder_scan", "sync_thumbnail_priority_scope"]) {
+  if (!functionBody(name).includes("run_shared_database")) {
+    fail(`${name} route must offload shared database writes from the async handler`);
+  }
+}
 for (const [name, action] of [
   ["cancel_task", "cancel_task"],
   ["retry_task", "retry_task"]
@@ -591,7 +617,7 @@ if (tasksRs.includes("Arc<Mutex<Database>>")) {
 if (!tasksRs.includes("start_worker(worker_database: Database)")) {
   fail("background scan worker must own a separate Database handle");
 }
-if (!routesRs.includes("mark_task_failed_for_attempt(task_id, attempt_generation, &error.to_string())")) {
+if (!/mark_task_failed_for_attempt\(\s*task_id,\s*attempt_generation,\s*&error\.to_string\(\),\s*\)/.test(routesRs)) {
   fail("enqueue failures must mark the created task failed through an attempt guard before returning an API error");
 }
 for (const value of [

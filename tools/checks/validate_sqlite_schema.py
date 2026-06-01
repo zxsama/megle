@@ -19,6 +19,8 @@ MIGRATIONS = [
     ROOT / "crates" / "core" / "migrations" / "0011_plugins_extended.sql",
     ROOT / "crates" / "core" / "migrations" / "0012_preview_pipeline_refactor.sql",
     ROOT / "crates" / "core" / "migrations" / "0013_preview_served_by.sql",
+    ROOT / "crates" / "core" / "migrations" / "0015_root_status_browsing_indexes.sql",
+    ROOT / "crates" / "core" / "migrations" / "0016_folder_status_browsing_indexes.sql",
 ]
 
 TASK_PROGRESS_COLUMNS = {
@@ -54,10 +56,19 @@ REQUIRED_INDEXES = {
     "idx_files_folder_mtime_id",
     "idx_files_folder_name_id_desc",
     "idx_files_folder_mtime_id_asc",
+    "idx_files_folder_status_name_id",
+    "idx_files_folder_status_name_id_desc",
+    "idx_files_folder_status_mtime_id",
+    "idx_files_folder_status_mtime_id_asc",
+    "idx_folders_parent_status_id",
     "idx_files_root_mtime_id",
     "idx_files_root_name_id",
     "idx_files_root_name_id_desc",
     "idx_files_root_mtime_id_asc",
+    "idx_files_root_status_name_id",
+    "idx_files_root_status_name_id_desc",
+    "idx_files_root_status_mtime_id",
+    "idx_files_root_status_mtime_id_asc",
     "idx_files_global_mtime_id",
     "idx_files_global_mtime_id_asc",
     "idx_files_global_name_id",
@@ -293,6 +304,16 @@ def main() -> None:
             ).fetchone()
             if version is None:
                 fail("migration version 13 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 15"
+            ).fetchone()
+            if version is None:
+                fail("migration version 15 was not recorded")
+            version = conn.execute(
+                "SELECT version FROM schema_migrations WHERE version = 16"
+            ).fetchone()
+            if version is None:
+                fail("migration version 16 was not recorded")
 
             media_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(media)").fetchall()

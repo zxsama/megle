@@ -83,6 +83,23 @@ async function waitForUrl(url, timeoutMs = 20_000) {
   throw new Error(`Timed out waiting for ${url}: ${String(lastError)}`);
 }
 
+async function isMegleWebServerReady(url) {
+  try {
+    const response = await fetch(url, {
+      cache: "no-store"
+    });
+    if (!response.ok) return false;
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("text/html")) return true;
+
+    const html = await response.text();
+    return html.includes("<title>Megle</title>") && html.includes("/src/main.tsx");
+  } catch {
+    return false;
+  }
+}
+
 function shutdown() {
   for (const child of children) {
     if (!child.killed) child.kill();
@@ -103,19 +120,23 @@ if (process.env.MEGLE_CORE_EXTERNAL !== "1") {
   run(findCargoCommand(), ["build", "-p", "megle-core"]);
 }
 
-const web = spawnChild("npm", [
-  "--workspace",
-  "@megle/web",
-  "run",
-  "dev",
-  "--",
-  "--host",
-  webHost,
-  "--port",
-  webPort,
-  "--strictPort"
-]);
-await waitForUrl(webUrl);
+if (await isMegleWebServerReady(webUrl)) {
+  console.log(`[megle] Reusing existing Megle web dev server at ${webUrl}`);
+} else {
+  spawnChild("npm", [
+    "--workspace",
+    "@megle/web",
+    "run",
+    "dev",
+    "--",
+    "--host",
+    webHost,
+    "--port",
+    webPort,
+    "--strictPort"
+  ]);
+  await waitForUrl(webUrl);
+}
 
 run("npm", ["--workspace", "@megle/desktop", "run", "build"]);
 

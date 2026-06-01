@@ -52,6 +52,10 @@ const scanRefreshEffectBlock = sourceMatch(
   useLibraryData,
   /useEffect\(\(\)\s*=>\s*\{\s*if\s*\(\s*!scanActiveRootTask[\s\S]*?\},\s*\[refreshCurrentScanView,\s*scanActiveRootTask,\s*(?:taskPollFailures|scanRefreshFailures)\]\);/
 );
+const requestThumbnailStatesBlock = sourceMatch(
+  useLibraryData,
+  /const\s+requestThumbnailStates\s*=\s*useCallback\(\([\s\S]*?\n\s*\]\);/
+);
 const selectedRootHandlerBlock = sourceMatch(
   useLibraryData,
   /setSelectedRootId:\s*\(rootId:\s*number\)\s*=>\s*\{[\s\S]*?\n\s*\},\n\s*setSelectedFolder:/
@@ -59,6 +63,10 @@ const selectedRootHandlerBlock = sourceMatch(
 const selectedFolderHandlerBlock = sourceMatch(
   useLibraryData,
   /setSelectedFolder:\s*\(folder:\s*FolderRecord\)\s*=>\s*\{[\s\S]*?\n\s*\},\n\s*setSelectedMediaId:/
+);
+const selectLibraryFolderBlock = sourceMatch(
+  useLibraryData,
+  /const\s+selectLibraryFolder\s*=\s*useCallback\([\s\S]*?\n\s*\]\s*\);\n\n\s*const\s+navigateFolderHistory/
 );
 const initialLoadEffectBlock = sourceMatch(
   useLibraryData,
@@ -72,6 +80,7 @@ const mediaGrid = read("apps/web/src/features/media-grid/MediaGrid.tsx");
 const mediaGridLayoutGeometry = read("apps/web/src/features/media-grid/layoutGeometry.ts");
 const main = read("apps/web/src/main.tsx");
 const app = read("apps/web/src/app/App.tsx");
+const shellTitlebar = read("apps/web/src/app-shell/ShellTopBar.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
 const librarySidebar = read("apps/web/src/features/library/LibrarySidebar.tsx");
 const subfolderStrip = read("apps/web/src/features/library/SubfolderStrip.tsx");
@@ -88,6 +97,14 @@ const mediaPreview = existsSync(path.join(root, mediaPreviewPath))
 const centralPreviewStagePath = "apps/web/src/features/preview/CentralPreviewStage.tsx";
 const centralPreviewStage = existsSync(path.join(root, centralPreviewStagePath))
   ? read(centralPreviewStagePath)
+  : "";
+const shortcutBindingsPath = "apps/web/src/features/shortcuts/shortcutBindings.ts";
+const shortcutBindings = existsSync(path.join(root, shortcutBindingsPath))
+  ? read(shortcutBindingsPath)
+  : "";
+const useShortcutsPath = "apps/web/src/features/shortcuts/useShortcuts.ts";
+const useShortcuts = existsSync(path.join(root, useShortcutsPath))
+  ? read(useShortcutsPath)
   : "";
 const desktopAdapterPath = "apps/web/src/core/desktop.ts";
 const desktopAdapter = read(desktopAdapterPath);
@@ -142,6 +159,47 @@ if (!/getThumbnailBlob:\s*async\s*\([\s\S]*?fileId:\s*number,[\s\S]*?target:\s*"
 if (!/interface\s+BlobRequestOptions[\s\S]*?signal\?:\s*AbortSignal/.test(coreClient)) {
   fail("core-client blob helpers must expose AbortSignal request options");
 }
+if (!/interface\s+CoreRequestOptions[\s\S]*?signal\?:\s*AbortSignal/.test(coreClient)) {
+  fail("core-client page helpers must expose AbortSignal request options");
+}
+if (
+  !/export\s+type\s+CoreRequestPriority/.test(coreClient) ||
+  !/requestPriority\?:\s*CoreRequestPriority/.test(coreClient) ||
+  !/MAX_CORE_REQUESTS\s*=\s*12/.test(coreClient) ||
+  !/MAX_CORE_INTERACTIVE_REQUESTS/.test(coreClient) ||
+  !/activeCoreInteractiveRequests/.test(coreClient) ||
+  !/scheduleCoreRequest/.test(coreClient) ||
+  !/coreRequestPriorityRank/.test(coreClient)
+) {
+  fail("core-client must globally schedule Core fetches with reserved navigation/interactive slots");
+}
+if (
+  !/const\s+response\s*=\s*await\s+scheduleCoreRequest\([\s\S]*?fetch\(resolveUrl/.test(coreClient) ||
+  !/async\s+function\s+fetchBlob[\s\S]*?scheduleCoreRequest\([\s\S]*?fetch\(resolveUrl/.test(coreClient)
+) {
+  fail("core-client JSON and blob helpers must both route through the global request scheduler");
+}
+if (
+  !/listFolderChildren:\s*\(\s*folderId:\s*number,\s*params:\s*ListFolderChildrenParams\s*=\s*\{\},\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>[\s\S]*?request<Page<FolderRecord>>\([\s\S]*?\{[\s\S]*?signal:\s*options\.signal[\s\S]*?\}\s*\)/.test(
+    coreClient
+  )
+) {
+  fail("core-client listFolderChildren must forward AbortSignal to fetch");
+}
+if (
+  !/listMedia:\s*\(\s*params:\s*ListMediaParams\s*=\s*\{\},\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>[\s\S]*?request<Page<MediaRecord>>\([\s\S]*?\{[\s\S]*?signal:\s*options\.signal[\s\S]*?\}\s*\)/.test(
+    coreClient
+  )
+) {
+  fail("core-client listMedia must forward AbortSignal to fetch");
+}
+if (
+  !/searchMedia:\s*\(\s*params:\s*SearchParams\s*=\s*\{\},\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>[\s\S]*?request<Page<MediaRecord>>\([\s\S]*?\{[\s\S]*?signal:\s*options\.signal[\s\S]*?\}\s*\)/.test(
+    coreClient
+  )
+) {
+  fail("core-client searchMedia must forward AbortSignal to fetch");
+}
 if (!/interface\s+BlobRequestOptions[\s\S]*?version\?:\s*number\s*\|\s*string\s*\|\s*null/.test(coreClient)) {
   fail("core-client thumbnail blob helper must expose a version cache-buster option");
 }
@@ -153,6 +211,52 @@ if (!/getPreviewBlob[\s\S]*?query\(\{\s*v:\s*options\.version/.test(coreClient))
 }
 if (/thumbnail\$\{query\(\{\s*profile/.test(coreClient) || /thumbnail\/blob\$\{query\(\{\s*profile/.test(coreClient)) {
   fail("core-client thumbnail helpers must not serialize the retired profile query");
+}
+if (
+  !/scheduleForegroundResourceRequest\(\s*resourcePriority,\s*\(signal\)\s*=>\s*fetchThumbnailBlob\(fileId,\s*versionKey,\s*signal,\s*coreRequestPriority\),\s*controller\s*\)/.test(
+    mediaResources
+  )
+) {
+  fail("requestThumbnailBlob must forward shared AbortController and promoted priority to the thumbnail blob fetch");
+}
+if (
+  !/scheduleForegroundResourceRequest\(\s*resourcePriority,\s*\(signal\)\s*=>\s*fetchOriginalPreviewBlob\(mediaRecord,\s*mediaSignature,\s*signal,\s*coreRequestPriority\),\s*controller\s*\)/.test(
+    mediaResources
+  )
+) {
+  fail("requestOriginalPreviewBlob must forward shared AbortController and promoted priority to the preview blob fetch");
+}
+if (
+  !/scheduleForegroundResourceRequest\(\s*schedulerPriority,\s*\(signal\)\s*=>\s*fetchThumbnailState\(mediaRecord,\s*priority,\s*signal\),\s*controller\s*\)/.test(
+    mediaResources
+  )
+) {
+  fail("requestThumbnailState must forward shared AbortController to the thumbnail state fetch");
+}
+if (
+  !/MAX_FOREGROUND_RESOURCE_REQUESTS/.test(mediaResources) ||
+  !/MAX_FOREGROUND_RESOURCE_REQUESTS\s*=\s*12/.test(mediaResources) ||
+  !/MAX_INTERACTIVE_FOREGROUND_RESOURCE_REQUESTS/.test(mediaResources) ||
+  !/MAX_AHEAD_FOREGROUND_RESOURCE_REQUESTS/.test(mediaResources) ||
+  !/activeAheadForegroundResourceRequests/.test(mediaResources) ||
+  !/activeInteractiveForegroundResourceRequests/.test(mediaResources) ||
+  !/scheduleForegroundResourceRequest/.test(mediaResources) ||
+  !/thumbnailRequestPriorityRank/.test(mediaResources)
+) {
+  fail("mediaResources must reserve selected/preview slots and cap ahead prefetch so visible resources are not starved");
+}
+if (
+  !/resourcePriority\?:\s*ForegroundResourcePriority/.test(mediaResources) ||
+  !/requestPriority\?:\s*CoreRequestPriority/.test(mediaResources) ||
+  !/foregroundResourceCoreRequestPriority/.test(mediaResources) ||
+  !/getThumbnailBlob\(fileId,\s*GRID_THUMBNAIL_TARGET,[\s\S]*?requestPriority:\s*coreRequestPriority/.test(
+    mediaResources
+  ) ||
+  !/getPreviewBlob\(mediaRecord\.id,[\s\S]*?requestPriority:\s*coreRequestPriority/.test(
+    mediaResources
+  )
+) {
+  fail("mediaResources must map visible/selected resource priority into core-client request priority");
 }
 for (const value of ["previewPlaceholder", "previewPlaceholderFormat", "servedBy", "db_blob"]) {
   if (!coreClientContract.includes(value)) {
@@ -201,6 +305,24 @@ if (!mediaGrid.includes("@tanstack/react-virtual") || !mediaGrid.includes("useVi
 if (/Loading library/.test(mediaGrid)) {
   fail("MediaGrid tiles must keep stable dimensions without loading text layout shifts");
 }
+if (!/function\s+isLikelyImageMedia\(/.test(mediaGrid) || /item\.kind\s*===\s*"image"/.test(mediaGrid)) {
+  fail("MediaGrid original fallback must use image extensions as well as classified image kind");
+}
+if (/OriginalFallbackThumbnail[\s\S]*?useEffect\(\(\)\s*=>[\s\S]*?\},\s*\[[^\]]*\bitem\b[^\]]*\]\);/.test(mediaGrid)) {
+  fail("OriginalFallbackThumbnail must not restart original-preview fallback requests on MediaRecord object identity churn");
+}
+if (/function\s+OriginalFallbackThumbnail[\s\S]*?return\s+preloadImageObjectUrl\(objectUrl\);/.test(mediaGrid)) {
+  fail("OriginalFallbackThumbnail must mount the original-preview image as soon as the blob URL is available");
+}
+if (!/function\s+OriginalFallbackThumbnail[\s\S]*?if\s*\(\s*error\s*&&\s*!src\s*\)[\s\S]*?tile-thumb-failed/.test(mediaGrid)) {
+  fail("OriginalFallbackThumbnail failed original-preview fallback must resolve to a failed tile, not stay in loading");
+}
+if (/function\s+ReadyThumbnail[\s\S]*?return\s+preloadImageObjectUrl\(objectUrl\);/.test(mediaGrid)) {
+  fail("ReadyThumbnail must mount the generated thumbnail image as soon as the blob URL is available");
+}
+if (/\bfreshThumbnailStatesByMediaId\b/.test(requestThumbnailStatesBlock.match(/\[[\s\S]*?\]\);$/)?.[0] ?? "")) {
+  fail("requestThumbnailStates must stay stable while thumbnail state updates stream in");
+}
 if (!/\.virtual-grid\s*\{[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-y:\s*auto;/.test(read("apps/web/src/styles.css"))) {
   fail("MediaGrid must disable horizontal scrolling while preserving vertical scrolling");
 }
@@ -235,8 +357,102 @@ if (/autoloadRemainingMediaPages/.test(useLibraryData) || /AUTOLOAD_MEDIA_PAGE_L
 if (!/mediaTotalCount/.test(useLibraryData) || !/loadedMediaRanges/.test(useLibraryData)) {
   fail("Library data loading must track total media count and loaded media index ranges for million-item folders");
 }
-if (/const\s+windowedGrid\s*=/.test(mediaGrid) || /layoutMode\s*===\s*"grid"\s*&&[\s\S]*mediaSlots/.test(mediaGrid)) {
-  fail("MediaGrid viewport-windowed browsing must not be limited to grid layout mode");
+if (
+  !/mediaPageControllersRef\s*=\s*useRef<Map<string,\s*AbortController>>/.test(useLibraryData) ||
+  !/abortStaleMediaPageRequests/.test(useLibraryData) ||
+  !/abortAllControllers\(mediaPageControllersRef\.current\)/.test(useLibraryData)
+) {
+  fail("useLibraryData must abort stale media page requests so the current viewport can preempt old windows");
+}
+if (
+  !/thumbnailStateControllersRef\s*=\s*useRef<Map<ThumbnailRequestPriority,\s*AbortController>>/.test(
+    useLibraryData
+  ) ||
+  !/abortThumbnailStateControllersForPriority/.test(useLibraryData) ||
+  !/requestThumbnailState\(mediaRecord,\s*priority,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData must abort stale thumbnail state requests so old visible/ahead scopes cannot starve the current viewport");
+}
+if (
+  !/client\.(?:searchMedia|listMedia)\([\s\S]*?\{\s*signal:\s*scope\.signal\s*\}/.test(
+    useLibraryData
+  ) ||
+  !/if\s*\(\s*isAbortError\(cause\)\s*\)\s*\{\s*return;?\s*\}/.test(useLibraryData)
+) {
+  fail("useLibraryData media page loading must pass AbortSignal and ignore aborts without showing errors");
+}
+if (
+  !/folderChildControllersRef\s*=\s*useRef<Map<string,\s*AbortController>>/.test(
+    useLibraryData
+  ) ||
+  !/folderDescendantControllersRef\s*=\s*useRef<Map<number,\s*AbortController>>/.test(
+    useLibraryData
+  ) ||
+  !/abortStaleFolderRequests/.test(useLibraryData)
+) {
+  fail("useLibraryData must abort stale folder child/descendant requests during high-priority navigation");
+}
+if (
+  !/folderChildrenByParentRef\s*=\s*useRef\(folderChildrenByParent\)/.test(useLibraryData) ||
+  !/folderChildInitialRequestsRef\s*=\s*useRef<Map<number,\s*Promise<FolderRecord\[\]>>>/.test(
+    useLibraryData
+  ) ||
+  !/const\s+cachedChildren\s*=\s*folderChildrenByParentRef\.current\[folderId\]/.test(
+    useLibraryData
+  ) ||
+  !/const\s+existingRequest\s*=\s*folderChildInitialRequestsRef\.current\.get\(folderId\)/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData must dedupe initial folder child probes so subfolder browsing cannot exhaust browser fetch resources");
+}
+if (
+  !/loadTasksRequestRef\s*=\s*useRef<Promise<TaskRecord\[\]>\s*\|\s*null>/.test(
+    useLibraryData
+  ) ||
+  !/if\s*\(\s*loadTasksRequestRef\.current\s*\)\s*\{\s*return\s+loadTasksRequestRef\.current;/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData task polling must dedupe overlapping /tasks requests during active scans");
+}
+if (
+  !/INTERACTIVE_FOLDER_SCAN_DEBOUNCE_MS/.test(useLibraryData) ||
+  !/interactiveFolderScanControllerRef\s*=\s*useRef<AbortController\s*\|\s*null>/.test(
+    useLibraryData
+  ) ||
+  !/enqueueInteractiveFolderScan\(\s*selectedFolderId,\s*\{\s*signal:\s*controller\.signal\s*\}/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData interactive folder scans must be debounced and abort stale requests");
+}
+if (
+  !/thumbnailPriorityScopeSyncControllerRef\s*=\s*useRef<AbortController\s*\|\s*null>/.test(
+    useLibraryData
+  ) ||
+  !/syncThumbnailPriorityScope\(input,\s*\{[\s\S]*?requestPriority:\s*"interactive"[\s\S]*?signal:\s*controller\.signal[\s\S]*?\}\)/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData thumbnail priority sync must abort obsolete scope requests and use interactive priority");
+}
+if (
+  !/if\s*\(\s*priority\s*===\s*"selected"\s*\|\|\s*priority\s*===\s*"visible"\s*\)\s*\{[\s\S]*?flushThumbnailPriorityScopeSync\(\)/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData must flush selected/visible thumbnail scope changes immediately");
+}
+if (
+  !/const\s+windowedLayoutMode\s*=\s*layoutMode\s*===\s*"grid"\s*\|\|\s*layoutMode\s*===\s*"list"/.test(
+    mediaGrid
+  ) ||
+  !/mediaSlots\s*!==\s*undefined\s*&&\s*windowedLayoutMode/.test(mediaGrid)
+) {
+  fail("MediaGrid fixed-row viewport windowing must stay limited to grid/list layout modes");
 }
 if (/Load more media/.test(mediaGrid) || /type:\s*"load-more"/.test(mediaGrid)) {
   fail("MediaGrid must expose the full media count through virtual rows instead of a Load more row");
@@ -264,11 +480,31 @@ if (
 if (/function\s+ReadyThumbnail[\s\S]*?setSrc\(null\);/.test(mediaGrid)) {
   fail("ReadyThumbnail must keep the previous thumbnail visible while a refreshed blob loads");
 }
+if (
+  !/lastRestoredScrollKeyRef/.test(mediaGrid) ||
+  !/savedScrollTop\s*===\s*0/.test(mediaGrid) ||
+  !/scrollKeyChanged/.test(mediaGrid)
+) {
+  fail("MediaGrid scroll restoration must not force the same folder back to top while a deep scroll is in progress");
+}
 if (!/FOLDER_COVER_MEDIA_LIMIT\s*=\s*1/.test(read("apps/web/src/features/library/useFolderCovers.ts"))) {
   fail("Folder covers must request only the first preview image for the vertical cover card");
 }
+if (!/sort:\s*"name_asc"/.test(read("apps/web/src/features/library/useFolderCovers.ts"))) {
+  fail("Folder covers must use the first media item by Name A-Z, not the newest media item");
+}
+if (
+  !/listMedia\(\{[\s\S]*?sort:\s*"name_asc"[\s\S]*?\},\s*\{[\s\S]*?requestPriority:\s*"resource"/.test(
+    read("apps/web/src/features/library/useFolderCovers.ts")
+  )
+) {
+  fail("Folder cover metadata requests must not use navigation priority");
+}
 if (!/onVisibleFolderIndexesChange/.test(mediaGrid) || !/folderCoverPriorityIndexes/.test(libraryView)) {
   fail("Folder cover loading must follow the virtualized visible/ahead folder window instead of the full folder list");
+}
+if (/visibleSubfolderEntries\.slice\(0,\s*48\)/.test(libraryView)) {
+  fail("Folder cover loading must not fall back to the first 48 folders before MediaGrid reports the visible folder window");
 }
 if (/Promise\.all/.test(read("apps/web/src/features/library/useFolderCovers.ts"))) {
   fail("Folder covers must disclose each cover as it resolves; waiting for a full batch blocks visible cover refresh");
@@ -276,11 +512,53 @@ if (/Promise\.all/.test(read("apps/web/src/features/library/useFolderCovers.ts")
 if (!/inFlightFolderIds/.test(read("apps/web/src/features/library/useFolderCovers.ts"))) {
   fail("Folder cover loading must track in-flight folder requests to avoid duplicate visible-window fetches");
 }
+if (
+  !/FOLDER_COVER_CONCURRENT_FETCH_LIMIT/.test(read("apps/web/src/features/library/useFolderCovers.ts")) ||
+  !/AbortController/.test(read("apps/web/src/features/library/useFolderCovers.ts")) ||
+  !/client\.listMedia\([\s\S]*?\{[\s\S]*?signal:\s*controller\.signal[\s\S]*?\}/.test(
+    read("apps/web/src/features/library/useFolderCovers.ts")
+  )
+) {
+  fail("Folder cover probes must be bounded and abortable so they cannot starve visible media windows");
+}
+if (
+  !/export function useFolderCovers\(\s*folders:\s*FolderRecord\[\],\s*options:\s*\{\s*disabled\?:\s*boolean\s*\}\s*=\s*\{\}\s*\)/.test(
+    read("apps/web/src/features/library/useFolderCovers.ts")
+  ) ||
+  !/if\s*\(\s*disabled\s*\)\s*\{[\s\S]*?abortAllControllers\(inFlightControllersByFolderId\.current\)/.test(
+    read("apps/web/src/features/library/useFolderCovers.ts")
+  ) ||
+  !/useFolderCovers\(folderCoverPriorityFolders,\s*\{\s*disabled:\s*library\.loading\s*\}\)/.test(
+    libraryView
+  )
+) {
+  fail("Folder cover loading must pause only during full-folder loading; load-more must not starve visible folder covers");
+}
+if (/disabled:\s*library\.loading\s*\|\|\s*library\.loadingMoreMedia/.test(libraryView)) {
+  fail("Folder cover loading must continue while media load-more is running");
+}
 if (/previewPlaceholderDataUrl/.test(subfolderStrip)) {
   fail("Folder covers must not depend on low-resolution placeholder data; they need decoded thumbnail/original preview blobs");
 }
 if (!/requestThumbnailBlob/.test(subfolderStrip) || !/requestOriginalPreviewBlob/.test(subfolderStrip)) {
   fail("Folder cover cards must load a real image blob, falling back from thumbnail to original preview when needed");
+}
+if (/requestThumbnailBlob\(\s*coverMediaItem\.id,\s*null/.test(subfolderStrip)) {
+  fail("Subfolder covers must not request thumbnail blobs before live ready thumbnail metadata is available");
+}
+if (
+  !/FolderCoverPreview[\s\S]*?requestThumbnailBlob\([\s\S]*?resourcePriority:\s*"visible"[\s\S]*?requestOriginalPreviewBlob\([\s\S]*?resourcePriority:\s*"visible"/.test(
+    subfolderStrip
+  )
+) {
+  fail("Folder cover image requests must use visible priority because visible folder covers are part of the current viewport");
+}
+if (
+  !/visibleFolderIndexes/.test(mediaGrid) ||
+  !/prioritizedRenderedFolderIndexes/.test(mediaGrid) ||
+  !/folderSection\.onVisibleFolderIndexesChange\(prioritizedRenderedFolderIndexes\)/.test(mediaGrid)
+) {
+  fail("MediaGrid must send actually visible folder indexes before overscan indexes for cover loading priority");
 }
 if (
   !/thumbnailObjectUrlCache/.test(mediaResources) ||
@@ -295,11 +573,17 @@ if (/function\s+ReadyPreviewMedia[\s\S]*?setSrc\(null\);/.test(mediaPreview)) {
 if (!/useLayoutEffect/.test(centralPreviewStage) || !/fitLongEdgeScaleForMedia/.test(centralPreviewStage)) {
   fail("Central preview must compute fit scale from media dimensions before the first preview paint to avoid size flicker");
 }
-if (!/preloadImageObjectUrl/.test(mediaGrid) || !/preloadImageObjectUrl[\s\S]*?then\(\(\)\s*=>\s*\{[\s\S]*?setSrc\(objectUrl\)/.test(mediaGrid)) {
+if (!/preloadImageObjectUrl/.test(mediaGrid) || !/preloadImageObjectUrl[\s\S]*?then\(\(\)\s*=>\s*\{[\s\S]*?setSrc\((?:objectUrl|nextObjectUrl)\)/.test(mediaGrid)) {
   fail("ReadyThumbnail must decode refreshed image blobs before swapping the visible thumbnail src");
 }
-if (!/preloadImageObjectUrl/.test(mediaPreview) || !/preloadImageObjectUrl[\s\S]*?then\(\(\)\s*=>\s*\{[\s\S]*?setSrc\(objectUrl\)/.test(mediaPreview)) {
-  fail("ReadyPreviewMedia must decode refreshed image blobs before swapping the visible preview src");
+if (
+  !/requestOriginalPreviewBlob/.test(mediaGrid) ||
+  !/allowOriginalFallback/.test(mediaGrid)
+) {
+  fail("MediaGrid visible thumbnails must use original-preview fallback while grid_320 is still pending");
+}
+if (!/preloadImageObjectUrl/.test(mediaPreview) || !/setSrc\(nextObjectUrl\)[\s\S]*?preloadImageObjectUrl\(nextObjectUrl\)/.test(mediaPreview)) {
+  fail("ReadyPreviewMedia must show the object URL immediately and decode asynchronously for sizing");
 }
 if (/tile-thumb-loading[\s\S]*?<span>(?:loading|pending|queued)<\/span>/.test(mediaGrid)) {
   fail("Pending thumbnails must not flash loading/pending/queued text while refreshing");
@@ -327,10 +611,48 @@ if (!mediaGrid.includes('role="row"')) {
   fail("MediaGrid role=grid must expose row roles around grid cells");
 }
 if (
+  /const\s+virtualSegments\s*=\s*useMemo/.test(mediaGrid) ||
+  /rowIndex\s*<\s*mediaWindow\.rowCount[\s\S]*?segments\.push/.test(mediaGrid)
+) {
+  fail("MediaGrid must resolve virtual media rows by index instead of materializing every row in huge folders");
+}
+if (
+  !/interface\s+VirtualSectionLayout/.test(mediaGrid) ||
+  !/resolveVirtualSegment/.test(mediaGrid) ||
+  !/mediaRowStartIndex/.test(mediaGrid)
+) {
+  fail("MediaGrid must keep lightweight virtual section metadata for million-file folders");
+}
+if (
   !/onRequestThumbnailStates\(visible(?:Priority)?MediaIds,\s*"visible"\)/.test(mediaGrid) ||
   !/onRequestThumbnailStates\(ahead(?:Priority)?MediaIds,\s*"ahead"\)/.test(mediaGrid)
 ) {
   fail("MediaGrid must request visible and ahead thumbnail scopes separately");
+}
+if (
+  !/thumbnailStateRequestKeyByPriorityRef/.test(useLibraryData) ||
+  !/Promise\.allSettled\(pendingRequests\)/.test(requestThumbnailStatesBlock) ||
+  !/activeController[\s\S]*thumbnailStateRequestKeyByPriorityRef\.current\.get\(priority\)\s*===\s*requestKey/.test(
+    requestThumbnailStatesBlock
+  )
+) {
+  fail("useLibraryData must not abort and restart identical in-flight thumbnail priority requests on every repoll");
+}
+if (
+  !/VISIBLE_THUMBNAIL_REPOLL_MS\s*=\s*150/.test(mediaGrid) ||
+  !/AHEAD_THUMBNAIL_REPOLL_MS\s*=\s*1000/.test(mediaGrid) ||
+  !/hasVisiblePending\s*\?\s*VISIBLE_THUMBNAIL_REPOLL_MS\s*:\s*AHEAD_THUMBNAIL_REPOLL_MS/.test(mediaGrid)
+) {
+  fail("MediaGrid must repoll visible thumbnails faster than ahead thumbnails without promoting ahead noise");
+}
+if (
+  /visiblePriorityMediaIds,\s*\n\s*visiblePriorityMediaKey/.test(mediaGrid) ||
+  /aheadPriorityMediaIds,\s*\n\s*aheadPriorityMediaKey/.test(mediaGrid)
+) {
+  fail("MediaGrid thumbnail request effects must depend on stable scope keys rather than array identity");
+}
+if (/visibleMediaIds\.slice\(\s*0\s*,/.test(mediaGrid) || /visibleOverflowMediaIds/.test(mediaGrid)) {
+  fail("MediaGrid must send every currently visible media id at visible priority instead of demoting visible overflow to ahead");
 }
 if (
   !/const\s+AHEAD_THUMBNAIL_(?:ROW|VIEWPORT)_COUNT\s*=/.test(mediaGrid) &&
@@ -355,6 +677,19 @@ for (const value of ["listRoots", "listFolderChildren", "listMedia", "addRoot", 
 }
 if (!/setSelectedFolder:\s*\(folder:\s*FolderRecord\)\s*=>\s*void/.test(useLibraryData)) {
   fail("useLibraryData must select folders by FolderRecord so rootId and folderId stay in sync");
+}
+if (
+  !/selectedFolderInfo:\s*FolderRecord\s*\|\s*null/.test(useLibraryData) ||
+  !/setSelectedFolderInfo:\s*\(folder:\s*FolderRecord\s*\|\s*null\)\s*=>\s*void/.test(useLibraryData)
+) {
+  fail("useLibraryData must keep inspector folder selection separate from the active browsing folder");
+}
+if (
+  !/setSelectedFolderInfo:\s*\(folder:\s*FolderRecord\s*\|\s*null\)\s*=>\s*\{[\s\S]*?setSelectedFolderInfoState\(folder\)[\s\S]*?selectMedia\(null\)/.test(
+    useLibraryData
+  )
+) {
+  fail("selecting a folder tile must update the inspector folder and clear selected media without navigating");
 }
 if (!/enqueueInteractiveFolderScan/.test(useLibraryData)) {
   fail("useLibraryData must call enqueueInteractiveFolderScan for the active folder");
@@ -381,8 +716,41 @@ if (
 if (!/requestThumbnailStates\(\[selectedMedia\.id\],\s*"selected"\)/.test(useLibraryData)) {
   fail("useLibraryData must request selected media thumbnails through the selected priority path");
 }
+if (!/onRequestThumbnailStates\(\[item\.id\],\s*"selected"\)/.test(mediaGrid)) {
+  fail("MediaGrid must promote clicked media to selected thumbnail priority immediately");
+}
 if (
-  !/useEffect\(\(\)\s*=>\s*\{[\s\S]*?selectedFolderId[\s\S]*?enqueueInteractiveFolderScan\(\s*selectedFolderId\s*\)/.test(
+  !/onSelectFolder=\{library\.setSelectedFolderInfo\}/.test(libraryView) ||
+  !/onOpenFolder=\{library\.setSelectedFolder\}/.test(libraryView) ||
+  !/selected=\{folder\.id === library\.selectedFolderInfo\?\.id\}/.test(libraryView)
+) {
+  fail("LibraryView subfolder tiles must single-click select for inspector and double-click open for navigation");
+}
+if (
+  !/selectedFolder=\{library\.selectedFolderInfo\}/.test(libraryView) ||
+  !/selectedFolderCoverMedia=/.test(libraryView) ||
+  !/selectedFolder:\s*FolderRecord\s*\|\s*null/.test(previewPanel)
+) {
+  fail("right inspector PreviewPanel must render selected folder information when a folder tile is selected");
+}
+if (
+  !/const\s+loadedMediaById\s*=\s*useMemo\(\(\)\s*=>\s*\{[\s\S]*?media\.forEach[\s\S]*?mediaSlots\.forEach[\s\S]*?return\s+next[\s\S]*?\},\s*\[media,\s*mediaSlots\]\)/.test(
+    useLibraryData
+  ) ||
+  !/selectedMediaSnapshotRef/.test(useLibraryData) ||
+  !/const\s+mediaById\s*=\s*useMemo\(\(\)\s*=>\s*\{[\s\S]*?new\s+Map\(loadedMediaById\)[\s\S]*?selectedMediaSnapshotRef\.current[\s\S]*?next\.set\(selectedSnapshot\.id,\s*selectedSnapshot\)[\s\S]*?return\s+next[\s\S]*?\},\s*\[loadedMediaById\]\)/.test(
+    useLibraryData
+  ) ||
+  !/liveSelectedMedia/.test(useLibraryData) ||
+  !/selectedMediaSnapshotRef\.current\?\.id\s*===\s*selectedMediaId/.test(useLibraryData) ||
+  !/const\s+selectedMedia\s*=\s*selectedMediaId\s*===\s*null[\s\S]*?\?\s*null[\s\S]*?:\s*liveSelectedMedia\s*\?\?[\s\S]*?selectedMediaSnapshotRef\.current/.test(
+    useLibraryData
+  )
+) {
+  fail("useLibraryData mediaById and selectedMedia must include virtual mediaSlots plus a selected snapshot so preview does not close during transient media window refreshes");
+}
+if (
+  !/useEffect\(\(\)\s*=>\s*\{[\s\S]*?selectedFolderId[\s\S]*?enqueueInteractiveFolderScan\(\s*selectedFolderId,\s*\{\s*signal:\s*controller\.signal\s*\}/.test(
     useLibraryData
   )
 ) {
@@ -473,6 +841,9 @@ if (!scanRefreshEffectBlock) {
 if (!selectedRootHandlerBlock || !selectedFolderHandlerBlock) {
   fail("useLibraryData must keep root and folder navigation handlers inspectable");
 }
+if (!selectLibraryFolderBlock) {
+  fail("useLibraryData must keep shared folder navigation selection logic inspectable");
+}
 if (
   !/const\s+\[scanRefreshFailures,\s*setScanRefreshFailures\]\s*=\s*useState\(0\)/.test(useLibraryData) ||
   !/scanRefreshFailures\s*>=\s*3/.test(scanRefreshEffectBlock) ||
@@ -501,10 +872,10 @@ if (
 }
 if (
   !/reloadCurrentMedia\(\{[\s\S]*?\}\)\s*\.catch\(\(cause\)\s*=>\s*\{[\s\S]*?setError\(errorMessage\(cause\)\)/.test(
-    selectedRootHandlerBlock
+    selectLibraryFolderBlock || selectedRootHandlerBlock
   ) ||
   !/reloadCurrentMedia\(\{[\s\S]*?\}\)\s*\.catch\(\(cause\)\s*=>\s*\{[\s\S]*?setError\(errorMessage\(cause\)\)/.test(
-    selectedFolderHandlerBlock
+    selectLibraryFolderBlock || selectedFolderHandlerBlock
   )
 ) {
   fail("useLibraryData navigation-triggered media reloads must catch rethrown failures");
@@ -515,8 +886,9 @@ if (
   ) ||
   !/setLoadingMoreMedia\(false\)/.test(useLibraryData) ||
   !/flushThumbnailPriorityScopeSync\(\)/.test(useLibraryData) ||
-  !/prepareNavigationMediaReload\(\)/.test(selectedRootHandlerBlock) ||
-  !/prepareNavigationMediaReload\(\)/.test(selectedFolderHandlerBlock)
+  !/prepareNavigationMediaReload\(\)/.test(selectLibraryFolderBlock) ||
+  !/selectLibraryFolder\(\{\s*rootId,\s*folderId:\s*rootFolderId\s*\}\)/.test(selectedRootHandlerBlock) ||
+  !/selectLibraryFolder\(\{\s*rootId:\s*folder\.rootId,\s*folderId:\s*folder\.id\s*\}\)/.test(selectedFolderHandlerBlock)
 ) {
   fail("useLibraryData navigation changes must clear load-more state, flush thumbnail scope sync, and reset scan refresh failures");
 }
@@ -542,8 +914,7 @@ if (
   !/const\s+selectionToken\s*=\s*createScanRefreshSelectionToken\(\)/.test(refreshCurrentScanViewBlock) ||
   !/if\s*\(\s*!selectionToken\s*\|\|\s*!isCurrentScanRefreshSelection\(selectionToken\)\s*\)\s*\{\s*return;?\s*\}/.test(refreshCurrentScanViewBlock) ||
   !/reloadCurrentMedia\(\{[\s\S]*?scanRefreshSelectionToken:\s*selectionToken/.test(refreshCurrentScanViewBlock) ||
-  !/scanRefreshSelectionVersionRef\.current\s*\+=\s*1[\s\S]*?selectRoot\(rootId\)/.test(useLibraryData) ||
-  !/scanRefreshSelectionVersionRef\.current\s*\+=\s*1[\s\S]*?selectRoot\(folder\.rootId\)/.test(useLibraryData)
+  !/prepareNavigationMediaReload\(\)[\s\S]*?selectRoot\(entry\.rootId\)/.test(selectLibraryFolderBlock)
 ) {
   fail("useLibraryData scan refresh must use a selection/version token to discard stale media after root or folder navigation");
 }
@@ -574,6 +945,38 @@ if (
   !/entry\.mediaSignature\s*!==\s*mediaContentSignature\(mediaRecord\)/.test(mediaResources)
 ) {
   fail("mediaResources cached thumbnails must be tied to a media content signature");
+}
+const mediaFileContentSignatureBlock = sourceMatch(
+  mediaResources,
+  /export\s+function\s+mediaFileContentSignature\s*\([\s\S]*?\n\}/
+);
+if (
+  !mediaFileContentSignatureBlock ||
+  !/mediaRecord\.id/.test(mediaFileContentSignatureBlock) ||
+  !/mediaRecord\.mtime/.test(mediaFileContentSignatureBlock) ||
+  !/mediaRecord\.size/.test(mediaFileContentSignatureBlock) ||
+  /thumbnailState/.test(mediaFileContentSignatureBlock)
+) {
+  fail("mediaResources original preview signatures must use stable file identity and exclude thumbnail state");
+}
+if (
+  !/const\s+mediaSignature\s*=\s*mediaFileContentSignature\(mediaRecord\);/.test(
+    mediaResources
+  ) ||
+  !/function\s+originalPreviewRequestKey\(mediaRecord:\s*MediaRecord\):\s*string\s*\{\s*return\s+\[mediaFileContentSignature\(mediaRecord\),\s*"original"\]\.join\(":\"\);\s*\}/.test(
+    mediaResources
+  )
+) {
+  fail("mediaResources original preview requests must be keyed by stable file signatures, not thumbnail state signatures");
+}
+if (
+  !/const\s+cacheKey\s*=\s*`original:\$\{mediaFileContentSignature\(item\)\}`/.test(
+    mediaGrid
+  ) ||
+  !/const\s+originalVersionKey\s*=\s*mediaFileContentSignature\(media\);/.test(mediaPreview) ||
+  !/`folder-cover:\$\{mediaFileContentSignature\(coverMediaItem\)\}`/.test(subfolderStrip)
+) {
+  fail("UI original-preview object URL keys must use stable file signatures so thumbnail state polling does not restart image loads");
 }
 if (
   !/thumbnailStateSignaturesByMediaIdRef/.test(useLibraryData) ||
@@ -651,6 +1054,9 @@ if (
 ) {
   fail("useLibraryData must expose visible-range thumbnail state requests");
 }
+if (/currentThumbnail\?\.state === "queued"\s*\|\|\s*shouldRequestThumbnailState\(mediaRecord\)/.test(useLibraryData)) {
+  fail("useLibraryData must not repeatedly request thumbnail state for already-ready foreground thumbnails");
+}
 if (!/thumbnailStatesByMediaId:\s*Record<number,\s*ThumbnailResponse>/.test(useLibraryData)) {
   fail("useLibraryData must expose thumbnail state by media id without leaking cache paths");
 }
@@ -689,6 +1095,9 @@ for (const state of ["pending", "queued", "ready", "failed", "skipped_small"]) {
 if (!/thumbnailStatesByMediaId\[item\.id\]/.test(mediaGrid)) {
   fail("MediaGrid tiles must receive thumbnail state from the resource map by media id");
 }
+if (/allowOriginalFallback=\{\s*item\.id === selectedMediaId \|\| visiblePriorityMediaIdSet\.has\(item\.id\)\s*\}/.test(mediaGrid)) {
+  fail("Mounted MediaGrid tiles must be allowed to use original fallback; scheduler limits keep overscan from starving visible work");
+}
 if (!/previewPlaceholder/.test(mediaGrid) || !/previewPlaceholderUrl/.test(mediaGrid)) {
   fail("MediaGrid must render MediaRecord.previewPlaceholder before grid_320 bytes are ready");
 }
@@ -700,6 +1109,9 @@ if (!/requestThumbnailBlob\(fileId/.test(mediaGrid) || /createCoreClient/.test(m
 }
 if (/thumbnailUpdatedAt=\{thumbnail\?\.updatedAt\s*\?\?\s*null\}/.test(mediaGrid) || !/hasLiveReadyThumbnail/.test(mediaGrid)) {
   fail("MediaGrid must not request thumbnail blobs from media-row ready state without a live updatedAt");
+}
+if (/canLoadCurrentThumbnailBlob\s*=[^;]*rowState\s*===\s*"ready"/.test(mediaGrid)) {
+  fail("MediaGrid must only request thumbnail blobs after live ready thumbnail metadata is available");
 }
 if (!/hasLiveThumbnailMetadata/.test(mediaGrid) || !/rowState\s*===\s*"ready"/.test(mediaGrid)) {
   fail("MediaGrid must keep requesting state for pending, queued, or ready rows without live thumbnail metadata");
@@ -728,20 +1140,65 @@ if (!/requestOriginalPreviewBlob/.test(mediaPreview) || /getPreviewBlob/.test(me
 if (!/mediaContentSignature\(media\)/.test(mediaPreview) || !/source="original"[\s\S]*?versionKey=\{originalVersionKey\}/.test(mediaPreview)) {
   fail("MediaPreview original preview must pass a media signature version key");
 }
-if (!/version:\s*mediaContentSignature\(mediaRecord\)/.test(mediaResources)) {
+if (!/fetchOriginalPreviewBlob/.test(mediaResources) || !/version:\s*mediaSignature/.test(mediaResources)) {
   fail("mediaResources original preview cache must load Core preview blobs with media signatures");
 }
-if (/getPreviewBlob\(mediaRecord\.id,\s*\{[\s\S]{0,120}signal:/.test(mediaResources)) {
-  fail("mediaResources original preview cache must not let one consumer AbortSignal cancel the shared in-flight fetch");
+if (
+  /return\s+fetchOriginalPreviewBlob\(mediaRecord,\s*mediaSignature,\s*options\.signal\)/.test(
+    mediaResources
+  ) ||
+  !/const\s+request\s*=\s*scheduleForegroundResourceRequest\(\s*resourcePriority,\s*\(signal\)\s*=>\s*fetchOriginalPreviewBlob\(mediaRecord,\s*mediaSignature,\s*signal,\s*coreRequestPriority\),\s*controller\s*\)\.finally/.test(
+    mediaResources
+  ) ||
+  !/return\s+withSharedAbortSignal\(entry,\s*options\.signal\);/.test(mediaResources)
+) {
+  fail("mediaResources original preview requests must coalesce abortable consumers through shared in-flight fetches");
 }
-if (!/withAbortSignal\(\s*request,\s*options\.signal\s*\)/.test(mediaResources)) {
-  fail("mediaResources original preview cache must apply AbortSignal only to the individual consumer promise");
+if (
+  /return\s+fetchThumbnailBlob\(fileId,\s*versionKey,\s*options\.signal\)/.test(
+    mediaResources
+  ) ||
+  !/const\s+request\s*=\s*scheduleForegroundResourceRequest\(\s*resourcePriority,\s*\(signal\)\s*=>\s*fetchThumbnailBlob\(fileId,\s*versionKey,\s*signal,\s*coreRequestPriority\),\s*controller\s*\)\.finally/.test(
+    mediaResources
+  ) ||
+  !/return\s+withSharedAbortSignal\(entry,\s*options\.signal\);/.test(mediaResources)
+) {
+  fail("mediaResources thumbnail blob requests must coalesce abortable consumers through shared in-flight fetches");
+}
+if (
+  /return\s+fetchThumbnailState\(mediaRecord,\s*priority,\s*options\.signal\)/.test(
+    mediaResources
+  ) ||
+  !/const\s+schedulerPriority\s*=\s*thumbnailStateSchedulerPriority\(priority\);[\s\S]*?const\s+request\s*=\s*scheduleForegroundResourceRequest\(\s*schedulerPriority,\s*\(signal\)\s*=>\s*fetchThumbnailState\(mediaRecord,\s*priority,\s*signal\),\s*controller\s*\)\.finally/.test(
+    mediaResources
+  ) ||
+  !/return\s+withSharedAbortSignal\(entry,\s*options\.signal\);/.test(
+    mediaResources
+  )
+) {
+  fail("mediaResources thumbnail state requests must coalesce abortable consumers through shared in-flight fetches");
+}
+if (!/thumbnailStateSchedulerPriority/.test(mediaResources)) {
+  fail("Visible thumbnail state requests must have scheduler priority over original fallback blobs");
+}
+if (!/withSharedAbortSignal\(\s*inFlight,\s*options\.signal\s*\)/.test(mediaResources)) {
+  fail("mediaResources original preview cache must apply AbortSignal through shared in-flight consumers");
 }
 if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"ready"\s*\?\s*thumbnail\.fileId/.test(mediaPreview)) {
   fail("MediaPreview must not request thumbnail blobs without live ready metadata and updatedAt");
 }
-if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{\s*signal:\s*controller\.signal/.test(mediaPreview)) {
+if (
+  /rowThumbnailReady/.test(mediaPreview) &&
+  (/source\s*===\s*"original"\s*&&\s*\(hasLiveReadyThumbnail\s*\|\|\s*rowThumbnailReady\)/.test(mediaPreview) ||
+    /if\s*\(\s*hasLiveReadyThumbnail\s*\|\|\s*rowThumbnailReady\s*\)/.test(mediaPreview))
+) {
+  fail("MediaPreview must not request thumbnail blobs from media-row ready state without live metadata");
+}
+if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{[\s\S]*?signal:\s*controller\.signal/.test(mediaPreview)) {
   fail("MediaPreview original-media requests must use an abortable shared cache request when central preview switches");
+}
+if (/return\s+preloadImageObjectUrl\(objectUrl\)\.then/.test(mediaPreview)) {
+  fail("MediaPreview must insert the preview object URL before image decode so large clicked images do not leave the preview blank");
 }
 if (/\},\s*\[media,\s*source,\s*versionKey\]\);/.test(mediaPreview)) {
   fail("MediaPreview original-media effect must not reset shared-preview loading for unchanged media object identity churn");
@@ -751,6 +1208,13 @@ if (/useThumbnailFallbackUrl\(\s*thumbnail\?\.state\s*===\s*"ready"/.test(mediaP
 }
 if (!/previewPlaceholderUrl/.test(mediaPreview) || !/fallbackThumbnail/.test(mediaPreview)) {
   fail("MediaPreview must show previewPlaceholder and thumbnail fallback while media bytes load");
+}
+if (
+  !/readCachedThumbnailObjectUrl/.test(mediaPreview) ||
+  !/thumbnailObjectUrlCacheKey/.test(mediaPreview) ||
+  !/useThumbnailFallbackUrl\([\s\S]*?mediaContentSignature\(media\)/.test(mediaPreview)
+) {
+  fail("MediaPreview must synchronously reuse cached grid thumbnail object URLs before fetching a preview fallback blob");
 }
 if (!/previewPlaceholderDataUrl\(media\)/.test(mediaPreview) || /usePreviewPlaceholderUrl/.test(mediaPreview)) {
   fail("MediaPreview previewPlaceholder must be available on first render without an effect");
@@ -763,6 +1227,21 @@ if (
   !/preferOriginalWhilePending\s*=\s*false/.test(mediaPreview)
 ) {
   fail("MediaPreview must expose an opt-in preferOriginalWhilePending flag for inspector fallback only");
+}
+if (
+  !/preserveNaturalFrame\??:\s*boolean/.test(mediaPreview) ||
+  !/const\s+shouldPreserveNaturalFrame\s*=/.test(mediaPreview) ||
+  !/source\s*===\s*"original"\s*&&\s*preserveNaturalFrame/.test(mediaPreview) ||
+  !/setNaturalFrameStyle\(\{[\s\S]*?naturalSize\.naturalHeight/.test(mediaPreview)
+) {
+  fail("MediaPreview must gate original natural-frame sizing separately from inspector thumbnail fallback rendering");
+}
+if (
+  !/containedPreviewMediaStyle/.test(mediaPreview) ||
+  !/setContainedMediaStyle\(containedPreviewMediaStyle\(naturalSize\)\)/.test(mediaPreview) ||
+  !/style=\{containedMediaStyle\}/.test(mediaPreview)
+) {
+  fail("MediaPreview must apply explicit contained dimensions to fixed-frame inspector images");
 }
 if (
   !/source\s*===\s*"thumbnail"[\s\S]*preferOriginalWhilePending[\s\S]*media\.kind\s*===\s*"image"[\s\S]*thumbnail\?\.state\s*!==\s*"failed"[\s\S]*thumbnail\?\.state\s*!==\s*"skipped_small"/.test(
@@ -813,11 +1292,24 @@ if (!/MediaPreview[\s\S]{0,180}source="thumbnail"[\s\S]{0,180}thumbnail=\{thumbn
 if (!/MediaPreview[\s\S]{0,220}source="thumbnail"[\s\S]{0,220}preferOriginalWhilePending/.test(previewPanel)) {
   fail("PreviewPanel must opt into the inspector-only original fallback while thumbnail state is pending");
 }
+if (!/MediaPreview[\s\S]{0,320}source="thumbnail"[\s\S]{0,320}preserveNaturalFrame=\{false\}[\s\S]{0,320}preferOriginalWhilePending/.test(previewPanel)) {
+  fail("PreviewPanel inspector thumbnail fallback must not let original natural dimensions resize the fixed right preview square");
+}
 if (
   !/prefetchOriginalPreview/.test(app) ||
-  !/previewOpen[\s\S]*selectedMediaIndex[\s\S]*CENTER_PREVIEW_PREFETCH_RADIUS[\s\S]*library\.media\[selectedMediaIndex \+ offset\][\s\S]*prefetchOriginalPreview/.test(app)
+  !/previewOpen[\s\S]*selectedMediaIndex[\s\S]*CENTER_PREVIEW_PREFETCH_RADIUS[\s\S]*orderedPreviewMedia\[selectedMediaIndex \+ offset\][\s\S]*prefetchOriginalPreview/.test(app)
 ) {
   fail("App must prefetch previous and next original previews when center preview is open");
+}
+if (
+  !/const\s+controller\s*=\s*new\s+AbortController\(\)/.test(app) ||
+  !/prefetchOriginalPreview\(neighbor,\s*\{\s*signal:\s*controller\.signal\s*\}\)/.test(app) ||
+  !/return\s+\(\)\s*=>\s+controller\.abort\(\)/.test(app)
+) {
+  fail("App original-preview neighbor prefetch must abort stale preview-adjacent requests");
+}
+if (!/orderedPreviewMedia/.test(app) || /library\.media\[selectedMediaIndex [+-] offset\]/.test(app)) {
+  fail("App preview navigation must use the current sorted/windowed mediaSlots order instead of append-loaded library.media order");
 }
 if (
   !/CENTER_PREVIEW_PREFETCH_RADIUS\s*=\s*1/.test(app) ||
@@ -825,6 +1317,22 @@ if (
   !/selectedMediaIndex\s*\+\s*offset/.test(app)
 ) {
   fail("App must keep center original preview prefetch explicitly bounded to previous/next neighbors");
+}
+if (!shortcutBindings.includes("toggleSidebars") || !shortcutBindings.includes('defaultBinding: "Tab"')) {
+  fail("shortcut bindings must expose editable Tab binding for toggling both sidebars");
+}
+if (!useShortcuts.includes("onToggleSidebars") || !useShortcuts.includes('"toggleSidebars"')) {
+  fail("global shortcut handler must invoke onToggleSidebars from the editable shortcut binding");
+}
+if (
+  /library\.media\.findIndex/.test(useShortcuts) ||
+  !/orderedMediaSlots\(library\.mediaSlots\)/.test(useShortcuts) ||
+  !/Array\.from\(mediaSlots\.entries\(\)\)[\s\S]*?sort\(\(\[leftIndex\],\s*\[rightIndex\]\)\s*=>\s*leftIndex\s*-\s*rightIndex\)/.test(useShortcuts)
+) {
+  fail("useShortcuts preview navigation must use the current virtual mediaSlots order before falling back to library.media");
+}
+if (!app.includes("sidebarsHidden") || !app.includes("onToggleSidebars") || !shellTitlebar.includes("ShellSidebarToggle")) {
+  fail("App must wire hidden sidebar state through shell titlebar controls");
 }
 if (!librarySidebar.includes("loadMoreFolderChildren") || !librarySidebar.includes("Load more")) {
   fail("LibrarySidebar must expose a load-more affordance for paginated folder children");

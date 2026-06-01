@@ -1,16 +1,25 @@
 const LIBRARY_GRID_PREFERENCES_STORAGE_KEY = "megle.library.grid-preferences";
 
 export interface LibraryGridPreferences {
+  folderEdgeShadowAlpha: number;
+  folderTileGap: number;
+  folderTileLabelHeight: number;
   tileGap: number;
   tileLabelHeight: number;
 }
 
 export const DEFAULT_LIBRARY_GRID_PREFERENCES: LibraryGridPreferences = {
+  folderEdgeShadowAlpha: 25,
+  folderTileGap: 7,
+  folderTileLabelHeight: 17,
   tileGap: 7,
   tileLabelHeight: 17
 };
 
 export const LIBRARY_GRID_PREFERENCE_LIMITS = {
+  folderEdgeShadowAlpha: { min: 0, max: 75, step: 1 },
+  folderTileGap: { min: 4, max: 20, step: 1 },
+  folderTileLabelHeight: { min: 14, max: 40, step: 1 },
   tileGap: { min: 4, max: 20, step: 1 },
   tileLabelHeight: { min: 14, max: 40, step: 1 }
 } as const;
@@ -42,19 +51,39 @@ export function storeLibraryGridPreferences(value: LibraryGridPreferences) {
 export function normalizeLibraryGridPreferences(
   value: Partial<LibraryGridPreferences>
 ): LibraryGridPreferences {
+  const tileGap = clampPreference(
+    value.tileGap,
+    LIBRARY_GRID_PREFERENCE_LIMITS.tileGap.min,
+    LIBRARY_GRID_PREFERENCE_LIMITS.tileGap.max,
+    DEFAULT_LIBRARY_GRID_PREFERENCES.tileGap
+  );
+  const tileLabelHeight = clampPreference(
+    value.tileLabelHeight,
+    LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.min,
+    LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.max,
+    DEFAULT_LIBRARY_GRID_PREFERENCES.tileLabelHeight
+  );
   return {
-    tileGap: clampPreference(
-      value.tileGap,
-      LIBRARY_GRID_PREFERENCE_LIMITS.tileGap.min,
-      LIBRARY_GRID_PREFERENCE_LIMITS.tileGap.max,
-      DEFAULT_LIBRARY_GRID_PREFERENCES.tileGap
+    folderEdgeShadowAlpha: clampPreference(
+      value.folderEdgeShadowAlpha,
+      LIBRARY_GRID_PREFERENCE_LIMITS.folderEdgeShadowAlpha.min,
+      LIBRARY_GRID_PREFERENCE_LIMITS.folderEdgeShadowAlpha.max,
+      DEFAULT_LIBRARY_GRID_PREFERENCES.folderEdgeShadowAlpha
     ),
-    tileLabelHeight: clampPreference(
-      value.tileLabelHeight,
-      LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.min,
-      LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.max,
-      DEFAULT_LIBRARY_GRID_PREFERENCES.tileLabelHeight
-    )
+    folderTileGap: clampPreference(
+      value.folderTileGap,
+      LIBRARY_GRID_PREFERENCE_LIMITS.folderTileGap.min,
+      LIBRARY_GRID_PREFERENCE_LIMITS.folderTileGap.max,
+      tileGap
+    ),
+    folderTileLabelHeight: clampPreference(
+      value.folderTileLabelHeight,
+      LIBRARY_GRID_PREFERENCE_LIMITS.folderTileLabelHeight.min,
+      LIBRARY_GRID_PREFERENCE_LIMITS.folderTileLabelHeight.max,
+      tileLabelHeight
+    ),
+    tileGap,
+    tileLabelHeight
   };
 }
 

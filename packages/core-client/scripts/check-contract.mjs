@@ -382,24 +382,36 @@ for (const line of [
   }
 }
 
-if (!/listTasks:\s*\(\)\s*=>\s*request<Page<TaskRecord>>\("\/tasks"\)/.test(client)) {
-  fail("client.ts listTasks must request typed task pages");
+if (
+  !/listTasks:\s*\(\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>\s*request<Page<TaskRecord>>\("\/tasks",\s*\{[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"navigation",[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
+    client
+  )
+) {
+  fail("client.ts listTasks must request typed task pages and forward abort signals");
 }
 
-if (!/cancelTask:\s*\(taskId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/tasks\/\$\{taskId\}\/cancel`,\s*{\s*method:\s*"POST"\s*}\)/.test(client)) {
+if (!/cancelTask:\s*\(taskId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/tasks\/\$\{taskId\}\/cancel`,\s*\{[\s\S]*?method:\s*"POST",[\s\S]*?requestPriority:\s*"interactive"[\s\S]*?\}\)/.test(client)) {
   fail("client.ts cancelTask must call POST /tasks/{taskId}/cancel");
 }
 
-if (!/retryTask:\s*\(taskId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/tasks\/\$\{taskId\}\/retry`,\s*{\s*method:\s*"POST"\s*}\)/.test(client)) {
+if (!/retryTask:\s*\(taskId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/tasks\/\$\{taskId\}\/retry`,\s*\{[\s\S]*?method:\s*"POST",[\s\S]*?requestPriority:\s*"interactive"[\s\S]*?\}\)/.test(client)) {
   fail("client.ts retryTask must call POST /tasks/{taskId}/retry");
 }
 
-if (!/listFolderChildren:\s*\(folderId:\s*number,\s*params:\s*ListFolderChildrenParams\s*=\s*{}\)\s*=>\s*request<Page<FolderRecord>>\(`\/folders\/\$\{folderId\}\/children\$\{query\(params\)\}`\)/.test(client)) {
-  fail("client.ts listFolderChildren must accept typed limit/cursor params and serialize them");
+if (
+  !/listFolderChildren:\s*\(\s*folderId:\s*number,\s*params:\s*ListFolderChildrenParams\s*=\s*\{\},\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>[\s\S]*?request<Page<FolderRecord>>\(`\/folders\/\$\{folderId\}\/children\$\{query\(params\)\}`,\s*\{[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"navigation",[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
+    client
+  )
+) {
+  fail("client.ts listFolderChildren must accept typed limit/cursor params, serialize them, and forward abort signals");
 }
 
-if (!/listMedia:\s*\(params:\s*ListMediaParams\s*=\s*{}\)\s*=>\s*request<Page<MediaRecord>>\(`\/media\$\{query\(params\)\}`\)/.test(client)) {
-  fail("client.ts listMedia must serialize typed query params");
+if (
+  !/listMedia:\s*\(\s*params:\s*ListMediaParams\s*=\s*\{\},\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>[\s\S]*?request<Page<MediaRecord>>\(`\/media\$\{query\(params\)\}`,\s*\{[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"navigation",[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
+    client
+  )
+) {
+  fail("client.ts listMedia must serialize typed query params and forward abort signals");
 }
 
 if (!/export type ThumbnailPriority = "background" \| "ahead" \| "visible" \| "selected";/.test(generated)) {
@@ -420,14 +432,14 @@ for (const line of [
   );
 }
 if (
-  !/getThumbnail:\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*priority:\s*ThumbnailPriority\s*=\s*"background"\s*\)\s*=>\s*request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*target,\s*priority\s*}\)\}`\)/.test(
+  !/getThumbnail:\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*priority:\s*ThumbnailPriority\s*=\s*"background",\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>[\s\S]*?request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*target,\s*priority\s*}\)\}`,\s*\{[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*thumbnailPriorityCoreRequestPriority\(priority\),[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
     client
   )
 ) {
-  fail("client.ts getThumbnail must send typed thumbnail priority through the query string");
+  fail("client.ts getThumbnail must send typed thumbnail priority through the query string and forward abort signals");
 }
 
-if (!/getThumbnailBlob:\s*async\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*options:\s*BlobRequestOptions\s*=\s*{}\s*\)\s*=>\s*\{[\s\S]*fetchBlob\(\s*`\/media\/\$\{fileId\}\/thumbnail\/blob\$\{query\(\{\s*target,\s*v:\s*options\.version\s*}\)\}`,\s*options\s*\)/.test(client)) {
+if (!/getThumbnailBlob:\s*async\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*options:\s*BlobRequestOptions\s*=\s*{}\s*\)\s*=>\s*\{[\s\S]*fetchBlob\(\s*`\/media\/\$\{fileId\}\/thumbnail\/blob\$\{query\(\{\s*target,\s*v:\s*options\.version\s*}\)\}`,\s*\{[\s\S]*?\.\.\.options,[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"resource"[\s\S]*?\}\s*\)/.test(client)) {
   fail("client.ts getThumbnailBlob must request thumbnail blob with default grid_320 target");
 }
 
@@ -439,11 +451,11 @@ if (!/getThumbnailBlob[\s\S]*?query\(\{\s*target,\s*v:\s*options\.version/.test(
   fail("client.ts getThumbnailBlob must serialize version cache-buster as v");
 }
 
-if (!/getPreviewBlob:\s*\(fileId:\s*number,\s*options:\s*BlobRequestOptions\s*=\s*{}\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview\$\{query\(\{\s*v:\s*options\.version\s*}\)\}`,\s*options\)/.test(client)) {
+if (!/getPreviewBlob:\s*\(fileId:\s*number,\s*options:\s*BlobRequestOptions\s*=\s*{}\)\s*=>\s*fetchBlob\(`\/media\/\$\{fileId\}\/preview\$\{query\(\{\s*v:\s*options\.version\s*}\)\}`,\s*\{[\s\S]*?\.\.\.options,[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"interactive"[\s\S]*?\}\)/.test(client)) {
   fail("client.ts getPreviewBlob must request original media bytes from /media/{fileId}/preview");
 }
 
-if (!/removeRoot:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/roots\/\$\{rootId\}`,\s*{\s*method:\s*"DELETE"\s*}\)/.test(client)) {
+if (!/removeRoot:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\(`\/roots\/\$\{rootId\}`,\s*\{[\s\S]*?method:\s*"DELETE",[\s\S]*?requestPriority:\s*"interactive"[\s\S]*?\}\)/.test(client)) {
   fail("client.ts removeRoot must call DELETE /roots/{rootId}");
 }
 
@@ -451,7 +463,7 @@ if (!/ScanTaskRequest/.test(client)) {
   fail("client.ts enqueueScan must use the typed ScanTaskRequest body");
 }
 
-if (!/enqueueScan:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/scan",\s*{\s*method:\s*"POST",\s*body:\s*JSON\.stringify\([\s\S]*rootId[\s\S]*\)\s*}\)/.test(client)) {
+if (!/enqueueScan:\s*\(rootId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/scan",\s*\{[\s\S]*?method:\s*"POST",[\s\S]*?requestPriority:\s*"interactive",[\s\S]*?body:\s*JSON\.stringify\([\s\S]*rootId[\s\S]*\)\s*\}\)/.test(client)) {
   fail("client.ts enqueueScan must call POST /tasks/scan with typed rootId body");
 }
 
@@ -459,8 +471,12 @@ if (!/InteractiveFolderScanTaskRequest/.test(client)) {
   fail("client.ts enqueueInteractiveFolderScan must use the typed InteractiveFolderScanTaskRequest body");
 }
 
-if (!/enqueueInteractiveFolderScan:\s*\(folderId:\s*number\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/interactive-folder-scan",\s*{\s*method:\s*"POST",\s*body:\s*JSON\.stringify\([\s\S]*folderId[\s\S]*InteractiveFolderScanTaskRequest[\s\S]*\)\s*}\)/.test(client)) {
-  fail("client.ts enqueueInteractiveFolderScan must call POST /tasks/interactive-folder-scan with typed folderId body");
+if (
+  !/enqueueInteractiveFolderScan:\s*\(\s*folderId:\s*number,\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/interactive-folder-scan",\s*\{[\s\S]*?method:\s*"POST",[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"background",[\s\S]*?body:\s*JSON\.stringify\([\s\S]*folderId[\s\S]*InteractiveFolderScanTaskRequest[\s\S]*\),[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
+    client
+  )
+) {
+  fail("client.ts enqueueInteractiveFolderScan must call POST /tasks/interactive-folder-scan with typed folderId body and forward abort signals");
 }
 
 if (!/ThumbnailPriorityScopeSyncRequest/.test(client)) {
@@ -468,12 +484,12 @@ if (!/ThumbnailPriorityScopeSyncRequest/.test(client)) {
 }
 
 if (
-  !/syncThumbnailPriorityScope:\s*\(\s*input:\s*ThumbnailPriorityScopeSyncRequest\s*\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/thumbnail-priority-scope",\s*\{\s*method:\s*"POST",\s*body:\s*JSON\.stringify\(input\)\s*\}\)/.test(
+  !/syncThumbnailPriorityScope:\s*\(\s*input:\s*ThumbnailPriorityScopeSyncRequest,\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>\s*request<AcceptedRootResponse>\("\/tasks\/thumbnail-priority-scope",\s*\{[\s\S]*?method:\s*"POST",[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"interactive",[\s\S]*?body:\s*JSON\.stringify\(input\),[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
     client
   )
 ) {
   fail(
-    "client.ts syncThumbnailPriorityScope must call POST /tasks/thumbnail-priority-scope with the typed scope payload"
+    "client.ts syncThumbnailPriorityScope must call POST /tasks/thumbnail-priority-scope with the typed scope payload at interactive priority and forward abort signals"
   );
 }
 

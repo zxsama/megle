@@ -1,4 +1,4 @@
-import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
+import type { CoreRequestPriority, MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { createCoreClient } from "./client";
 
 export type ThumbnailStateByMediaId = Record<number, ThumbnailResponse>;
@@ -14,7 +14,25 @@ type CachedOriginalPreviewEntry = {
 type CachedThumbnailObjectUrlEntry = {
   objectUrl: string;
 };
+type SharedRequest<T> = {
+  request: Promise<T>;
+  controller: AbortController;
+  activeConsumers: number;
+  hasUnabortableConsumer: boolean;
+};
 type OriginalPreviewRequestOptions = {
+  requestPriority?: CoreRequestPriority;
+  resourcePriority?: ForegroundResourcePriority;
+  signal?: AbortSignal;
+};
+
+type ThumbnailStateRequestOptions = {
+  signal?: AbortSignal;
+};
+
+type ThumbnailBlobRequestOptions = {
+  requestPriority?: CoreRequestPriority;
+  resourcePriority?: ForegroundResourcePriority;
   signal?: AbortSignal;
 };
 
@@ -22,17 +40,40 @@ export const GRID_THUMBNAIL_TARGET = "grid_320";
 
 const thumbnailClient = createCoreClient();
 export const thumbnailResourceCache = new Map<number, CachedThumbnailEntry>();
-export const inFlightThumbnailRequests = new Map<string, Promise<ThumbnailResponse>>();
-export const inFlightThumbnailBlobRequests = new Map<string, Promise<Blob>>();
+export const inFlightThumbnailRequests = new Map<string, SharedRequest<ThumbnailResponse>>();
+export const inFlightThumbnailBlobRequests = new Map<string, SharedRequest<Blob>>();
 export const thumbnailObjectUrlCache = new Map<string, CachedThumbnailObjectUrlEntry>();
 export const originalPreviewBlobCache = new Map<number, CachedOriginalPreviewEntry>();
-export const inFlightOriginalPreviewRequests = new Map<string, Promise<Blob>>();
+export const inFlightOriginalPreviewRequests = new Map<string, SharedRequest<Blob>>();
 const THUMBNAIL_OBJECT_URL_CACHE_LIMIT = 512;
 const ORIGINAL_PREVIEW_CACHE_LIMIT = 5;
+const MAX_FOREGROUND_RESOURCE_REQUESTS = 12;
+const MAX_INTERACTIVE_FOREGROUND_RESOURCE_REQUESTS = 2;
+const MAX_AHEAD_FOREGROUND_RESOURCE_REQUESTS = 2;
+const MAX_FALLBACK_FOREGROUND_RESOURCE_REQUESTS = 6;
+
+type ForegroundResourcePriority = ThumbnailRequestPriority | "preview" | "fallback";
+type QueuedForegroundResourceRequest = {
+  sequence: number;
+  priority: ForegroundResourcePriority;
+  signal: AbortSignal;
+  run: (signal: AbortSignal) => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
+  abort: () => void;
+};
+
+let foregroundResourceRequestSequence = 0;
+let activeForegroundResourceRequests = 0;
+let activeInteractiveForegroundResourceRequests = 0;
+let activeAheadForegroundResourceRequests = 0;
+let activeFallbackForegroundResourceRequests = 0;
+const foregroundResourceRequestQueue: QueuedForegroundResourceRequest[] = [];
 
 export async function requestThumbnailState(
   mediaRecord: MediaRecord,
-  priority: ThumbnailRequestPriority = "background"
+  priority: ThumbnailRequestPriority = "background",
+  options: ThumbnailStateRequestOptions = {}
 ): Promise<ThumbnailResponse> {
   const mediaId = mediaRecord.id;
   const requestKey = thumbnailRequestKey(mediaRecord, priority);
@@ -48,52 +89,77 @@ export async function requestThumbnailState(
   }
 
   const inFlight = inFlightThumbnailRequests.get(requestKey);
-  if (inFlight) {
-    return inFlight;
+  if (inFlight && !inFlight.controller.signal.aborted) {
+    return withSharedAbortSignal(inFlight, options.signal);
   }
 
-  const request = thumbnailClient
-    .getThumbnail(mediaId, GRID_THUMBNAIL_TARGET, priority)
-    .then((thumbnail) => {
-      if (isLiveThumbnailResponseForMediaRecord(mediaRecord, thumbnail)) {
-        const mediaSignature = mediaContentSignature(mediaRecord);
-        const cachedEntry = thumbnailResourceCache.get(mediaId);
-        thumbnailResourceCache.set(mediaId, {
-          mediaSignature,
-          thumbnail:
-            cachedEntry?.mediaSignature === mediaSignature
-              ? pickPreferredThumbnailResponse(cachedEntry.thumbnail, thumbnail)
-              : thumbnail
-        });
-      } else {
-        thumbnailResourceCache.delete(mediaId);
-      }
-      return thumbnail;
-    })
-    .finally(() => {
+  if (options.signal?.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  const controller = new AbortController();
+  const schedulerPriority = thumbnailStateSchedulerPriority(priority);
+  const request = scheduleForegroundResourceRequest(
+    schedulerPriority,
+    (signal) => fetchThumbnailState(mediaRecord, priority, signal),
+    controller
+  ).finally(() => {
+    if (inFlightThumbnailRequests.get(requestKey)?.request === request) {
       inFlightThumbnailRequests.delete(requestKey);
-    });
-  inFlightThumbnailRequests.set(requestKey, request);
-  return request;
+    }
+  });
+  const entry: SharedRequest<ThumbnailResponse> = {
+    request,
+    controller,
+    activeConsumers: 0,
+    hasUnabortableConsumer: false
+  };
+  inFlightThumbnailRequests.set(requestKey, entry);
+  return withSharedAbortSignal(entry, options.signal);
 }
 
 export async function requestThumbnailBlob(
   fileId: number,
-  versionKey: number | null = null
+  versionKey: number | null = null,
+  options: ThumbnailBlobRequestOptions = {}
 ): Promise<Blob> {
-  const requestKey = `${fileId}:${GRID_THUMBNAIL_TARGET}:${versionKey ?? "current"}`;
-  const inFlight = inFlightThumbnailBlobRequests.get(requestKey);
-  if (inFlight) {
-    return inFlight;
+  if (options.signal?.aborted) {
+    return Promise.reject(createAbortError());
   }
 
-  const request = thumbnailClient
-    .getThumbnailBlob(fileId, GRID_THUMBNAIL_TARGET, { version: versionKey })
-    .finally(() => {
+  const resourcePriority = options.resourcePriority ?? "visible";
+  const coreRequestPriority =
+    options.requestPriority ?? foregroundResourceCoreRequestPriority(resourcePriority);
+  const requestKey = [
+    fileId,
+    GRID_THUMBNAIL_TARGET,
+    versionKey ?? "current",
+    resourcePriority,
+    coreRequestPriority
+  ].join(":");
+  const inFlight = inFlightThumbnailBlobRequests.get(requestKey);
+  if (inFlight && !inFlight.controller.signal.aborted) {
+    return withSharedAbortSignal(inFlight, options.signal);
+  }
+
+  const controller = new AbortController();
+  const request = scheduleForegroundResourceRequest(
+    resourcePriority,
+    (signal) => fetchThumbnailBlob(fileId, versionKey, signal, coreRequestPriority),
+    controller
+  ).finally(() => {
+    if (inFlightThumbnailBlobRequests.get(requestKey)?.request === request) {
       inFlightThumbnailBlobRequests.delete(requestKey);
-    });
-  inFlightThumbnailBlobRequests.set(requestKey, request);
-  return request;
+    }
+  });
+  const entry: SharedRequest<Blob> = {
+    request,
+    controller,
+    activeConsumers: 0,
+    hasUnabortableConsumer: false
+  };
+  inFlightThumbnailBlobRequests.set(requestKey, entry);
+  return withSharedAbortSignal(entry, options.signal);
 }
 
 export function readCachedThumbnailObjectUrl(cacheKey: string): string | null {
@@ -164,7 +230,7 @@ export function requestOriginalPreviewBlob(
   mediaRecord: MediaRecord,
   options: OriginalPreviewRequestOptions = {}
 ): Promise<Blob> {
-  const mediaSignature = mediaContentSignature(mediaRecord);
+  const mediaSignature = mediaFileContentSignature(mediaRecord);
   const cached = originalPreviewBlobCache.get(mediaRecord.id);
   if (cached) {
     if (cached.mediaSignature === mediaSignature) {
@@ -179,33 +245,51 @@ export function requestOriginalPreviewBlob(
     return Promise.reject(createAbortError());
   }
 
-  const requestKey = originalPreviewRequestKey(mediaRecord);
+  const resourcePriority = options.resourcePriority ?? "preview";
+  const coreRequestPriority =
+    options.requestPriority ?? foregroundResourceCoreRequestPriority(resourcePriority);
+  const requestKey = [
+    originalPreviewRequestKey(mediaRecord),
+    resourcePriority,
+    coreRequestPriority
+  ].join(":");
   const inFlight = inFlightOriginalPreviewRequests.get(requestKey);
-  if (inFlight) {
-    return withAbortSignal(inFlight, options.signal);
+  if (inFlight && !inFlight.controller.signal.aborted) {
+    return withSharedAbortSignal(inFlight, options.signal);
   }
 
-  const request = thumbnailClient
-    .getPreviewBlob(mediaRecord.id, {
-      version: mediaContentSignature(mediaRecord)
-    })
-    .then((blob) => {
-      originalPreviewBlobCache.set(mediaRecord.id, {
-        mediaSignature,
-        blob
-      });
-      pruneOriginalPreviewCache();
-      return blob;
-    })
-    .finally(() => {
+  const controller = new AbortController();
+  const request = scheduleForegroundResourceRequest(
+    resourcePriority,
+    (signal) => fetchOriginalPreviewBlob(mediaRecord, mediaSignature, signal, coreRequestPriority),
+    controller
+  ).finally(() => {
+    if (inFlightOriginalPreviewRequests.get(requestKey)?.request === request) {
       inFlightOriginalPreviewRequests.delete(requestKey);
-    });
-  inFlightOriginalPreviewRequests.set(requestKey, request);
-  return withAbortSignal(request, options.signal);
+    }
+  });
+  const entry: SharedRequest<Blob> = {
+    request,
+    controller,
+    activeConsumers: 0,
+    hasUnabortableConsumer: false
+  };
+  inFlightOriginalPreviewRequests.set(requestKey, entry);
+  return withSharedAbortSignal(entry, options.signal);
 }
 
-export function prefetchOriginalPreview(mediaRecord: MediaRecord): void {
-  void requestOriginalPreviewBlob(mediaRecord).catch(() => {
+export function prefetchOriginalPreview(
+  mediaRecord: MediaRecord,
+  options: OriginalPreviewRequestOptions = {}
+): void {
+  void requestOriginalPreviewBlob(mediaRecord, {
+    ...options,
+    requestPriority: options.requestPriority ?? "resource",
+    resourcePriority: options.resourcePriority ?? "ahead"
+  }).catch((cause) => {
+    if (isAbortError(cause)) {
+      return;
+    }
     originalPreviewBlobCache.delete(mediaRecord.id);
   });
 }
@@ -354,8 +438,14 @@ function thumbnailRequestKey(
   return [mediaContentSignature(mediaRecord), GRID_THUMBNAIL_TARGET, priority].join(":");
 }
 
+function thumbnailStateSchedulerPriority(
+  priority: ThumbnailRequestPriority
+): ForegroundResourcePriority {
+  return priority;
+}
+
 function originalPreviewRequestKey(mediaRecord: MediaRecord): string {
-  return [mediaContentSignature(mediaRecord), "original"].join(":");
+  return [mediaFileContentSignature(mediaRecord), "original"].join(":");
 }
 
 function pruneOriginalPreviewCache(): void {
@@ -378,6 +468,243 @@ function pruneThumbnailObjectUrlCache(): void {
   }
 }
 
+function scheduleForegroundResourceRequest<T>(
+  priority: ForegroundResourcePriority,
+  run: (signal: AbortSignal) => Promise<T>,
+  controller: AbortController
+): Promise<T> {
+  const signal = controller.signal;
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const entry: QueuedForegroundResourceRequest = {
+      sequence: foregroundResourceRequestSequence++,
+      priority,
+      signal,
+      run: run as (signal: AbortSignal) => Promise<unknown>,
+      resolve: resolve as (value: unknown) => void,
+      reject,
+      abort: () => undefined
+    };
+    entry.abort = () => {
+      const queuedIndex = foregroundResourceRequestQueue.indexOf(entry);
+      if (queuedIndex >= 0) {
+        foregroundResourceRequestQueue.splice(queuedIndex, 1);
+      }
+      signal.removeEventListener("abort", entry.abort);
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", entry.abort, { once: true });
+    foregroundResourceRequestQueue.push(entry);
+    pumpForegroundResourceRequests();
+  });
+}
+
+function pumpForegroundResourceRequests(): void {
+  if (
+    activeNonInteractiveForegroundResourceRequests() >= MAX_FOREGROUND_RESOURCE_REQUESTS &&
+    activeInteractiveForegroundResourceRequests >= MAX_INTERACTIVE_FOREGROUND_RESOURCE_REQUESTS
+  ) {
+    return;
+  }
+
+  foregroundResourceRequestQueue.sort((left, right) => {
+    const priorityDelta =
+      thumbnailRequestPriorityRank(right.priority) - thumbnailRequestPriorityRank(left.priority);
+    return priorityDelta === 0 ? left.sequence - right.sequence : priorityDelta;
+  });
+
+  while (foregroundResourceRequestQueue.length > 0) {
+    const entryIndex = foregroundResourceRequestQueue.findIndex((candidate) =>
+      canStartForegroundResourceRequest(candidate.priority)
+    );
+    if (entryIndex < 0) {
+      return;
+    }
+    const entry = foregroundResourceRequestQueue.splice(entryIndex, 1)[0];
+    if (!entry) {
+      return;
+    }
+    if (entry.signal.aborted) {
+      entry.signal.removeEventListener("abort", entry.abort);
+      entry.reject(createAbortError());
+      continue;
+    }
+
+    activeForegroundResourceRequests += 1;
+    const isInteractiveRequest = isInteractiveForegroundResourceRequest(entry.priority);
+    const isAheadRequest = isAheadForegroundResourceRequest(entry.priority);
+    const isFallbackRequest = isFallbackForegroundResourceRequest(entry.priority);
+    if (isInteractiveRequest) {
+      activeInteractiveForegroundResourceRequests += 1;
+    }
+    if (isAheadRequest) {
+      activeAheadForegroundResourceRequests += 1;
+    }
+    if (isFallbackRequest) {
+      activeFallbackForegroundResourceRequests += 1;
+    }
+    entry
+      .run(entry.signal)
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        entry.signal.removeEventListener("abort", entry.abort);
+        activeForegroundResourceRequests = Math.max(0, activeForegroundResourceRequests - 1);
+        if (isInteractiveRequest) {
+          activeInteractiveForegroundResourceRequests = Math.max(
+            0,
+            activeInteractiveForegroundResourceRequests - 1
+          );
+        }
+        if (isAheadRequest) {
+          activeAheadForegroundResourceRequests = Math.max(
+            0,
+            activeAheadForegroundResourceRequests - 1
+          );
+        }
+        if (isFallbackRequest) {
+          activeFallbackForegroundResourceRequests = Math.max(
+            0,
+            activeFallbackForegroundResourceRequests - 1
+          );
+        }
+        pumpForegroundResourceRequests();
+      });
+  }
+}
+
+function activeNonInteractiveForegroundResourceRequests(): number {
+  return Math.max(0, activeForegroundResourceRequests - activeInteractiveForegroundResourceRequests);
+}
+
+function canStartForegroundResourceRequest(priority: ForegroundResourcePriority): boolean {
+  if (isInteractiveForegroundResourceRequest(priority)) {
+    return activeInteractiveForegroundResourceRequests < MAX_INTERACTIVE_FOREGROUND_RESOURCE_REQUESTS;
+  }
+  if (
+    isAheadForegroundResourceRequest(priority) &&
+    activeAheadForegroundResourceRequests >= MAX_AHEAD_FOREGROUND_RESOURCE_REQUESTS
+  ) {
+    return false;
+  }
+  if (
+    isFallbackForegroundResourceRequest(priority) &&
+    activeFallbackForegroundResourceRequests >= MAX_FALLBACK_FOREGROUND_RESOURCE_REQUESTS
+  ) {
+    return false;
+  }
+  return activeNonInteractiveForegroundResourceRequests() < MAX_FOREGROUND_RESOURCE_REQUESTS;
+}
+
+function isInteractiveForegroundResourceRequest(priority: ForegroundResourcePriority): boolean {
+  return priority === "selected" || priority === "preview";
+}
+
+function isAheadForegroundResourceRequest(priority: ForegroundResourcePriority): boolean {
+  return priority === "ahead" || priority === "background";
+}
+
+function isFallbackForegroundResourceRequest(priority: ForegroundResourcePriority): boolean {
+  return priority === "fallback";
+}
+
+function thumbnailRequestPriorityRank(priority: ForegroundResourcePriority): number {
+  switch (priority) {
+    case "selected":
+    case "preview":
+      return 4;
+    case "visible":
+      return 3;
+    case "fallback":
+      return 2.5;
+    case "ahead":
+      return 2;
+    case "background":
+    default:
+      return 1;
+  }
+}
+
+function fetchThumbnailBlob(
+  fileId: number,
+  versionKey: number | null,
+  signal: AbortSignal | undefined,
+  coreRequestPriority: CoreRequestPriority
+): Promise<Blob> {
+  return thumbnailClient.getThumbnailBlob(fileId, GRID_THUMBNAIL_TARGET, {
+    requestPriority: coreRequestPriority,
+    signal,
+    version: versionKey
+  });
+}
+
+function fetchThumbnailState(
+  mediaRecord: MediaRecord,
+  priority: ThumbnailRequestPriority,
+  signal?: AbortSignal
+): Promise<ThumbnailResponse> {
+  return thumbnailClient
+    .getThumbnail(mediaRecord.id, GRID_THUMBNAIL_TARGET, priority, { signal })
+    .then((thumbnail) => {
+      if (isLiveThumbnailResponseForMediaRecord(mediaRecord, thumbnail)) {
+        const mediaSignature = mediaContentSignature(mediaRecord);
+        const cachedEntry = thumbnailResourceCache.get(mediaRecord.id);
+        thumbnailResourceCache.set(mediaRecord.id, {
+          mediaSignature,
+          thumbnail:
+            cachedEntry?.mediaSignature === mediaSignature
+              ? pickPreferredThumbnailResponse(cachedEntry.thumbnail, thumbnail)
+              : thumbnail
+        });
+      } else {
+        thumbnailResourceCache.delete(mediaRecord.id);
+      }
+      return thumbnail;
+    });
+}
+
+function fetchOriginalPreviewBlob(
+  mediaRecord: MediaRecord,
+  mediaSignature: string,
+  signal: AbortSignal | undefined,
+  coreRequestPriority: CoreRequestPriority
+): Promise<Blob> {
+  return thumbnailClient
+    .getPreviewBlob(mediaRecord.id, {
+      requestPriority: coreRequestPriority,
+      signal,
+      version: mediaSignature
+    })
+    .then((blob) => {
+      originalPreviewBlobCache.set(mediaRecord.id, {
+        mediaSignature,
+        blob
+      });
+      pruneOriginalPreviewCache();
+      return blob;
+    });
+}
+
+function foregroundResourceCoreRequestPriority(
+  priority: ForegroundResourcePriority
+): CoreRequestPriority {
+  switch (priority) {
+    case "selected":
+    case "preview":
+      return "interactive";
+    case "visible":
+    case "ahead":
+    case "fallback":
+      return "resource";
+    case "background":
+    default:
+      return "background";
+  }
+}
+
 function withAbortSignal<T>(request: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return request;
   if (signal.aborted) return Promise.reject(createAbortError());
@@ -391,10 +718,61 @@ function withAbortSignal<T>(request: Promise<T>, signal?: AbortSignal): Promise<
   });
 }
 
+function withSharedAbortSignal<T>(
+  entry: {
+    request: Promise<T>;
+    controller: AbortController;
+    activeConsumers: number;
+    hasUnabortableConsumer: boolean;
+  },
+  signal?: AbortSignal
+): Promise<T> {
+  if (!signal) {
+    entry.hasUnabortableConsumer = true;
+    return entry.request;
+  }
+  if (signal.aborted) return Promise.reject(createAbortError());
+
+  entry.activeConsumers += 1;
+  let released = false;
+
+  return new Promise((resolve, reject) => {
+    const release = () => {
+      if (released) return;
+      released = true;
+      signal.removeEventListener("abort", abort);
+      entry.activeConsumers = Math.max(0, entry.activeConsumers - 1);
+      if (entry.activeConsumers === 0 && !entry.hasUnabortableConsumer) {
+        entry.controller.abort();
+      }
+    };
+    const abort = () => {
+      release();
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    entry.request.then(
+      (value) => {
+        release();
+        resolve(value);
+      },
+      (error) => {
+        release();
+        reject(error);
+      }
+    );
+  });
+}
+
 function createAbortError(): Error {
   const error = new Error("The operation was aborted.");
   error.name = "AbortError";
   return error;
+}
+
+function isAbortError(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === "AbortError";
 }
 
 export function mediaContentSignature(mediaRecord: MediaRecord): string {
@@ -404,6 +782,10 @@ export function mediaContentSignature(mediaRecord: MediaRecord): string {
     mediaRecord.size,
     normalizeMediaThumbnailState(mediaRecord.thumbnailState)
   ].join(":");
+}
+
+export function mediaFileContentSignature(mediaRecord: MediaRecord): string {
+  return [mediaRecord.id, mediaRecord.mtime, mediaRecord.size].join(":");
 }
 
 function thumbnailStateRank(state: ThumbnailResponse["state"]): number {

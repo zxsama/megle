@@ -1,14 +1,17 @@
-import { Check, ChevronDown, ChevronUp, Folder } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Folder, LoaderCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import type { FolderRecord, MediaRecord } from "@megle/core-client";
 import {
-  mediaContentSignature,
+  mediaFileContentSignature,
   readCachedThumbnailObjectUrl,
   rememberThumbnailObjectUrl,
   requestOriginalPreviewBlob,
   requestThumbnailBlob,
+  requestThumbnailState,
   thumbnailObjectUrlCacheKey
 } from "../../core/mediaResources";
+import type { SubfolderSiblingPosition } from "./subfolderHierarchy";
 
 interface SubfolderStripProps {
   collapsed: boolean;
@@ -20,8 +23,17 @@ interface SubfolderStripProps {
 }
 
 interface SubfolderCardProps {
+  coverLoaded: boolean;
   coverMedia: MediaRecord[];
+  depth?: number;
+  expandable?: boolean;
+  expanded?: boolean;
+  childStatus?: "empty" | "has-children" | "loading" | "unknown";
+  hasExpandedChildren?: boolean;
   folder: FolderRecord;
+  inheritedGroupPosition?: SubfolderSiblingPosition | null;
+  loadingChildren?: boolean;
+  nestedGroupPosition?: SubfolderSiblingPosition | null;
   selected: boolean;
   onFolderContextMenu?: (event: {
     folder: FolderRecord;
@@ -29,7 +41,9 @@ interface SubfolderCardProps {
     y: number;
     shiftKey: boolean;
   }) => void;
+  onOpenFolder: (folder: FolderRecord) => void;
   onSelectFolder: (folder: FolderRecord) => void;
+  onToggleExpanded?: (folder: FolderRecord) => void;
 }
 
 export function SubfolderStrip({
@@ -60,10 +74,10 @@ export function SubfolderStrip({
           title={collapsed ? "Expand child folders" : "Collapse child folders"}
           type="button"
         >
+          <span className="subfolder-strip-title">{title}</span>
           <span className="subfolder-strip-heading-icon" aria-hidden="true">
             {collapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
           </span>
-          <span className="subfolder-strip-title">{title}</span>
         </button>
 
         <label className="subfolder-strip-header-button library-browser-content-toggle">
@@ -83,48 +97,114 @@ export function SubfolderStrip({
 }
 
 export function SubfolderCard({
+  coverLoaded,
   coverMedia,
+  depth = 0,
+  expandable = false,
+  expanded = false,
+  childStatus = "unknown",
+  hasExpandedChildren = false,
   folder,
+  inheritedGroupPosition = null,
+  loadingChildren = false,
+  nestedGroupPosition = null,
   onFolderContextMenu,
+  onOpenFolder,
   onSelectFolder,
+  onToggleExpanded,
   selected
 }: SubfolderCardProps) {
+  const isNested = depth > 0;
+  const nestedCoverScale = isNested ? Math.max(0.6, Math.pow(0.9, depth)) : 1;
+  const parentCoverScale = isNested ? Math.max(0.6, Math.pow(0.9, Math.max(0, depth - 1))) : 1;
+  const style = {
+    "--subfolder-depth": String(depth),
+    "--subfolder-depth-indent": "0px",
+    "--subfolder-nested-cover-scale": nestedCoverScale.toFixed(4),
+    "--subfolder-parent-cover-scale": parentCoverScale.toFixed(4)
+  } as CSSProperties;
+
   return (
-    <button
-      aria-pressed={selected}
+    <div
       className={selected ? "subfolder-card selected" : "subfolder-card"}
       data-cover-count={coverMedia.length}
-      onClick={() => onSelectFolder(folder)}
-      onContextMenu={(event) => {
-        if (!onFolderContextMenu) return;
-        event.preventDefault();
-        onFolderContextMenu({
-          folder,
-          x: event.clientX,
-          y: event.clientY,
-          shiftKey: event.shiftKey
-        });
-      }}
-      type="button"
+      data-child-status={childStatus}
+      data-depth={depth}
+      data-expanded-children={hasExpandedChildren ? "true" : undefined}
+      data-inherited-position={isNested ? inheritedGroupPosition ?? "single" : undefined}
+      data-nested={isNested ? "true" : undefined}
+      data-nested-layer={depth > 1 ? "true" : undefined}
+      data-nested-position={isNested ? nestedGroupPosition ?? "single" : undefined}
+      style={style}
     >
-      <span className="subfolder-card-cover" aria-hidden="true">
-        <FolderCoverPreview coverMedia={coverMedia} />
-      </span>
-      <span className="subfolder-card-copy">
-        <span className="subfolder-card-name" title={folder.name}>
-          {folder.name}
+      <button
+        aria-label={`Select ${folder.name}; double-click to open folder`}
+        aria-pressed={selected}
+        className="subfolder-card-main"
+        data-interactive-pointer-target-selector=".subfolder-card-pointer-surface"
+        onClick={() => onSelectFolder(folder)}
+        onDoubleClick={() => onOpenFolder(folder)}
+        onContextMenu={(event) => {
+          if (!onFolderContextMenu) return;
+          event.preventDefault();
+          onFolderContextMenu({
+            folder,
+            x: event.clientX,
+            y: event.clientY,
+            shiftKey: event.shiftKey
+          });
+        }}
+        type="button"
+      >
+        <span className="subfolder-card-cover" aria-hidden="true">
+          <FolderCoverPreview coverLoaded={coverLoaded} coverMedia={coverMedia} />
+          <span className="subfolder-card-pointer-surface" />
+          <span className="library-thumbnail-interaction-ring" />
         </span>
-      </span>
-    </button>
+        <span className="subfolder-card-copy">
+          <span className="subfolder-card-name" title={folder.name}>
+            {folder.name}
+          </span>
+        </span>
+      </button>
+      {expandable ? (
+        <button
+          aria-label={expanded ? `Collapse ${folder.name}` : `Expand ${folder.name}`}
+          aria-pressed={expanded}
+          className="subfolder-card-expand"
+          disabled={loadingChildren}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleExpanded?.(folder);
+          }}
+          title={expanded ? "Collapse folder" : "Expand folder"}
+          type="button"
+        >
+          {loadingChildren ? (
+            <LoaderCircle className="subfolder-card-expand-spinner" size={13} />
+          ) : expanded ? (
+            <ChevronLeft size={14} />
+          ) : (
+            <ChevronRight size={14} />
+          )}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
-function FolderCoverPreview({ coverMedia }: { coverMedia: MediaRecord[] }) {
+function FolderCoverPreview({
+  coverLoaded,
+  coverMedia
+}: {
+  coverLoaded: boolean;
+  coverMedia: MediaRecord[];
+}) {
   const coverMediaItem = coverMedia[0] ?? null;
   const cacheKey = coverMediaItem
     ? thumbnailObjectUrlCacheKey(
         coverMediaItem.id,
-        `folder-cover:${mediaContentSignature(coverMediaItem)}`,
+        `folder-cover:${mediaFileContentSignature(coverMediaItem)}`,
         null
       )
     : null;
@@ -153,10 +233,34 @@ function FolderCoverPreview({ coverMedia }: { coverMedia: MediaRecord[] }) {
 
     let revoked = false;
     let objectUrl: string | null = null;
+    const controller = new AbortController();
     setFailed(false);
 
-    requestThumbnailBlob(coverMediaItem.id, null)
-      .catch(() => requestOriginalPreviewBlob(coverMediaItem))
+    requestThumbnailState(coverMediaItem, "visible", { signal: controller.signal })
+      .then((thumbnail) => {
+        if (thumbnail.state === "ready" && thumbnail.updatedAt !== null) {
+          return requestThumbnailBlob(coverMediaItem.id, thumbnail.updatedAt, {
+            requestPriority: "resource",
+            resourcePriority: "visible",
+            signal: controller.signal
+          });
+        }
+        return requestOriginalPreviewBlob(coverMediaItem, {
+          requestPriority: "resource",
+          resourcePriority: "visible",
+          signal: controller.signal
+        });
+      })
+      .catch((cause) => {
+        if (isAbortError(cause)) {
+          throw cause;
+        }
+        return requestOriginalPreviewBlob(coverMediaItem, {
+          requestPriority: "resource",
+          resourcePriority: "visible",
+          signal: controller.signal
+        });
+      })
       .then((blob) => {
         objectUrl = URL.createObjectURL(blob);
         if (revoked) {
@@ -168,12 +272,12 @@ function FolderCoverPreview({ coverMedia }: { coverMedia: MediaRecord[] }) {
         setSrc(objectUrl);
         setFailed(false);
       })
-      .catch(() => {
+      .catch((cause) => {
         if (objectUrl && objectUrlRef.current !== objectUrl) {
           URL.revokeObjectURL(objectUrl);
           objectUrl = null;
         }
-        if (!revoked) {
+        if (!revoked && !isAbortError(cause)) {
           setFailed(true);
           window.setTimeout(() => {
             setRetryTick((value) => value + 1);
@@ -183,6 +287,7 @@ function FolderCoverPreview({ coverMedia }: { coverMedia: MediaRecord[] }) {
 
     return () => {
       revoked = true;
+      controller.abort();
       if (objectUrl && objectUrlRef.current !== objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
@@ -190,10 +295,11 @@ function FolderCoverPreview({ coverMedia }: { coverMedia: MediaRecord[] }) {
   }, [cacheKey, coverMediaItem, retryTick]);
 
   if (!src || failed) {
+    const coverStatus = failed ? "failed" : coverMediaItem ? "loading" : coverLoaded ? "empty" : "loading";
     return (
       <span
         className="subfolder-card-cover-fallback"
-        data-cover-status={failed ? "failed" : coverMediaItem ? "loading" : "empty"}
+        data-cover-status={coverStatus}
       >
         <Folder size={22} />
       </span>
@@ -205,4 +311,8 @@ function FolderCoverPreview({ coverMedia }: { coverMedia: MediaRecord[] }) {
       <img alt="" className="subfolder-card-cover-image" loading="lazy" src={src} />
     </span>
   );
+}
+
+function isAbortError(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === "AbortError";
 }

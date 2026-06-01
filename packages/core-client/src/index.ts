@@ -1,5 +1,5 @@
 export { CoreApiError, createCoreClient } from "./client";
-export type { CoreClientConfig } from "./client";
+export type { CoreClientConfig, CoreRequestPriority } from "./client";
 export type {
   AcceptedRootResponse,
   AddFileTagRequest,

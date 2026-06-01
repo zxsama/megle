@@ -140,9 +140,10 @@ function LibraryGridSection({
         Library grid
       </h2>
       <p className="settings-section-copy">
-        Adjust spacing between thumbnails and the vertical space reserved for media names.
+        Adjust spacing between thumbnails and the vertical space reserved for media and folder names.
       </p>
       <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Content area</h3>
         <StyleSlider
           id="library-grid-gap"
           label="Thumbnail gap"
@@ -162,6 +163,43 @@ function LibraryGridSection({
           step={LIBRARY_GRID_PREFERENCE_LIMITS.tileLabelHeight.step}
           unit="px"
           value={gridPreferences.tileLabelHeight}
+        />
+      </div>
+      <div className="settings-style-group">
+        <h3 className="settings-style-group-title">Folder area</h3>
+        <StyleSlider
+          id="library-folder-grid-gap"
+          label="Folder thumbnail gap"
+          max={LIBRARY_GRID_PREFERENCE_LIMITS.folderTileGap.max}
+          min={LIBRARY_GRID_PREFERENCE_LIMITS.folderTileGap.min}
+          onChange={(folderTileGap) => onGridPreferencesChange({ folderTileGap })}
+          step={LIBRARY_GRID_PREFERENCE_LIMITS.folderTileGap.step}
+          unit="px"
+          value={gridPreferences.folderTileGap}
+        />
+        <StyleSlider
+          id="library-folder-grid-label-height"
+          label="Folder name spacing"
+          max={LIBRARY_GRID_PREFERENCE_LIMITS.folderTileLabelHeight.max}
+          min={LIBRARY_GRID_PREFERENCE_LIMITS.folderTileLabelHeight.min}
+          onChange={(folderTileLabelHeight) =>
+            onGridPreferencesChange({ folderTileLabelHeight })
+          }
+          step={LIBRARY_GRID_PREFERENCE_LIMITS.folderTileLabelHeight.step}
+          unit="px"
+          value={gridPreferences.folderTileLabelHeight}
+        />
+        <StyleSlider
+          id="library-folder-edge-shadow-alpha"
+          label="Folder edge shadow"
+          max={LIBRARY_GRID_PREFERENCE_LIMITS.folderEdgeShadowAlpha.max}
+          min={LIBRARY_GRID_PREFERENCE_LIMITS.folderEdgeShadowAlpha.min}
+          onChange={(folderEdgeShadowAlpha) =>
+            onGridPreferencesChange({ folderEdgeShadowAlpha })
+          }
+          step={LIBRARY_GRID_PREFERENCE_LIMITS.folderEdgeShadowAlpha.step}
+          unit="%"
+          value={gridPreferences.folderEdgeShadowAlpha}
         />
       </div>
     </LiquidGlassSurface>
@@ -525,7 +563,7 @@ function StyleSlider({
   min: number;
   onChange: (value: number) => void;
   step: number;
-  unit?: "px" | "x";
+  unit?: "%" | "px" | "x";
   value: number;
 }) {
   return (
@@ -548,8 +586,9 @@ function StyleSlider({
   );
 }
 
-function formatStyleValue(value: number, unit: "px" | "x") {
+function formatStyleValue(value: number, unit: "%" | "px" | "x") {
   const rounded = Number.isInteger(value) ? String(value) : value.toFixed(2);
+  if (unit === "%") return `${rounded}%`;
   return unit === "px" ? `${rounded}px` : `${rounded}x`;
 }
 

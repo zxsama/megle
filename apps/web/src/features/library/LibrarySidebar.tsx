@@ -163,6 +163,9 @@ function RootNode({
     <div className="tree-branch">
       <div
         className={selected ? "tree-item selected" : "tree-item"}
+        data-depth="0"
+        data-folder-id={rootFolderId ?? undefined}
+        data-root-id={root.id}
         role="treeitem"
         aria-expanded={rootFolderId ? expanded : undefined}
         aria-selected={selected}
@@ -239,6 +242,9 @@ function FolderNode({
     <div className="tree-branch">
       <div
         className={selected ? "tree-item selected" : "tree-item"}
+        data-depth={depth}
+        data-folder-id={folder.id}
+        data-root-id={folder.rootId}
         role="treeitem"
         aria-expanded={expanded}
         aria-selected={selected}

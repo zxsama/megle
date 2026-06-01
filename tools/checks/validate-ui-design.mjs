@@ -35,6 +35,7 @@ const stylesForChecks = stripCssComments(styles);
 const webMain = read("apps/web/src/main.tsx");
 const app = read("apps/web/src/app/App.tsx");
 const appShell = read("apps/web/src/app-shell/AppShell.tsx");
+const overlayScrollbars = readOptional("apps/web/src/app-shell/useOverlayScrollbars.ts") ?? "";
 const shellTitlebar = read("apps/web/src/app-shell/ShellTopBar.tsx");
 const shellOverlayHost = readOptional("apps/web/src/app-shell/ShellOverlayHost.tsx");
 const taskOverlay = readOptional("apps/web/src/features/tasks/TaskOverlay.tsx");
@@ -51,6 +52,8 @@ const moveDialog = read("apps/web/src/features/file-ops/MoveDialog.tsx");
 const deleteConfirm = read("apps/web/src/features/file-ops/DeleteConfirm.tsx");
 const onboardingHero = read("apps/web/src/features/onboarding/OnboardingHero.tsx");
 const libraryView = read("apps/web/src/features/library/LibraryView.tsx");
+const subfolderStrip = read("apps/web/src/features/library/SubfolderStrip.tsx");
+const useLibraryData = read("apps/web/src/core/useLibraryData.ts");
 const libraryCenterPane = readOptional("apps/web/src/features/library/LibraryCenterPane.tsx") ?? "";
 const libraryInspectorPane = readOptional("apps/web/src/features/library/LibraryInspectorPane.tsx") ?? "";
 const pluginsView = read("apps/web/src/features/plugins/PluginsView.tsx");
@@ -480,8 +483,170 @@ if (stylesForChecks.includes('"sidebar workspace tasks"') || stylesForChecks.inc
   fail("tasks must not occupy a fixed app-shell grid column");
 }
 
-if (!/--shell-left-width:\s*minmax\(260px,\s*292px\)/.test(stylesForChecks) || !/--shell-right-width:\s*270px/.test(stylesForChecks)) {
-  fail("app shell must define stable left and right column widths for the integrated titlebar layout");
+if (
+  !/app\.commandLine\.appendSwitch\(\s*["']enable-features["']\s*,\s*CHROMIUM_OVERLAY_SCROLLBAR_FEATURES\s*\)/.test(desktopMain) ||
+  !/CHROMIUM_OVERLAY_SCROLLBAR_FEATURES[\s\S]*OverlayScrollbar/.test(desktopMain)
+) {
+  fail("desktop shell must enable Chromium overlay scrollbars so scrollbars do not consume layout width");
+}
+
+for (const forbiddenFeature of [
+  "OverlayScrollbarFlashAfterAnyScrollUpdate",
+  "OverlayScrollbarFlashWhenMouseEnter"
+]) {
+  if (desktopMain.includes(forbiddenFeature)) {
+    fail(`desktop shell must not enable timer/flashing scrollbar feature ${forbiddenFeature}`);
+  }
+}
+
+const globalScrollbarBlocks = cssBlocksForExactSelector(stylesForChecks, "*");
+if (
+  !globalScrollbarBlocks.some(
+    (block) =>
+      /scrollbar-width:\s*none/.test(block) &&
+      /scrollbar-gutter:\s*auto/.test(block)
+  )
+) {
+  fail("global native scrollbars must be hidden so the custom overlay scrollbar owns visibility");
+}
+
+if (/scrollbar-gutter:\s*stable/.test(stylesForChecks)) {
+  fail("global scrollbars must not reserve stable gutter layout space");
+}
+
+const webkitScrollbarBlocks = cssBlocksForExactSelector(stylesForChecks, "*::-webkit-scrollbar");
+if (
+  !webkitScrollbarBlocks.some((block) =>
+    /width:\s*0/.test(block) &&
+    /height:\s*0/.test(block)
+  )
+) {
+  fail("global WebKit native scrollbars must be zero-width and replaced by the custom overlay");
+}
+
+if (/--media-scrollbar-lane-size/.test(stylesForChecks)) {
+  fail("media grid scrollbar must not use a layout-reserving scrollbar lane variable");
+}
+
+if (
+  !app.includes("useOverlayScrollbars") ||
+  !/useOverlayScrollbars\(\)/.test(app)
+) {
+  fail("App must install the global custom overlay scrollbar controller");
+}
+
+for (const value of [
+  "document.elementsFromPoint",
+  "pointerover",
+  "pointermove",
+  "pointerleave",
+  "pointerdown",
+  "pointerup",
+  "data-scrollbar-visible",
+  "data-scrollbar-dragging",
+  "--overlay-scrollbar-inline-inset",
+  "readOverlayScrollbarInset",
+  "requestAnimationFrame"
+]) {
+  if (!overlayScrollbars.includes(value)) {
+    fail(`custom overlay scrollbar controller missing ${value}`);
+  }
+}
+
+if (/setTimeout|clearTimeout/.test(overlayScrollbars)) {
+  fail("custom overlay scrollbar controller must not use timers to hide or show scrollbars");
+}
+
+for (const [selector, checks, message] of [
+  [
+    ".megle-overlay-scrollbar",
+    [/position:\s*fixed/, /pointer-events:\s*none/, /z-index:\s*240/, /opacity:\s*0/],
+    "custom overlay scrollbar rail must be fixed, non-layout, and hidden by default"
+  ],
+  [
+    '.megle-overlay-scrollbar[data-scrollbar-visible="true"] .megle-overlay-scrollbar-thumb',
+    [/opacity:\s*0\.5/],
+    "custom overlay scrollbar thumb must show at 50 percent opacity while the pointer is in the panel"
+  ],
+  [
+    '.megle-overlay-scrollbar[data-scrollbar-hover="true"] .megle-overlay-scrollbar-thumb',
+    [/opacity:\s*0\.75/],
+    "custom overlay scrollbar thumb must show at 75 percent opacity while hovered"
+  ],
+  [
+    '.megle-overlay-scrollbar[data-scrollbar-dragging="true"] .megle-overlay-scrollbar-thumb',
+    [/opacity:\s*1/],
+    "custom overlay scrollbar thumb must show at full opacity only while dragged"
+  ]
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (!blocks.some((block) => checks.every((check) => check.test(block)))) {
+    fail(message);
+  }
+}
+
+const librarySidebarBlocks = cssBlocksForExactSelector(stylesForChecks, ".library-sidebar");
+if (
+  !librarySidebarBlocks.some((block) =>
+    /--overlay-scrollbar-inline-inset:\s*4px/.test(block)
+  )
+) {
+  fail("left library sidebar scrollbar must be inset from the pane divider instead of hugging the edge");
+}
+
+const virtualGridBlocks = cssBlocksForExactSelector(stylesForChecks, ".virtual-grid");
+if (
+  !virtualGridBlocks.some(
+    (block) =>
+      /width:\s*calc\(100%\s*\+\s*var\(--media-scrollbar-outset\)\)/.test(block) &&
+      /max-width:\s*none/.test(block) &&
+      /padding-right:\s*var\(--media-scrollbar-outset\)/.test(block) &&
+      /margin-right:\s*calc\(var\(--media-scrollbar-outset\)\s*\*\s*-1\)/.test(block) &&
+      /box-sizing:\s*border-box/.test(block)
+  )
+) {
+  fail("media grid scrollbar must overhang outside the content area without reducing layout width");
+}
+
+if (
+  !mediaGrid.includes("measureVirtualGridViewport") ||
+  /entry\.contentRect\.width/.test(mediaGrid) ||
+  !/setViewportSize\(measureVirtualGridViewport\(element\)\)/.test(mediaGrid)
+) {
+  fail("MediaGrid viewport geometry must subtract scrollbar overhang padding before computing tile columns");
+}
+
+if (
+  !/const\s+windowedLayoutMode\s*=\s*layoutMode\s*===\s*"grid"\s*\|\|\s*layoutMode\s*===\s*"list"/.test(mediaGrid) ||
+  !/mediaSlots\s*!==\s*undefined\s*&&\s*windowedLayoutMode/.test(mediaGrid)
+) {
+  fail("MediaGrid must not route adaptive/waterfall layout modes through the fixed-row windowed grid geometry");
+}
+
+if (
+  !mediaGrid.includes("compactMediaSlots") ||
+  !mediaGrid.includes("firstMissingMediaSlotIndex") ||
+  !/const\s+orderedLoadedMedia\s*=/.test(mediaGrid) ||
+  !/const\s+layoutItems\s*=\s*windowedMedia\s*\?\s*EMPTY_MEDIA_ITEMS\s*:\s*orderedLoadedMedia/.test(mediaGrid)
+) {
+  fail("MediaGrid exact layout modes must preserve global mediaSlots order and request the first missing slot");
+}
+
+if (!/--shell-left-width:\s*292px/.test(stylesForChecks) || !/--shell-right-width:\s*270px/.test(stylesForChecks)) {
+  fail("app shell must define pixel column width variables that can be overridden by resizer state");
+}
+
+for (const value of [
+  "shell-column-resizer",
+  "handleColumnResizePointerDown",
+  "SHELL_LEFT_WIDTH_STORAGE_KEY",
+  "SHELL_RIGHT_WIDTH_STORAGE_KEY",
+  "--shell-left-width",
+  "--shell-right-width"
+]) {
+  if (!appShell.includes(value) && !stylesForChecks.includes(value)) {
+    fail(`resizable left/right shell column contract missing ${value}`);
+  }
 }
 
 const appShellBlocks = cssBlocksForSelector(stylesForChecks, ".app-shell");
@@ -850,8 +1015,31 @@ if (!previewPanel.includes('source="thumbnail"')) {
   fail("right inspector selected preview must render the light grid_320 thumbnail path");
 }
 
+if (!/MediaPreview[\s\S]{0,320}source="thumbnail"[\s\S]{0,320}preserveNaturalFrame=\{false\}[\s\S]{0,320}preferOriginalWhilePending/.test(previewPanel)) {
+  fail("right inspector thumbnail fallback must explicitly disable natural-frame sizing so tall originals cannot crop the fixed preview area");
+}
+
 if (!mediaResources.includes("getPreviewBlob") || !mediaPreview.includes("requestThumbnailBlob")) {
   fail("MediaPreview must separate central original preview loading from shared thumbnail blob loading");
+}
+
+if (
+  !/preserveNaturalFrame\??:\s*boolean/.test(mediaPreview) ||
+  !/const\s+shouldPreserveNaturalFrame\s*=/.test(mediaPreview) ||
+  !/preserveNaturalFrame=\{shouldPreserveNaturalFrame\}/.test(mediaPreview) ||
+  !/source\s*===\s*"original"\s*&&\s*preserveNaturalFrame/.test(mediaPreview) ||
+  !/setNaturalFrameStyle\(\{[\s\S]*?naturalSize\.naturalHeight/.test(mediaPreview)
+) {
+  fail("MediaPreview must gate original natural-frame inline sizing so inspector thumbnails stay fixed and contained");
+}
+
+if (
+  !/containedPreviewMediaStyle/.test(mediaPreview) ||
+  !/const\s+\[containedMediaStyle,\s*setContainedMediaStyle\]/.test(mediaPreview) ||
+  !/setContainedMediaStyle\(containedPreviewMediaStyle\(naturalSize\)\)/.test(mediaPreview) ||
+  !/className="preview-image"[\s\S]{0,1800}onLoad=\{\(event\)\s*=>[\s\S]{0,1800}src=\{src\}[\s\S]{0,160}style=\{containedMediaStyle\}/.test(mediaPreview)
+) {
+  fail("right inspector preview images must receive an explicit contained media size so portrait images center without cropping");
 }
 
 if (!/requestOriginalPreviewBlob/.test(mediaPreview) || !/originalPreviewBlobCache/.test(mediaResources)) {
@@ -870,7 +1058,7 @@ if (!/hasLiveReadyThumbnail/.test(mediaPreview) || /thumbnail\?\.state\s*===\s*"
   fail("MediaPreview must wait for live ready thumbnail metadata before requesting fallback thumbnail blobs");
 }
 
-if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{\s*signal:\s*controller\.signal/.test(mediaPreview)) {
+if (!/AbortController/.test(mediaPreview) || !/requestOriginalPreviewBlob\(\s*media,\s*\{[\s\S]*?signal:\s*controller\.signal/.test(mediaPreview)) {
   fail("MediaPreview central original requests must use AbortController cleanup");
 }
 
@@ -1364,6 +1552,8 @@ if (!shortcutBindings) {
     "previewPrevious",
     "zoomIn",
     "zoomOut",
+    "toggleSidebars",
+    "Tab",
     "defaultBinding",
     "normalizeShortcutEvent",
     "matchShortcut",
@@ -1398,10 +1588,28 @@ for (const value of [
   "previewNext",
   "previewPrevious",
   "zoomIn",
-  "zoomOut"
+  "zoomOut",
+  "toggleSidebars",
+  "onToggleSidebars"
 ]) {
   if (!useShortcuts.includes(value)) {
     fail(`global shortcuts must read editable bindings: missing ${value}`);
+  }
+}
+
+for (const [source, value, message] of [
+  [app, "sidebarsHidden", "App must own sidebarsHidden state so hiding sidebars preserves Library state"],
+  [app, "onToggleSidebars", "App must wire sidebar hiding into titlebar controls"],
+  [appShell, "sidebarsHidden", "AppShell must receive hidden-sidebar shell state"],
+  [appShell, "data-sidebars-hidden", "AppShell must expose hidden-sidebar state to CSS"],
+  [shellTitlebar, "ShellSidebarToggle", "titlebar must expose the sidebar toggle control"],
+  [shellTitlebar, "titlebar-shell-actions", "center titlebar must host right shell actions when sidebars are hidden"],
+  [stylesForChecks, ".app-shell[data-sidebars-hidden=\"true\"]", "styles must define the hidden-sidebar shell layout"],
+  [stylesForChecks, ".shell-sidebar-toggle", "styles must define the sidebar toggle affordance"],
+  [stylesForChecks, ".titlebar-shell-actions", "styles must place shell/window actions inside the center titlebar"]
+]) {
+  if (!source.includes(value)) {
+    fail(message);
   }
 }
 
@@ -1869,8 +2077,7 @@ const ctaFiles = [
   ["RenameDialog", renameDialog, ["primary"]],
   ["MoveDialog", moveDialog, ["primary"]],
   ["DeleteConfirm", deleteConfirm, ["primary", "danger"]],
-  ["OnboardingHero", onboardingHero, ["primary"]],
-  ["LibraryView", libraryView, ["primary"]]
+  ["OnboardingHero", onboardingHero, ["primary"]]
 ];
 
 for (const [label, source, tones] of ctaFiles) {
@@ -1941,10 +2148,11 @@ if (
   !gridSurfaceBlocks.some(
     (block) =>
       (/background:\s*transparent/.test(block) || /background:\s*var\(--content-stage\)/.test(block)) &&
-      /border-radius:\s*0/.test(block)
+      /border-radius:\s*0/.test(block) &&
+      /padding:\s*0\s+16px/.test(block)
   )
 ) {
-  fail("middle grid/workspace surface must keep a flat stage background with no rounded frame");
+  fail("middle grid/workspace surface must keep a flat stage background with zero vertical padding and no rounded frame");
 }
 
 if (
@@ -2071,11 +2279,56 @@ if (
   !inspectorBlocks.some(
     (block) =>
       /height:\s*100%/.test(block) &&
-      /overflow:\s*auto/.test(block) &&
+      /padding:\s*0\s+16px\s+16px/.test(block) &&
+      /overflow-y:\s*auto/.test(block) &&
+      /overflow-x:\s*hidden/.test(block) &&
       /background:\s*transparent/.test(block)
   )
 ) {
-  fail("right inspector panel must fill the right structural column body without becoming a separate titlebar-glued grid pane");
+  fail("right inspector panel must fill the right structural column body, start preview at the top, scroll only vertically, and never expose horizontal scrolling");
+}
+
+for (const selector of [
+  ".workbench-column-right",
+  ".workbench-column-body-right",
+  ".preview-panel",
+  ".preview-stage",
+  ".metadata-list",
+  ".inspector-metadata",
+  ".inspector-metadata-row",
+  ".inspector-tag-stack",
+  ".inspector-tag-input-row",
+  ".inspector-note-stack",
+  ".inspector-note"
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (
+    !blocks.some(
+      (block) =>
+        /min-width:\s*0/.test(block) &&
+        /max-width:\s*100%/.test(block)
+    )
+  ) {
+    fail(`${selector} must shrink within the right inspector column without causing horizontal scroll`);
+  }
+}
+
+for (const selector of [".inspector-tag-input", ".inspector-note"]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (!blocks.some((block) => /width:\s*100%/.test(block) && /box-sizing:\s*border-box/.test(block))) {
+    fail(`${selector} must size to the available inspector width`);
+  }
+}
+
+const tagInputRowBlocks = cssBlocksForExactSelector(stylesForChecks, ".inspector-tag-input-row");
+if (
+  !tagInputRowBlocks.some(
+    (block) =>
+      /display:\s*grid/.test(block) &&
+      /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/.test(block)
+  )
+) {
+  fail("inspector tag input row must use a shrinking grid column for the input plus an auto action column");
 }
 
 const previewStageBlocks = cssBlocksForSelector(stylesForChecks, ".preview-stage");
@@ -2084,36 +2337,354 @@ if (
     (block) =>
       /background:\s*transparent/.test(block) &&
       /border:\s*0/.test(block) &&
-      /border-radius:\s*0/.test(block) &&
-      /height:\s*260px/.test(block) &&
+      /border-radius:\s*var\(--radius-content\)/.test(block) &&
+      /height:\s*auto/.test(block) &&
       /aspect-ratio:\s*1\s*\/\s*1/.test(block) &&
+      /container-type:\s*size/.test(block) &&
       /place-items:\s*center/.test(block) &&
       /overflow:\s*hidden/.test(block) &&
       /padding:\s*0/.test(block)
   )
 ) {
-  fail("right inspector preview stage must stay fixed-height, centered, transparent, borderless, and padding-free");
+  fail("right inspector preview stage must stay square, centered, transparent, rounded, borderless, and padding-free");
 }
 
 if (previewStageBlocks.some((block) => hasNonNoneDeclaration(block, "box-shadow"))) {
   fail("right inspector preview stage must not draw a visible box-shadow or frame");
 }
 
-if (
-  previewStageBlocks.some((block) => {
-    const borderRadius = latestDeclarationValue(block, "border-radius");
-    return borderRadius !== null && borderRadius !== "0";
-  })
-) {
-  fail("right inspector preview stage must not receive any nonzero border radius that can clip matching-aspect media");
+if (/previewStageStyle|style=\{previewStageStyle/.test(previewPanel)) {
+  fail("right inspector preview stage must not derive its container ratio from selected media dimensions");
 }
 
-if (!previewStageStyleDerivesFromMediaDimensions(previewPanel)) {
-  fail("right inspector preview stage must derive aspect-ratio from original media dimensions");
+for (const [source, value, message] of [
+  [useLibraryData, 'sort: "name_asc"', "Library browsing must default to name A-Z sorting"],
+  [useLibraryData, "canNavigateFolderBack", "Library data state must expose folder back-navigation availability"],
+  [useLibraryData, "canNavigateFolderForward", "Library data state must expose folder forward-navigation availability"],
+  [useLibraryData, "navigateFolderBack", "Library data state must expose a folder back-navigation action"],
+  [useLibraryData, "navigateFolderForward", "Library data state must expose a folder forward-navigation action"],
+  [shellTitlebar, "library-folder-back", "middle library titlebar must render a folder back button"],
+  [shellTitlebar, "library-folder-forward", "middle library titlebar must render a folder forward button"],
+  [app, "onNavigateFolderBack={library.navigateFolderBack}", "App must wire the titlebar folder back button to LibraryState"],
+  [app, "onNavigateFolderForward={library.navigateFolderForward}", "App must wire the titlebar folder forward button to LibraryState"]
+]) {
+  if (!source.includes(value)) {
+    fail(message);
+  }
+}
+
+if (!/const\s+contentHeader\s*=\s*!\s*previewMedia\s*&&\s*contentCount\s*>\s*0\s*\?/.test(libraryView)) {
+  fail("LibraryView must hide the content section header when the current content area has no files");
+}
+
+const libraryBrowserContentHeaderBlocks = cssBlocksForExactSelector(
+  stylesForChecks,
+  ".library-browser-content-header"
+);
+if (
+  !libraryBrowserContentHeaderBlocks.some(
+    (block) =>
+      /min-height:\s*20px/.test(block) &&
+      /padding:\s*0/.test(block)
+  )
+) {
+  fail("Library content title header must use the same 20px text row spacing as the subfolder title header");
+}
+
+if (
+  !mediaGrid.includes("CONTENT_HEADER_TOP_GAP") ||
+  !/folderSectionVisible\s*\?\s*CONTENT_SECTION_HEADER_HEIGHT\s*:\s*SECTION_HEADER_HEIGHT/.test(mediaGrid) ||
+  !/paddingTop:\s*folderSectionVisible\s*\?\s*CONTENT_HEADER_TOP_GAP\s*:\s*0/.test(mediaGrid)
+) {
+  fail("MediaGrid content title must reserve an expanded top gap after the subfolder area instead of crowding the folders");
+}
+
+if (/emptyContent=\{library\.loading\s*\?\s*null\s*:\s*renderEmptyState/.test(libraryView)) {
+  fail("LibraryView must not render an empty content hint row inside the media browser");
+}
+
+if (!/subfolder-strip-title[\s\S]*subfolder-strip-heading-icon/.test(subfolderStrip)) {
+  fail("Subfolder strip heading must place the collapse icon to the right of the title text");
+}
+
+const subfolderHeaderButtonBlocks = cssBlocksForExactSelector(
+  stylesForChecks,
+  ".subfolder-strip-header-button"
+);
+if (
+  !subfolderHeaderButtonBlocks.some(
+    (block) =>
+      /all:\s*unset/.test(block) &&
+      /border:\s*0/.test(block) &&
+      /background:\s*transparent/.test(block) &&
+      /box-shadow:\s*none/.test(block) &&
+      /outline:\s*0/.test(block)
+  )
+) {
+  fail("Subfolder header controls must reset native/global button framing before applying text-only interaction");
+}
+
+const subfolderHeaderBlocks = cssBlocksForExactSelector(stylesForChecks, ".subfolder-strip-header");
+if (
+  !subfolderHeaderBlocks.some(
+    (block) =>
+      /border:\s*0/.test(block) &&
+      /background:\s*transparent/.test(block) &&
+      /box-shadow:\s*none/.test(block)
+  )
+) {
+  fail("Subfolder strip header row must be text-only and never use a framed panel layout");
+}
+
+const virtualGridFocusBlocks = cssBlocksForExactSelector(stylesForChecks, ".virtual-grid:focus-visible");
+if (!virtualGridFocusBlocks.some((block) => /box-shadow:\s*none/.test(block))) {
+  fail("Media grid focus must not draw an inset outline that reads as a subfolder-row hover frame");
+}
+
+for (const selector of [".virtual-grid-section-header", ".virtual-grid-folder-header"]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (
+    !blocks.some(
+      (block) =>
+        /border:\s*0/.test(block) &&
+        /background:\s*transparent/.test(block) &&
+        /box-shadow:\s*none/.test(block) &&
+        /outline:\s*0/.test(block)
+    )
+  ) {
+    fail(`${selector} must not paint a framed row around the subfolder/content header`);
+  }
+}
+
+if (
+  !stylesForChecks.includes(
+    ".subfolder-strip .subfolder-strip-header-button:hover:not(:disabled)"
+  )
+) {
+  fail("Subfolder strip header controls need a late scoped override so theme button hover styles cannot add frames");
+}
+
+for (const selector of [
+  ".subfolder-strip-header-button:hover:not(:disabled)",
+  ".subfolder-strip-header-button:active:not(:disabled)",
+  ".subfolder-strip-header-button:focus-visible",
+  ".subfolder-strip .subfolder-strip-header-button:hover:not(:disabled)",
+  ".subfolder-strip .subfolder-strip-header-button:active:not(:disabled)",
+  ".subfolder-strip .subfolder-strip-header-button:focus-visible"
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (
+    !blocks.some(
+      (block) =>
+        /border:\s*0/.test(block) &&
+        /background:\s*transparent/.test(block) &&
+        /border-radius:\s*0/.test(block) &&
+        /box-shadow:\s*none/.test(block) &&
+        /outline:\s*0/.test(block) &&
+        /transform:\s*none/.test(block)
+    )
+  ) {
+    fail(`${selector} must cancel the global button frame/scale and stay text-only`);
+  }
+}
+
+for (const [selector, expectedWeight] of [
+  [".subfolder-strip-title", "520"],
+  [".library-browser-content-title", "520"]
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (!blocks.some((block) => latestDeclarationValue(block, "font-weight") === expectedWeight)) {
+    fail(`${selector} must not use bold weight for Eagle-like section headings`);
+  }
+}
+
+const subfolderTitleBlocks = cssBlocksForExactSelector(stylesForChecks, ".subfolder-strip-title");
+if (!subfolderTitleBlocks.some((block) => /color:\s*var\(--text-muted\)/.test(block))) {
+  fail("Subfolder heading text must start muted so hover has visible highlight feedback");
+}
+
+const subfolderHeadingHoverBlocks = cssBlocksForExactSelector(
+  stylesForChecks,
+  ".subfolder-strip-heading-button:hover:not(:disabled) .subfolder-strip-title"
+);
+if (!subfolderHeadingHoverBlocks.some((block) => /color:\s*var\(--text-soft\)/.test(block))) {
+  fail("Subfolder heading text must highlight on hover like the show-child-content label");
+}
+
+if (/subfolder-strip-heading-button:active\s+\.subfolder-strip-heading-icon[\s\S]*?transform:\s*scale/.test(stylesForChecks)) {
+  fail("Subfolder collapse icon must not scale when toggling recursive child contents");
+}
+
+if (/library-browser-content-toggle:active\s+\.library-browser-content-toggle-indicator[\s\S]*?transform:\s*scale/.test(stylesForChecks)) {
+  fail("Show child-folder-content checkbox must not scale when toggled");
+}
+
+for (const selector of [
+  ".subfolder-strip-header-button",
+  ".library-browser-content-toggle",
+  ".library-browser-content-toggle-label"
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (!blocks.some((block) => /line-height:\s*1/.test(block))) {
+    fail(`${selector} must use a fixed line-height so checkbox and text stay vertically aligned`);
+  }
 }
 
 if (/\.tile-thumb,\s*\.preview-stage\s*{[\s\S]*?background:/.test(stylesForChecks)) {
   fail("right inspector preview stage must not share the opaque tile thumbnail background");
+}
+
+if (!/className=\{selected \? `media-tile media-tile--\$\{layoutMode\} selected` : `media-tile media-tile--\$\{layoutMode\}`\}[\s\S]*data-interactive-pointer-target-selector="\.tile-thumb"/.test(mediaGrid)) {
+  fail("content media tiles must route pointer hover outlines to the thumbnail surface instead of the full button/label box");
+}
+
+const rootBlocks = cssBlocksForExactSelector(stylesForChecks, ":root");
+const libraryThumbnailInteractionTokens = [
+  "--library-thumbnail-idle-ring",
+  "--library-thumbnail-hover-ring",
+  "--library-thumbnail-selected-ring",
+  "--library-thumbnail-hover-shadow",
+  "--library-thumbnail-selected-shadow",
+  "--library-item-name-color",
+  "--library-item-name-hover-color",
+  "--library-item-name-selected-color"
+];
+for (const token of libraryThumbnailInteractionTokens) {
+  if (!rootBlocks.some((block) => block.includes(token))) {
+    fail(`library media and folder thumbnails must share the global ${token} style token`);
+  }
+}
+
+if (!mediaGrid.includes("library-thumbnail-interaction-ring")) {
+  fail("content media tiles must render the shared library-thumbnail-interaction-ring inside every thumbnail surface");
+}
+
+if (!subfolderStrip.includes("library-thumbnail-interaction-ring")) {
+  fail("folder tiles must render the shared library-thumbnail-interaction-ring inside every folder cover surface");
+}
+
+if (
+  !cssBlocksForExactSelector(stylesForChecks, ".library-thumbnail-interaction-ring").some(
+    (block) =>
+      /position:\s*absolute/.test(block) &&
+      /inset:\s*0/.test(block) &&
+      /border:\s*var\(--library-thumbnail-idle-ring\)/.test(block) &&
+      /border-radius:\s*inherit/.test(block) &&
+      /pointer-events:\s*none/.test(block)
+  )
+) {
+  fail("library thumbnail interaction ring must be the single shared painted ring for media and folder thumbnails");
+}
+
+for (const selector of [
+  ".media-tile:hover:not(:disabled)",
+  ".media-tile:focus-visible",
+  ".media-tile.selected"
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (
+    !blocks.some(
+      (block) =>
+        /border-color:\s*transparent/.test(block) &&
+        /background:\s*transparent/.test(block) &&
+        /box-shadow:\s*none/.test(block) &&
+        /transform:\s*none/.test(block)
+    )
+  ) {
+    fail(`${selector} must not draw hover or selected chrome around the media filename area`);
+  }
+}
+
+if (
+  !cssBlocksForExactSelector(stylesForChecks, ".media-tile.selected .library-thumbnail-interaction-ring").some(
+    (block) => /border:\s*var\(--library-thumbnail-selected-ring\)/.test(block)
+  )
+) {
+  fail("selected media tiles must draw the selected highlight only on the thumbnail surface");
+}
+
+if (
+  !cssBlocksForExactSelector(
+    stylesForChecks,
+    ".media-tile.selected:hover:not(:disabled) .library-thumbnail-interaction-ring"
+  ).some(
+    (block) => /border:\s*var\(--library-thumbnail-selected-ring\)/.test(block)
+  )
+) {
+  fail("selected media thumbnails must keep the selected ring when the selected tile is also hovered");
+}
+
+if (
+  !cssBlocksForExactSelector(stylesForChecks, ".media-tile:hover:not(:disabled) .library-thumbnail-interaction-ring").some(
+    (block) => /border:\s*var\(--library-thumbnail-hover-ring\)/.test(block)
+  )
+) {
+  fail("hovered media tiles must use the shared library thumbnail hover tokens on the thumbnail surface");
+}
+
+if (
+  !cssBlocksForExactSelector(
+    stylesForChecks,
+    ".subfolder-card-main:hover .library-thumbnail-interaction-ring"
+  ).some(
+    (block) => /border:\s*var\(--library-thumbnail-hover-ring\)/.test(block)
+  )
+) {
+  fail("hovered subfolder tiles must use the shared library thumbnail hover tokens on the folder cover, not the name area");
+}
+
+if (
+  !cssBlocksForExactSelector(stylesForChecks, ".subfolder-card.selected .subfolder-card-cover").some(
+    (block) => /z-index:\s*3/.test(block) && /opacity:\s*1/.test(block)
+  ) ||
+  !cssBlocksForExactSelector(stylesForChecks, ".subfolder-card.selected .library-thumbnail-interaction-ring").some(
+    (block) => /border:\s*var\(--library-thumbnail-selected-ring\)/.test(block)
+  )
+) {
+  fail("selected subfolder tiles must draw the selected highlight only on the folder cover surface");
+}
+
+if (
+  !cssBlocksForExactSelector(
+    stylesForChecks,
+    ".subfolder-card.selected .subfolder-card-main:hover .library-thumbnail-interaction-ring"
+  ).some(
+    (block) => /border:\s*var\(--library-thumbnail-selected-ring\)/.test(block)
+  )
+) {
+  fail("selected folder thumbnails must keep the selected ring when the selected folder is also hovered");
+}
+
+for (const selector of [
+  ".media-tile:hover:not(:disabled) .tile-thumb",
+  ".media-tile.selected .tile-thumb",
+  ".subfolder-card-main:hover .subfolder-card-cover",
+  ".subfolder-card.selected .subfolder-card-cover"
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (blocks.some((block) => /border-color:\s*var\(--library-thumbnail/.test(block))) {
+    fail(`${selector} must not paint ring width with surface border-color; use library-thumbnail-interaction-ring instead`);
+  }
+}
+
+for (const [selector, expectedToken] of [
+  [".tile-label", "--library-item-name-color"],
+  [".subfolder-card-name", "--library-item-name-color"],
+  [".media-tile.selected .tile-label", "--library-item-name-selected-color"],
+  [".subfolder-card.selected .subfolder-card-name", "--library-item-name-selected-color"]
+]) {
+  const blocks = cssBlocksForExactSelector(stylesForChecks, selector);
+  if (!blocks.some((block) => new RegExp(`color:\\s*var\\(${expectedToken}\\)`).test(block))) {
+    fail(`${selector} must use ${expectedToken} so thumbnail names are color-only and globally consistent`);
+  }
+}
+
+if (
+  !liquidGlassSurface.includes("INTERACTIVE_POINTER_TARGET_SELECTOR_ATTRIBUTE") ||
+  !liquidGlassSurface.includes("interactiveAffordanceVisualTarget") ||
+  !liquidGlassSurface.includes("querySelector<HTMLElement>")
+) {
+  fail("interactive pointer routing must support explicit visual targets for controls whose hit box differs from the painted surface");
 }
 
 const inspectorReadyPreviewBlocks = cssBlocksForSelector(stylesForChecks, ".preview-stage .preview-placeholder.ready");
@@ -2199,32 +2770,45 @@ const previewPanelStageImageBlocks = cssBlocksForSelector(
   ".preview-panel .preview-stage .preview-placeholder.ready > .preview-image"
 );
 if (
-  !(
-    previewPanelImageBlocks.some(
-      (block) =>
-        /width:\s*auto/.test(block) &&
-        /height:\s*auto/.test(block) &&
-        /max-width:\s*100%/.test(block) &&
-        /max-height:\s*100%/.test(block) &&
-        /object-fit:\s*contain/.test(block) &&
-        hasNonzeroBorderRadius(block)
-    ) ||
-    (
-      previewPanelImageBlocks.some(
-        (block) => /object-fit:\s*contain/.test(block) && hasNonzeroBorderRadius(block)
-      ) &&
-      previewPanelStageImageBlocks.some(
-        (block) =>
-          /position:\s*absolute/.test(block) &&
-          /inset:\s*0/.test(block) &&
-          /width:\s*100%/.test(block) &&
-          /height:\s*100%/.test(block) &&
-          /object-fit:\s*contain/.test(block)
-      )
-    )
+  !previewPanelImageBlocks.some(
+    (block) =>
+      /width:\s*auto/.test(block) &&
+      /height:\s*auto/.test(block) &&
+      /max-width:\s*100cqw/.test(block) &&
+      /max-height:\s*100cqh/.test(block) &&
+      /object-fit:\s*contain/.test(block) &&
+      hasNonzeroBorderRadius(block)
   )
 ) {
-  fail("right inspector preview media must contain fully with rounded media corners and no opaque letterbox fill");
+  fail("right inspector preview media must size intrinsically, contain fully, stay centered, and use rounded media corners");
+}
+
+if (
+  previewPanelStageImageBlocks.some(
+    (block) =>
+      /position:\s*absolute/.test(block) ||
+      /inset:\s*0/.test(block) ||
+      /width:\s*100%/.test(block) ||
+      /height:\s*100%/.test(block)
+  )
+) {
+  fail("right inspector preview media must not stretch absolutely across the square letterbox area");
+}
+
+const inspectorReadyPreviewExactBlocks = cssBlocksForExactSelector(
+  stylesForChecks,
+  ".preview-panel .preview-stage .preview-placeholder.ready"
+);
+if (
+  !inspectorReadyPreviewExactBlocks.some(
+    (block) =>
+      /display:\s*grid/.test(block) &&
+      /place-items:\s*center/.test(block) &&
+      /width:\s*100%/.test(block) &&
+      /height:\s*100%/.test(block)
+    )
+) {
+  fail("right inspector ready preview wrapper must center the intrinsic preview media inside the square stage");
 }
 
 if (!liquidGlassSurface.includes("GLASS_POINTER_EDGE_PROXIMITY_PX")) {

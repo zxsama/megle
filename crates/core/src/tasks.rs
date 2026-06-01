@@ -81,7 +81,7 @@ impl std::fmt::Display for CooperativeThumbnailYield {
 impl std::error::Error for CooperativeThumbnailYield {}
 
 #[cfg(test)]
-type WorkerTaskHook = Arc<dyn Fn(&str, i64) + Send + Sync>;
+type WorkerTaskHook = Arc<dyn Fn(&str, i64, Option<&Path>) + Send + Sync>;
 
 #[cfg(test)]
 static WORKER_TASK_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<WorkerTaskHook>>> =
@@ -99,32 +99,38 @@ struct WorkerTaskHookGuard {
 #[cfg(test)]
 impl Drop for WorkerTaskHookGuard {
     fn drop(&mut self) {
-        *WORKER_TASK_HOOK.lock().expect("lock worker task hook") = None;
+        *WORKER_TASK_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
 #[cfg(test)]
 fn set_worker_task_hook_for_test(hook: WorkerTaskHook) -> WorkerTaskHookGuard {
-    let test_lock = TEST_HOOK_LOCK.lock().expect("lock test hook");
-    *WORKER_TASK_HOOK.lock().expect("lock worker task hook") = Some(hook);
+    let test_lock = TEST_HOOK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *WORKER_TASK_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     WorkerTaskHookGuard {
         _test_lock: test_lock,
     }
 }
 
 #[cfg(test)]
-fn invoke_worker_task_hook(kind: &str, task_id: i64) {
+fn invoke_worker_task_hook(kind: &str, task_id: i64, database_path: Option<&Path>) {
     let hook = WORKER_TASK_HOOK
         .lock()
-        .expect("lock worker task hook")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
     if let Some(hook) = hook {
-        hook(kind, task_id);
+        hook(kind, task_id, database_path);
     }
 }
 
 #[cfg(test)]
-type ThumbnailProcessingCheckpointHook = Box<dyn Fn(i64) + Send>;
+type ThumbnailProcessingCheckpointHook = Box<dyn Fn(i64, Option<&Path>) + Send>;
 
 #[cfg(test)]
 static THUMBNAIL_PROCESSING_CHECKPOINT_HOOK: std::sync::LazyLock<
@@ -141,7 +147,7 @@ impl Drop for ThumbnailProcessingCheckpointHookGuard {
     fn drop(&mut self) {
         *THUMBNAIL_PROCESSING_CHECKPOINT_HOOK
             .lock()
-            .expect("lock thumbnail processing checkpoint hook") = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -149,30 +155,32 @@ impl Drop for ThumbnailProcessingCheckpointHookGuard {
 fn set_thumbnail_processing_checkpoint_hook_for_test(
     hook: ThumbnailProcessingCheckpointHook,
 ) -> ThumbnailProcessingCheckpointHookGuard {
-    let test_lock = TEST_HOOK_LOCK.lock().expect("lock test hook");
+    let test_lock = TEST_HOOK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *THUMBNAIL_PROCESSING_CHECKPOINT_HOOK
         .lock()
-        .expect("lock thumbnail processing checkpoint hook") = Some(hook);
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     ThumbnailProcessingCheckpointHookGuard {
         _test_lock: test_lock,
     }
 }
 
 #[cfg(test)]
-fn invoke_thumbnail_processing_checkpoint_hook(task_id: i64) {
+fn invoke_thumbnail_processing_checkpoint_hook(task_id: i64, database_path: Option<&Path>) {
     let guard = THUMBNAIL_PROCESSING_CHECKPOINT_HOOK
         .lock()
-        .expect("lock thumbnail processing checkpoint hook");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(hook) = guard.as_ref() {
-        hook(task_id);
+        hook(task_id, database_path);
     }
 }
 
 #[cfg(not(test))]
-fn invoke_thumbnail_processing_checkpoint_hook(_task_id: i64) {}
+fn invoke_thumbnail_processing_checkpoint_hook(_task_id: i64, _database_path: Option<&Path>) {}
 
 #[cfg(not(test))]
-fn invoke_worker_task_hook(_kind: &str, _task_id: i64) {}
+fn invoke_worker_task_hook(_kind: &str, _task_id: i64, _database_path: Option<&Path>) {}
 
 pub fn start_worker(worker_database: Database) -> TaskSender {
     start_worker_with_ffmpeg(worker_database, crate::thumbnails::ffmpeg_available())
@@ -523,7 +531,7 @@ fn run_thumbnail_processing_checkpoint(
     task_id: i64,
     attempt_generation: i64,
 ) -> anyhow::Result<()> {
-    invoke_thumbnail_processing_checkpoint_hook(task_id);
+    invoke_thumbnail_processing_checkpoint_hook(task_id, database.path());
     database.ensure_task_not_cancelled(task_id)?;
     if !database.task_attempt_is_current(task_id, attempt_generation)? {
         return Err(anyhow::anyhow!(
@@ -556,7 +564,7 @@ fn run_task_with_database(
     match task.kind.as_str() {
         "root_scan" => {
             database.mark_task_running_for_attempt(task_id, attempt_generation)?;
-            invoke_worker_task_hook("root_scan", task_id);
+            invoke_worker_task_hook("root_scan", task_id, database.path());
             let root_id = task
                 .root_id
                 .ok_or_else(|| anyhow::anyhow!("root_scan task missing root id: {task_id}"))?;
@@ -655,7 +663,7 @@ fn run_task_with_database(
         }
         "interactive_folder_scan" => {
             database.mark_task_running_for_attempt(task_id, attempt_generation)?;
-            invoke_worker_task_hook("interactive_folder_scan", task_id);
+            invoke_worker_task_hook("interactive_folder_scan", task_id, database.path());
             let root_id = task.root_id.ok_or_else(|| {
                 anyhow::anyhow!("interactive_folder_scan task missing root id: {task_id}")
             })?;
@@ -879,7 +887,7 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
             &source_fingerprint,
         )?;
     }
-    invoke_worker_task_hook("thumbnail", task_id);
+    invoke_worker_task_hook("thumbnail", task_id, database.path());
     database.ensure_task_not_cancelled(task_id)?;
     if !database.task_attempt_is_current(task_id, attempt_generation)? {
         return Err(anyhow::anyhow!(
@@ -2642,9 +2650,13 @@ mod tests {
             .expect("reopened database");
         let injected = Arc::new(AtomicBool::new(false));
         let hook_injected = Arc::clone(&injected);
-        let _hook_guard =
-            set_thumbnail_processing_checkpoint_hook_for_test(Box::new(move |task_id| {
-                if task_id != old_visible_task_id || hook_injected.swap(true, Ordering::SeqCst) {
+        let hook_db_path = db_path.clone();
+        let _hook_guard = set_thumbnail_processing_checkpoint_hook_for_test(Box::new(
+            move |task_id, database_path| {
+                if database_path != Some(hook_db_path.as_path())
+                    || task_id != old_visible_task_id
+                    || hook_injected.swap(true, Ordering::SeqCst)
+                {
                     return;
                 }
                 hook_database
@@ -2657,7 +2669,8 @@ mod tests {
                 hook_database
                     .sync_thumbnail_priority_scope(root_id, &[], &[new_visible_file_id], &[])
                     .expect("sync scope to demote old visible task");
-            }));
+            },
+        ));
 
         let error =
             run_thumbnail_task_with_cache(&mut database, old_visible_task_id, &cache_root, true)
@@ -2782,18 +2795,23 @@ mod tests {
         let hook_release_workers = Arc::clone(&release_workers);
         let hook_started_notify = Arc::clone(&started_notify);
         let hook_task_ids = Arc::clone(&watched_task_ids);
-        let _hook_guard = set_worker_task_hook_for_test(Arc::new(move |kind, task_id| {
-            if kind != "thumbnail" || !hook_task_ids.contains(&task_id) {
-                return;
-            }
-            let previous = hook_started_count.fetch_add(1, Ordering::SeqCst);
-            if previous < 2 {
-                hook_started_notify.notify_waiters();
-            }
-            while !hook_release_workers.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }));
+        let hook_db_path = db_path.clone();
+        let _hook_guard =
+            set_worker_task_hook_for_test(Arc::new(move |kind, task_id, database_path| {
+                if database_path != Some(hook_db_path.as_path())
+                    || kind != "thumbnail"
+                    || !hook_task_ids.contains(&task_id)
+                {
+                    return;
+                }
+                let previous = hook_started_count.fetch_add(1, Ordering::SeqCst);
+                if previous < 2 {
+                    hook_started_notify.notify_waiters();
+                }
+                while !hook_release_workers.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }));
 
         let thumbnail_permits = ThumbnailWorkerPermits {
             selected: Arc::new(Semaphore::new(THUMBNAIL_SELECTED_WORKER_CONCURRENCY)),
@@ -2933,20 +2951,22 @@ mod tests {
         let hook_foreground_started = Arc::clone(&foreground_started);
         let hook_release_background = Arc::clone(&release_background);
         let hook_foreground_started_notify = Arc::clone(&foreground_started_notify);
-        let _hook_guard = set_worker_task_hook_for_test(Arc::new(move |kind, task_id| {
-            if kind != "thumbnail" {
-                return;
-            }
-            if task_id == background_task_id_copy {
-                hook_background_started.store(true, Ordering::SeqCst);
-                while !hook_release_background.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(5));
+        let hook_db_path = db_path.clone();
+        let _hook_guard =
+            set_worker_task_hook_for_test(Arc::new(move |kind, task_id, database_path| {
+                if database_path != Some(hook_db_path.as_path()) || kind != "thumbnail" {
+                    return;
                 }
-            } else if task_id == foreground_task_id_copy {
-                hook_foreground_started.store(true, Ordering::SeqCst);
-                hook_foreground_started_notify.notify_waiters();
-            }
-        }));
+                if task_id == background_task_id_copy {
+                    hook_background_started.store(true, Ordering::SeqCst);
+                    while !hook_release_background.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                } else if task_id == foreground_task_id_copy {
+                    hook_foreground_started.store(true, Ordering::SeqCst);
+                    hook_foreground_started_notify.notify_waiters();
+                }
+            }));
 
         let thumbnail_permits = ThumbnailWorkerPermits {
             selected: Arc::new(Semaphore::new(THUMBNAIL_SELECTED_WORKER_CONCURRENCY)),
@@ -3095,19 +3115,21 @@ mod tests {
         let hook_selected_started = Arc::clone(&selected_started);
         let hook_selected_started_notify = Arc::clone(&selected_started_notify);
         let hook_visible_task_ids = Arc::clone(&watched_visible_task_ids);
-        let _hook_guard = set_worker_task_hook_for_test(Arc::new(move |kind, task_id| {
-            if kind != "thumbnail" {
-                return;
-            }
-            if hook_visible_task_ids.contains(&task_id) {
-                while !hook_release_visible.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(5));
+        let hook_db_path = db_path.clone();
+        let _hook_guard =
+            set_worker_task_hook_for_test(Arc::new(move |kind, task_id, database_path| {
+                if database_path != Some(hook_db_path.as_path()) || kind != "thumbnail" {
+                    return;
                 }
-            } else if task_id == selected_task_id {
-                hook_selected_started.store(true, Ordering::SeqCst);
-                hook_selected_started_notify.notify_waiters();
-            }
-        }));
+                if hook_visible_task_ids.contains(&task_id) {
+                    while !hook_release_visible.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                } else if task_id == selected_task_id {
+                    hook_selected_started.store(true, Ordering::SeqCst);
+                    hook_selected_started_notify.notify_waiters();
+                }
+            }));
 
         let thumbnail_permits = ThumbnailWorkerPermits {
             selected: Arc::new(Semaphore::new(THUMBNAIL_SELECTED_WORKER_CONCURRENCY)),
@@ -3213,21 +3235,26 @@ mod tests {
         let hook_first_scan_started_notify = Arc::clone(&first_scan_started_notify);
         let hook_any_scan_started_notify = Arc::clone(&any_scan_started_notify);
         let hook_task_ids = Arc::clone(&watched_task_ids);
-        let _hook_guard = set_worker_task_hook_for_test(Arc::new(move |kind, task_id| {
-            if kind != "root_scan" || !hook_task_ids.contains(&task_id) {
-                return;
-            }
-            let previous = hook_started_count.fetch_add(1, Ordering::SeqCst);
-            if previous == 0 {
-                hook_first_scan_started_notify.notify_waiters();
-            }
-            hook_any_scan_started_notify.notify_waiters();
-            if task_id == first_task_id {
-                while !hook_release_first_scan.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(5));
+        let hook_db_path = db_path.clone();
+        let _hook_guard =
+            set_worker_task_hook_for_test(Arc::new(move |kind, task_id, database_path| {
+                if database_path != Some(hook_db_path.as_path())
+                    || kind != "root_scan"
+                    || !hook_task_ids.contains(&task_id)
+                {
+                    return;
                 }
-            }
-        }));
+                let previous = hook_started_count.fetch_add(1, Ordering::SeqCst);
+                if previous == 0 {
+                    hook_first_scan_started_notify.notify_waiters();
+                }
+                hook_any_scan_started_notify.notify_waiters();
+                if task_id == first_task_id {
+                    while !hook_release_first_scan.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }));
 
         let sender = start_worker_with_ffmpeg(database, true);
         sender

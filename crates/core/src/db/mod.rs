@@ -104,7 +104,16 @@ pub struct ThumbnailStateUpsert {
 pub struct ThumbnailTaskRequest {
     pub thumbnail: ThumbnailRecord,
     pub task_id: Option<i64>,
+    #[allow(dead_code)]
     pub queued: bool,
+    pub should_enqueue: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThumbnailPriorityScopeSyncResult {
+    #[allow(dead_code)]
+    pub updated: usize,
+    pub promoted_pending_task_ids: Vec<i64>,
 }
 
 pub const ROOT_SCAN_TASK_PRIORITY: i64 = 0;
@@ -450,6 +459,10 @@ impl Database {
         Ok(Some(Self::open(path)?))
     }
 
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     pub fn default_thumbnail_cache_dir(&self) -> PathBuf {
         if let Some(path) = &self.path {
             return path
@@ -532,6 +545,14 @@ impl Database {
         }
         if !self.migration_applied(14)? {
             self.apply_interactive_folder_scan_task_migration()?;
+        }
+        if !self.migration_applied(15)? {
+            self.connection
+                .execute_batch(migrations::ROOT_STATUS_BROWSING_INDEXES_MIGRATION)?;
+        }
+        if !self.migration_applied(16)? {
+            self.connection
+                .execute_batch(migrations::FOLDER_STATUS_BROWSING_INDEXES_MIGRATION)?;
         }
         self.backfill_media_fts_if_empty()?;
         Ok(())
@@ -1152,7 +1173,11 @@ impl Database {
             JOIN files ON files.id = tasks.file_id AND files.status = 'active'
             JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
             WHERE tasks.kind = 'thumbnail' AND tasks.status = 'pending'
-            ORDER BY tasks.priority DESC, tasks.created_at ASC, tasks.id ASC
+            ORDER BY
+              tasks.priority DESC,
+              tasks.attempt_generation DESC,
+              tasks.updated_at DESC,
+              tasks.id DESC
             "#,
         )?;
         let rows = statement.query_map([], |row| row.get(0))?;
@@ -1174,7 +1199,11 @@ impl Database {
             WHERE tasks.kind = 'thumbnail'
               AND tasks.status = 'pending'
               AND tasks.priority > ?1
-            ORDER BY tasks.priority DESC, tasks.created_at ASC, tasks.id ASC
+            ORDER BY
+              tasks.priority DESC,
+              tasks.attempt_generation DESC,
+              tasks.updated_at DESC,
+              tasks.id DESC
             "#,
         )?;
         let rows = statement.query_map([THUMBNAIL_BACKGROUND_PRIORITY], |row| row.get(0))?;
@@ -1319,6 +1348,50 @@ impl Database {
         )?;
         let mut rows = statement.query([task_id])?;
         Ok(rows.next()?.map(task_from_row).transpose()?)
+    }
+
+    pub fn active_thumbnail_task(&self, file_id: i64) -> anyhow::Result<Option<TaskRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, kind, priority, status, root_id, folder_id, file_id, created_at, updated_at,
+                   items_seen, items_total, folders_seen, media_files_seen, skipped_files,
+                   thumbnail_source_fingerprint, attempt_generation, error
+            FROM tasks
+            WHERE kind = 'thumbnail'
+              AND file_id = ?1
+              AND status IN ('pending', 'running')
+            ORDER BY
+              priority DESC,
+              created_at ASC,
+              id ASC
+            LIMIT 1
+            "#,
+        )?;
+        let mut rows = statement.query([file_id])?;
+        Ok(rows.next()?.map(task_from_row).transpose()?)
+    }
+
+    pub fn touch_pending_foreground_thumbnail_task(
+        &self,
+        task_id: i64,
+        requested_priority: i64,
+    ) -> anyhow::Result<Option<TaskRecord>> {
+        if requested_priority <= THUMBNAIL_BACKGROUND_PRIORITY {
+            return self.get_task(task_id);
+        }
+        self.connection.execute(
+            r#"
+            UPDATE tasks
+            SET updated_at = ?1,
+                attempt_generation = attempt_generation + 1
+            WHERE id = ?2
+              AND kind = 'thumbnail'
+              AND status = 'pending'
+              AND priority >= ?3
+            "#,
+            (unix_timestamp(), task_id, requested_priority),
+        )?;
+        self.get_task(task_id)
     }
 
     #[cfg(test)]
@@ -1832,42 +1905,42 @@ impl Database {
             parameters.push(Value::Integer(root_id));
         }
         if let Some(folder_id) = query.folder_id {
-            if query.include_descendants {
-                predicates.push(
-                    r#"files.folder_id IN (
-                        WITH RECURSIVE descendant_folders(id) AS (
-                            SELECT id FROM folders WHERE id = ?
-                            UNION ALL
-                            SELECT folders.id
-                            FROM folders
-                            JOIN descendant_folders ON folders.parent_id = descendant_folders.id
+            let root_folder_descendant_scope = if query.include_descendants {
+                match query.root_id {
+                    Some(root_id) => self
+                        .connection
+                        .query_row(
+                            "SELECT 1 FROM folders WHERE id = ?1 AND root_id = ?2 AND parent_id IS NULL",
+                            (folder_id, root_id),
+                            |_| Ok(()),
                         )
-                        SELECT id FROM descendant_folders
-                    )"#
-                    .to_string(),
-                );
+                        .optional()?
+                        .is_some(),
+                    None => false,
+                }
             } else {
-                predicates.push("files.folder_id = ?".to_string());
+                false
+            };
+            if query.include_descendants && !root_folder_descendant_scope {
+                return self
+                    .list_descendant_media_page(query, folder_id, sort, offset, use_offset, limit);
+            } else {
+                if !root_folder_descendant_scope {
+                    predicates.push("files.folder_id = ?".to_string());
+                    parameters.push(Value::Integer(folder_id));
+                }
             }
-            parameters.push(Value::Integer(folder_id));
         }
         if let Some(kind) = query.kind.as_deref() {
             predicates.push("media.kind = ?".to_string());
             parameters.push(Value::Text(kind.to_string()));
         }
+        let count_requires_media_join = query.kind.is_some();
         let count_predicates = predicates.clone();
         let count_parameters = parameters.clone();
         let total_count: i64 = {
-            let count_sql = format!(
-                r#"
-                SELECT COUNT(*)
-                FROM files
-                LEFT JOIN media ON media.file_id = files.id
-                JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
-                WHERE {where_clause}
-                "#,
-                where_clause = count_predicates.join(" AND "),
-            );
+            let count_sql =
+                media_count_sql(&count_predicates.join(" AND "), count_requires_media_join);
             self.connection
                 .query_row(&count_sql, params_from_iter(count_parameters), |row| {
                     row.get(0)
@@ -1929,6 +2002,152 @@ impl Database {
             "#,
             where_clause = predicates.join(" AND "),
             sort_clause = sort_clause,
+            offset_clause = if use_offset { "OFFSET ?" } else { "" },
+        );
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(parameters), media_from_row)?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        let next_cursor = if items.len() > limit as usize {
+            items.pop();
+            items.last().map(|item| encode_media_cursor(sort, item))
+        } else {
+            None
+        };
+        Ok(Page {
+            items,
+            next_cursor,
+            total_count: Some(total_count),
+        })
+    }
+
+    fn list_descendant_media_page(
+        &self,
+        query: MediaPageQuery,
+        folder_id: i64,
+        sort: &str,
+        offset: i64,
+        use_offset: bool,
+        limit: i64,
+    ) -> anyhow::Result<Page<MediaRecord>> {
+        let sort_clause = match sort {
+            "mtime_asc" => "files.mtime ASC, files.id ASC",
+            "name_asc" => "files.name ASC, files.id ASC",
+            "name_desc" => "files.name DESC, files.id DESC",
+            _ => "files.mtime DESC, files.id DESC",
+        };
+        let folder_index = match sort {
+            "mtime_asc" => "idx_files_folder_status_mtime_id_asc",
+            "name_asc" => "idx_files_folder_status_name_id",
+            "name_desc" => "idx_files_folder_status_name_id_desc",
+            _ => "idx_files_folder_status_mtime_id",
+        };
+        let descendant_cte = r#"
+            WITH RECURSIVE descendant_folders(id) AS (
+                SELECT id FROM folders WHERE id = ?
+                UNION ALL
+                SELECT folders.id
+                FROM folders
+                JOIN descendant_folders ON folders.parent_id = descendant_folders.id
+                WHERE folders.status = 'active'
+            )
+        "#;
+        let mut predicates = vec![
+            "files.folder_id = descendant_folders.id".to_string(),
+            "files.status = 'active'".to_string(),
+        ];
+        let mut base_parameters = vec![Value::Integer(folder_id)];
+        if let Some(root_id) = query.root_id {
+            predicates.push("files.root_id = ?".to_string());
+            base_parameters.push(Value::Integer(root_id));
+        }
+        if let Some(kind) = query.kind.as_deref() {
+            predicates.push("media.kind = ?".to_string());
+            base_parameters.push(Value::Text(kind.to_string()));
+        }
+
+        let total_count: i64 = {
+            let count_sql = format!(
+                r#"
+                {descendant_cte}
+                SELECT COUNT(*)
+                FROM descendant_folders
+                CROSS JOIN files INDEXED BY idx_files_folder_status_name_id
+                LEFT JOIN media ON media.file_id = files.id
+                JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+                WHERE {where_clause}
+                "#,
+                where_clause = predicates.join(" AND "),
+            );
+            self.connection.query_row(
+                &count_sql,
+                params_from_iter(base_parameters.clone()),
+                |row| row.get(0),
+            )?
+        };
+
+        let cursor = if use_offset {
+            None
+        } else {
+            query
+                .cursor
+                .as_deref()
+                .map(|cursor| decode_media_cursor(cursor, sort))
+                .transpose()?
+        };
+        let mut parameters = base_parameters;
+        if let Some(cursor) = &cursor {
+            let predicate = match sort {
+                "name_asc" => "files.name > ? OR (files.name = ? AND files.id > ?)",
+                "name_desc" => "files.name < ? OR (files.name = ? AND files.id < ?)",
+                "mtime_asc" => "files.mtime > ? OR (files.mtime = ? AND files.id > ?)",
+                _ => "files.mtime < ? OR (files.mtime = ? AND files.id < ?)",
+            };
+            predicates.push(format!("({predicate})"));
+            match &cursor.key {
+                MediaCursorKey::Name(name) => {
+                    parameters.push(Value::Text(name.clone()));
+                    parameters.push(Value::Text(name.clone()));
+                }
+                MediaCursorKey::Mtime(mtime) => {
+                    parameters.push(Value::Integer(*mtime));
+                    parameters.push(Value::Integer(*mtime));
+                }
+            }
+            parameters.push(Value::Integer(cursor.id));
+        }
+        parameters.push(Value::Integer(limit + 1));
+        if use_offset {
+            parameters.push(Value::Integer(offset));
+        }
+
+        let sql = format!(
+            r#"
+            {descendant_cte}
+            SELECT files.id, files.root_id, files.folder_id, files.name, files.ext,
+                   files.size, files.mtime, media.kind, media.width, media.height,
+                   media.duration_ms, media.codec,
+                   media.preview_placeholder, media.preview_placeholder_format,
+                   media.metadata_status, files.file_key,
+                   thumbs.profile, thumbs.state, thumbs.short_side_px,
+                   thumbs.output_format, thumbs.cache_key, thumbs.width, thumbs.height,
+                   thumbs.byte_size, thumbs.error, thumbs.source_fingerprint, thumbs.served_by,
+                   thumbs.updated_at
+            FROM descendant_folders
+            CROSS JOIN files INDEXED BY {folder_index}
+            LEFT JOIN media ON media.file_id = files.id
+            LEFT JOIN thumbs ON thumbs.file_id = files.id AND thumbs.profile = 'grid_320'
+            JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+            WHERE {where_clause}
+            ORDER BY {sort_clause}
+            LIMIT ?
+            {offset_clause}
+            "#,
+            where_clause = predicates.join(" AND "),
             offset_clause = if use_offset { "OFFSET ?" } else { "" },
         );
 
@@ -2134,6 +2353,7 @@ impl Database {
                     thumbnail: current,
                     task_id,
                     queued: false,
+                    should_enqueue: false,
                 });
             }
         }
@@ -2141,6 +2361,7 @@ impl Database {
         let existing_pending_task = pending_thumbnail_task(&transaction, file_id)?;
         let existing_running_task = running_thumbnail_task(&transaction, file_id)?;
         let mut queued = false;
+        let mut should_enqueue = false;
         let task_id = if let Some(existing_pending_task) = existing_pending_task {
             if existing_pending_task.priority < requested_priority {
                 transaction.execute(
@@ -2159,6 +2380,20 @@ impl Database {
                         existing_pending_task.id,
                     ),
                 )?;
+                should_enqueue = true;
+            } else if requested_priority > THUMBNAIL_BACKGROUND_PRIORITY {
+                transaction.execute(
+                    r#"
+                    UPDATE tasks
+                    SET updated_at = ?1,
+                        attempt_generation = attempt_generation + 1
+                    WHERE id = ?2
+                      AND kind = 'thumbnail'
+                      AND status = 'pending'
+                    "#,
+                    (unix_timestamp(), existing_pending_task.id),
+                )?;
+                should_enqueue = true;
             }
             existing_pending_task.id
         } else if let Some(existing_running_task) = existing_running_task {
@@ -2182,6 +2417,7 @@ impl Database {
                     ),
                 )?;
                 queued = true;
+                should_enqueue = true;
                 transaction.last_insert_rowid()
             }
         } else {
@@ -2202,6 +2438,7 @@ impl Database {
                 ),
             )?;
             queued = true;
+            should_enqueue = true;
             transaction.last_insert_rowid()
         };
         if queued {
@@ -2229,9 +2466,11 @@ impl Database {
             thumbnail,
             task_id: Some(task_id),
             queued,
+            should_enqueue,
         })
     }
 
+    #[allow(dead_code)]
     pub fn sync_thumbnail_priority_scope(
         &self,
         root_id: i64,
@@ -2239,6 +2478,23 @@ impl Database {
         visible_file_ids: &[i64],
         ahead_file_ids: &[i64],
     ) -> anyhow::Result<usize> {
+        Ok(self
+            .sync_thumbnail_priority_scope_with_promotions(
+                root_id,
+                selected_file_ids,
+                visible_file_ids,
+                ahead_file_ids,
+            )?
+            .updated)
+    }
+
+    pub fn sync_thumbnail_priority_scope_with_promotions(
+        &self,
+        root_id: i64,
+        selected_file_ids: &[i64],
+        visible_file_ids: &[i64],
+        ahead_file_ids: &[i64],
+    ) -> anyhow::Result<ThumbnailPriorityScopeSyncResult> {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let root_exists: Option<i64> = transaction
@@ -2257,7 +2513,7 @@ impl Database {
         let mut updated = 0;
         let mut statement = transaction.prepare(
             r#"
-            SELECT tasks.id, tasks.file_id, tasks.priority
+            SELECT tasks.id, tasks.file_id, tasks.priority, tasks.status
             FROM tasks
             JOIN files ON files.id = tasks.file_id
             WHERE tasks.kind = 'thumbnail'
@@ -2270,6 +2526,7 @@ impl Database {
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
         let mut pending_tasks = Vec::new();
@@ -2278,7 +2535,8 @@ impl Database {
         }
         drop(statement);
 
-        for (task_id, file_id, current_priority) in pending_tasks {
+        let mut promoted_pending_task_ids = Vec::new();
+        for (task_id, file_id, current_priority, status) in pending_tasks {
             let next_priority = thumbnail_scope_priority_for_file(
                 file_id,
                 &selected_file_ids,
@@ -2299,9 +2557,15 @@ impl Database {
                 "#,
                 (next_priority, now, task_id),
             )?;
+            if status == "pending" && next_priority > current_priority {
+                promoted_pending_task_ids.push(task_id);
+            }
         }
         transaction.commit()?;
-        Ok(updated)
+        Ok(ThumbnailPriorityScopeSyncResult {
+            updated,
+            promoted_pending_task_ids,
+        })
     }
 
     pub fn list_folder_children_page(
@@ -5202,6 +5466,23 @@ fn normalize_media_sort(sort: &str) -> &'static str {
     }
 }
 
+fn media_count_sql(where_clause: &str, include_media_join: bool) -> String {
+    let media_join = if include_media_join {
+        "LEFT JOIN media ON media.file_id = files.id"
+    } else {
+        ""
+    };
+    format!(
+        r#"
+        SELECT COUNT(*)
+        FROM files
+        {media_join}
+        JOIN roots ON roots.id = files.root_id AND roots.enabled = 1
+        WHERE {where_clause}
+        "#
+    )
+}
+
 fn encode_media_cursor(sort: &str, item: &MediaRecord) -> String {
     match sort {
         "name_asc" | "name_desc" => {
@@ -7080,6 +7361,36 @@ mod tests {
         assert_eq!(page.total_count, Some(4));
         assert_eq!(media_names(&page.items), vec!["bravo.jpg", "charlie.jpg"]);
         assert!(page.next_cursor.is_some());
+
+        let root_descendant_page = database
+            .list_media_page(MediaPageQuery {
+                root_id: Some(root_id),
+                folder_id: Some(folder_id),
+                include_descendants: true,
+                limit: 2,
+                offset: Some(1),
+                cursor: None,
+                sort: "name_asc".to_string(),
+                kind: Some("image".to_string()),
+            })
+            .expect("list root descendant offset media page");
+
+        assert_eq!(root_descendant_page.total_count, Some(4));
+        assert_eq!(
+            media_names(&root_descendant_page.items),
+            vec!["bravo.jpg", "charlie.jpg"]
+        );
+        assert!(root_descendant_page.next_cursor.is_some());
+    }
+
+    #[test]
+    fn list_media_count_sql_joins_media_only_for_kind_filter() {
+        let without_kind = media_count_sql("files.status = 'active'", false);
+        assert!(!without_kind.contains("JOIN media"));
+        assert!(!without_kind.contains("media.file_id"));
+
+        let with_kind = media_count_sql("files.status = 'active' AND media.kind = ?", true);
+        assert!(with_kind.contains("LEFT JOIN media ON media.file_id = files.id"));
     }
 
     #[test]
@@ -9255,6 +9566,82 @@ mod tests {
         assert_eq!(ahead_task.priority, THUMBNAIL_AHEAD_PRIORITY);
         assert_eq!(stale_task.priority, THUMBNAIL_BACKGROUND_PRIORITY);
         assert_eq!(running_task.priority, THUMBNAIL_BACKGROUND_PRIORITY);
+    }
+
+    #[test]
+    fn repeated_visible_thumbnail_request_moves_pending_task_to_front_of_same_priority_queue() {
+        let database = migrated_database();
+        let (root_id, folder_id) = seed_media_page_fixture(&database);
+        let first_file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "first-visible.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 10,
+                ctime: None,
+                file_key: Some("first-visible".to_string()),
+            })
+            .expect("insert first visible file");
+        let second_file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "second-visible.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 100,
+                mtime: 11,
+                ctime: None,
+                file_key: Some("second-visible".to_string()),
+            })
+            .expect("insert second visible file");
+        for file_id in [first_file_id, second_file_id] {
+            database
+                .upsert_media_kind(file_id, "image")
+                .expect("insert media kind");
+        }
+
+        let first_task_id = database
+            .request_thumbnail_task(
+                first_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                ThumbnailTaskPriority::Visible,
+            )
+            .expect("queue first visible thumbnail")
+            .task_id
+            .expect("first task id");
+        let second_task = database
+            .request_thumbnail_task(
+                second_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                ThumbnailTaskPriority::Visible,
+            )
+            .expect("queue second visible thumbnail");
+        let second_task_id = second_task.task_id.expect("second task id");
+
+        let repeated = database
+            .request_thumbnail_task(
+                second_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                ThumbnailTaskPriority::Visible,
+            )
+            .expect("repeat second visible thumbnail");
+
+        assert_eq!(repeated.task_id, Some(second_task_id));
+        assert!(
+            repeated.should_enqueue,
+            "same-priority foreground requests must wake the worker because the visible viewport changed"
+        );
+        assert_eq!(
+            database
+                .list_pending_foreground_thumbnail_task_ids()
+                .expect("list foreground thumbnails")
+                .into_iter()
+                .take(2)
+                .collect::<Vec<_>>(),
+            vec![second_task_id, first_task_id]
+        );
     }
 
     #[test]

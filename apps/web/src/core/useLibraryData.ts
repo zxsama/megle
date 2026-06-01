@@ -30,6 +30,7 @@ const INITIAL_MEDIA_WINDOW_LIMIT = 96;
 const MEDIA_WINDOW_MAX_LIMIT = 256;
 const FOLDER_PAGE_LIMIT = 500;
 const SEARCH_DEBOUNCE_MS = 250;
+const INTERACTIVE_FOLDER_SCAN_DEBOUNCE_MS = 300;
 const SCAN_REFRESH_INTERVAL_MS = 800;
 const SELECTED_THUMBNAIL_REPOLL_MS = 150;
 const THUMBNAIL_SCOPE_SYNC_DEBOUNCE_MS = 0;
@@ -66,12 +67,15 @@ export interface LibraryState {
   roots: RootRecord[];
   folders: FolderRecord[];
   media: MediaRecord[];
-  mediaSlots: Array<MediaRecord | undefined>;
+  mediaSlots: Map<number, MediaRecord>;
   mediaTotalCount: number;
   loadedMediaRanges: Array<{ start: number; end: number }>;
   showChildFolderContents: boolean;
+  canNavigateFolderBack: boolean;
+  canNavigateFolderForward: boolean;
   selectedRootId: number | null;
   selectedFolderId: number | null;
+  selectedFolderInfo: FolderRecord | null;
   selectedMediaId: number | null;
   selectedMedia: MediaRecord | null;
   selectedMetadata: UserMetadataRecord | null;
@@ -117,9 +121,13 @@ export interface LibraryState {
   }) => Promise<FileOpResult>;
   setSelectedRootId: (rootId: number) => void;
   setSelectedFolder: (folder: FolderRecord) => void;
+  setSelectedFolderInfo: (folder: FolderRecord | null) => void;
+  navigateFolderBack: () => void;
+  navigateFolderForward: () => void;
   toggleShowChildFolderContents: () => void;
   setSelectedMediaId: (mediaId: number | null) => void;
   toggleFolderExpanded: (folderId: number) => void;
+  requestFolderChildren: (folderId: number) => Promise<FolderRecord[]>;
   requestThumbnailStates: (mediaIds: number[], priority: ThumbnailRequestPriority) => void;
   requestMediaWindow: (startIndex: number, endIndex: number) => void;
   loadMoreFolderChildren: (folderId: number) => Promise<void>;
@@ -156,6 +164,16 @@ type LibrarySelectionScope = {
   folderId?: number | null;
 };
 
+type FolderNavigationEntry = {
+  rootId: number;
+  folderId: number | null;
+};
+
+type FolderNavigationHistory = {
+  entries: FolderNavigationEntry[];
+  index: number;
+};
+
 type ThumbnailPriorityScope = {
   selected: number[];
   visible: number[];
@@ -176,6 +194,18 @@ export function useLibraryData(): LibraryState {
   const inFlightFolderChildPageKeys = useRef<Set<string>>(new Set());
   const loadedFolderChildPageKeys = useRef<Set<string>>(new Set());
   const inFlightFolderDescendantIds = useRef<Set<number>>(new Set());
+  const mediaPageControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const folderChildControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const folderDescendantControllersRef = useRef<Map<number, AbortController>>(new Map());
+  const folderChildInitialRequestsRef = useRef<Map<number, Promise<FolderRecord[]>>>(
+    new Map()
+  );
+  const thumbnailStateControllersRef = useRef<Map<ThumbnailRequestPriority, AbortController>>(
+    new Map()
+  );
+  const loadTasksRequestRef = useRef<Promise<TaskRecord[]> | null>(null);
+  const interactiveFolderScanControllerRef = useRef<AbortController | null>(null);
+  const thumbnailPriorityScopeSyncControllerRef = useRef<AbortController | null>(null);
   const scanRefreshInFlightRef = useRef(false);
   const scanRefreshActiveRootIdRef = useRef<number | null>(null);
   const scanRefreshSelectionVersionRef = useRef(0);
@@ -183,6 +213,8 @@ export function useLibraryData(): LibraryState {
   const [folderChildrenByParent, setFolderChildrenByParent] = useState<Record<number, FolderRecord[]>>(
     {}
   );
+  const folderChildrenByParentRef = useRef(folderChildrenByParent);
+  folderChildrenByParentRef.current = folderChildrenByParent;
   const [folderDescendantsByParent, setFolderDescendantsByParent] = useState<
     Record<number, FolderRecord[]>
   >({});
@@ -198,7 +230,7 @@ export function useLibraryData(): LibraryState {
   );
   const [loadingMoreFolderIds, setLoadingMoreFolderIds] = useState<Set<number>>(() => new Set());
   const [media, setMedia] = useState<MediaRecord[]>([]);
-  const [mediaSlots, setMediaSlots] = useState<Array<MediaRecord | undefined>>([]);
+  const [mediaSlots, setMediaSlots] = useState<Map<number, MediaRecord>>(() => new Map());
   const [mediaTotalCount, setMediaTotalCount] = useState(0);
   const [loadedMediaRanges, setLoadedMediaRanges] = useState<Array<{ start: number; end: number }>>(
     []
@@ -211,6 +243,9 @@ export function useLibraryData(): LibraryState {
     Record<number, ThumbnailResponse>
   >({});
   const thumbnailStateSignaturesByMediaIdRef = useRef<Record<number, string>>({});
+  const thumbnailStateRequestKeyByPriorityRef = useRef<Map<ThumbnailRequestPriority, string>>(
+    new Map()
+  );
   const [mediaNextCursor, setMediaNextCursor] = useState<string | null>(null);
   const mediaHasMore = media.length < mediaTotalCount || mediaNextCursor !== null;
   const [showChildFolderContents, setShowChildFolderContents] = useState<boolean>(() =>
@@ -218,10 +253,17 @@ export function useLibraryData(): LibraryState {
   );
   const [selectedRootId, selectRoot] = useState<number | null>(null);
   const [selectedFolderId, selectFolder] = useState<number | null>(null);
+  const [selectedFolderInfo, setSelectedFolderInfoState] = useState<FolderRecord | null>(null);
   const [selectedMediaId, selectMedia] = useState<number | null>(null);
+  const [folderNavigationHistory, setFolderNavigationHistory] = useState<FolderNavigationHistory>({
+    entries: [],
+    index: -1
+  });
   const selectedRootIdRef = useRef<number | null>(selectedRootId);
   const selectedFolderIdRef = useRef<number | null>(selectedFolderId);
   const selectedMediaIdRef = useRef<number | null>(selectedMediaId);
+  const selectedMediaSnapshotRef = useRef<MediaRecord | null>(null);
+  const folderNavigationHistoryRef = useRef<FolderNavigationHistory>(folderNavigationHistory);
   const thumbnailPriorityScopeRef = useRef<ThumbnailPriorityScope>(emptyThumbnailPriorityScope());
   const thumbnailPriorityScopeSyncKeyRef = useRef<string | null>(null);
   const thumbnailPriorityScopeSyncTimerRef = useRef<number | null>(null);
@@ -243,7 +285,7 @@ export function useLibraryData(): LibraryState {
     minRating: undefined,
     favorite: undefined,
     tagIds: [],
-    sort: "mtime_desc"
+    sort: "name_asc"
   });
   const [debouncedQ, setDebouncedQ] = useState("");
   const [selectedMetadata, setSelectedMetadata] = useState<UserMetadataRecord | null>(null);
@@ -253,7 +295,22 @@ export function useLibraryData(): LibraryState {
   const [recentOpsLoading, setRecentOpsLoading] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | null>(null);
   const [diagnosticsProbed, setDiagnosticsProbed] = useState(false);
-  const mediaById = useMemo(() => new Map(media.map((item) => [item.id, item])), [media]);
+  const loadedMediaById = useMemo(() => {
+    const next = new Map<number, MediaRecord>();
+    media.forEach((item) => next.set(item.id, item));
+    mediaSlots.forEach((item) => {
+      if (item) next.set(item.id, item);
+    });
+    return next;
+  }, [media, mediaSlots]);
+  const mediaById = useMemo(() => {
+    const next = new Map(loadedMediaById);
+    const selectedSnapshot = selectedMediaSnapshotRef.current;
+    if (selectedSnapshot && !next.has(selectedSnapshot.id)) {
+      next.set(selectedSnapshot.id, selectedSnapshot);
+    }
+    return next;
+  }, [loadedMediaById]);
   const mediaByIdRef = useRef(mediaById);
   mediaByIdRef.current = mediaById;
   const tasksRef = useRef(tasks);
@@ -268,8 +325,26 @@ export function useLibraryData(): LibraryState {
       ),
     [mediaById, thumbnailStatesByMediaId]
   );
+  const freshThumbnailStatesByMediaIdRef = useRef(freshThumbnailStatesByMediaId);
+  freshThumbnailStatesByMediaIdRef.current = freshThumbnailStatesByMediaId;
 
-  const selectedMedia = media.find((item) => item.id === selectedMediaId) ?? null;
+  const liveSelectedMedia =
+    selectedMediaId === null ? null : loadedMediaById.get(selectedMediaId) ?? null;
+  if (liveSelectedMedia) {
+    selectedMediaSnapshotRef.current = liveSelectedMedia;
+  } else if (
+    selectedMediaId === null ||
+    selectedMediaSnapshotRef.current?.id !== selectedMediaId
+  ) {
+    selectedMediaSnapshotRef.current = null;
+  }
+  const selectedMedia =
+    selectedMediaId === null
+      ? null
+      : liveSelectedMedia ??
+        (selectedMediaSnapshotRef.current?.id === selectedMediaId
+          ? selectedMediaSnapshotRef.current
+          : null);
   const selectedRoot = roots.find((item) => item.id === selectedRootId) ?? null;
   const selectedThumbnail = selectedMedia
     ? freshThumbnailStatesByMediaId[selectedMedia.id]
@@ -312,6 +387,35 @@ export function useLibraryData(): LibraryState {
   selectedRootIdRef.current = selectedRootId;
   selectedFolderIdRef.current = selectedFolderId;
   selectedMediaIdRef.current = selectedMediaId;
+  folderNavigationHistoryRef.current = folderNavigationHistory;
+
+  const abortStaleMediaPageRequests = useCallback((keepRequestKey?: string) => {
+    if (!keepRequestKey) {
+      abortAllControllers(mediaPageControllersRef.current);
+      inFlightMediaPageKeys.current.clear();
+      return;
+    }
+
+    for (const [requestKey, controller] of mediaPageControllersRef.current) {
+      if (requestKey === keepRequestKey) {
+        continue;
+      }
+      controller.abort();
+      mediaPageControllersRef.current.delete(requestKey);
+      inFlightMediaPageKeys.current.delete(requestKey);
+    }
+  }, []);
+
+  const abortStaleFolderRequests = useCallback(() => {
+    abortAllControllers(folderChildControllersRef.current);
+    abortAllControllers(folderDescendantControllersRef.current);
+    folderChildInitialRequestsRef.current.clear();
+    inFlightFolderChildPageKeys.current.clear();
+    inFlightFolderDescendantIds.current.clear();
+    setLoadingFolderIds(new Set());
+    setLoadingFolderDescendantIds(new Set());
+    setLoadingMoreFolderIds(new Set());
+  }, []);
 
   const flushThumbnailPriorityScopeSync = useCallback(
     async (rootId = selectedRootIdRef.current) => {
@@ -329,17 +433,40 @@ export function useLibraryData(): LibraryState {
         visibleFileIds: thumbnailPriorityScopeRef.current.visible,
         aheadFileIds: thumbnailPriorityScopeRef.current.ahead
       };
+      if (
+        input.selectedFileIds.length === 0 &&
+        input.visibleFileIds.length === 0 &&
+        input.aheadFileIds.length === 0
+      ) {
+        thumbnailPriorityScopeSyncKeyRef.current = null;
+        return;
+      }
       const requestKey = thumbnailPriorityScopeRequestKey(input);
       if (thumbnailPriorityScopeSyncKeyRef.current === requestKey) {
         return;
       }
 
+      thumbnailPriorityScopeSyncControllerRef.current?.abort();
+      const controller = new AbortController();
+      thumbnailPriorityScopeSyncControllerRef.current = controller;
       thumbnailPriorityScopeSyncKeyRef.current = requestKey;
       try {
-        await client.syncThumbnailPriorityScope(input);
+        await client.syncThumbnailPriorityScope(input, {
+          requestPriority: "interactive",
+          signal: controller.signal
+        });
       } catch (cause) {
-        thumbnailPriorityScopeSyncKeyRef.current = null;
+        if (isAbortError(cause)) {
+          return;
+        }
+        if (thumbnailPriorityScopeSyncKeyRef.current === requestKey) {
+          thumbnailPriorityScopeSyncKeyRef.current = null;
+        }
         throw cause;
+      } finally {
+        if (thumbnailPriorityScopeSyncControllerRef.current === controller) {
+          thumbnailPriorityScopeSyncControllerRef.current = null;
+        }
       }
     },
     [client]
@@ -359,8 +486,15 @@ export function useLibraryData(): LibraryState {
       );
       if (thumbnailPriorityScopeSyncTimerRef.current !== null) {
         window.clearTimeout(thumbnailPriorityScopeSyncTimerRef.current);
+        thumbnailPriorityScopeSyncTimerRef.current = null;
       }
       if (selectedRootIdRef.current === null) {
+        return;
+      }
+      if (priority === "selected" || priority === "visible") {
+        void flushThumbnailPriorityScopeSync().catch((cause) => {
+          setError(errorMessage(cause));
+        });
         return;
       }
       thumbnailPriorityScopeSyncTimerRef.current = window.setTimeout(() => {
@@ -372,12 +506,28 @@ export function useLibraryData(): LibraryState {
     [flushThumbnailPriorityScopeSync]
   );
 
+  const abortThumbnailStateControllersForPriority = useCallback(
+    (priority: ThumbnailRequestPriority) => {
+      const priorities: ThumbnailRequestPriority[] =
+        priority === "selected"
+          ? ["selected"]
+          : priority === "visible"
+            ? ["visible", "ahead"]
+            : ["ahead"];
+      for (const targetPriority of priorities) {
+        thumbnailStateControllersRef.current.get(targetPriority)?.abort();
+        thumbnailStateControllersRef.current.delete(targetPriority);
+        thumbnailStateRequestKeyByPriorityRef.current.delete(targetPriority);
+      }
+    },
+    []
+  );
+
   const requestThumbnailStates = useCallback((
     mediaIds: number[],
     priority: ThumbnailRequestPriority
   ) => {
     scheduleThumbnailPriorityScopeSync(priority, mediaIds);
-
     const normalizedMediaIds = normalizeThumbnailScopeMediaIds(
       mediaIds,
       priority,
@@ -389,6 +539,23 @@ export function useLibraryData(): LibraryState {
     if (mediaRecords.length === 0) {
       return;
     }
+    const requestKey = [
+      priority,
+      ...mediaRecords.map((mediaRecord) => mediaContentSignature(mediaRecord))
+    ].join("|");
+    const activeController = thumbnailStateControllersRef.current.get(priority);
+    if (
+      activeController &&
+      !activeController.signal.aborted &&
+      thumbnailStateRequestKeyByPriorityRef.current.get(priority) === requestKey
+    ) {
+      return;
+    }
+
+    abortThumbnailStateControllersForPriority(priority);
+    const controller = new AbortController();
+    thumbnailStateControllersRef.current.set(priority, controller);
+    thumbnailStateRequestKeyByPriorityRef.current.set(priority, requestKey);
 
     const cachedStates = readCachedThumbnailStates(mediaRecords);
     if (Object.keys(cachedStates).length > 0) {
@@ -400,8 +567,9 @@ export function useLibraryData(): LibraryState {
       setThumbnailStatesByMediaId((current) => mergeThumbnailStates(current, cachedStates));
     }
 
+    const pendingRequests: Promise<unknown>[] = [];
     for (const mediaRecord of mediaRecords) {
-      const currentThumbnail = freshThumbnailStatesByMediaId[mediaRecord.id];
+      const currentThumbnail = freshThumbnailStatesByMediaIdRef.current[mediaRecord.id];
       const currentMediaSignature = mediaContentSignature(mediaRecord);
       const effectiveState =
         currentThumbnail?.state ?? explicitMediaThumbnailState(mediaRecord.thumbnailState);
@@ -418,15 +586,19 @@ export function useLibraryData(): LibraryState {
             ...current,
             [mediaRecord.id]: optimisticQueuedThumbnail(mediaRecord.id)
           }));
-          void client
+          const retryRequest = client
             .retryTask(failedTask.id)
-            .then(() => client.listTasks())
+            .then(() => client.listTasks({ signal: controller.signal }))
             .then((response) => {
+              if (controller.signal.aborted) return;
               setTasks(response.items);
               setTaskPollFailures(0);
             })
-            .then(() => requestThumbnailState(mediaRecord, priority))
+            .then(() =>
+              requestThumbnailState(mediaRecord, priority, { signal: controller.signal })
+            )
             .then((thumbnail) => {
+              if (controller.signal.aborted) return;
               setThumbnailStatesByMediaId((current) => ({
                 ...current,
                 [mediaRecord.id]: pickPreferredThumbnailResponse(
@@ -436,22 +608,29 @@ export function useLibraryData(): LibraryState {
               }));
             })
             .catch((cause) => {
+              if (cause instanceof Error && cause.name === "AbortError") {
+                return;
+              }
               setError(errorMessage(cause));
             });
+          pendingRequests.push(retryRequest);
           continue;
         }
       }
       const shouldFetchThumbnail =
+        !currentThumbnail ||
         currentThumbnail?.state === "pending" ||
-        currentThumbnail?.state === "queued" ||
-        shouldRequestThumbnailState(mediaRecord);
+        currentThumbnail?.state === "queued";
       if (!shouldFetchThumbnail) {
         continue;
       }
 
       const requestedMediaSignature = currentMediaSignature;
-      void requestThumbnailState(mediaRecord, priority)
+      const thumbnailRequest = requestThumbnailState(mediaRecord, priority, { signal: controller.signal })
         .then((thumbnail) => {
+          if (controller.signal.aborted) {
+            return;
+          }
           setThumbnailStatesByMediaId((current) => {
             const currentMediaRecord = mediaByIdRef.current.get(mediaRecord.id);
             const currentMediaSignature = currentMediaRecord
@@ -482,6 +661,9 @@ export function useLibraryData(): LibraryState {
           });
         })
         .catch((cause) => {
+          if (cause instanceof Error && cause.name === "AbortError") {
+            return;
+          }
           setThumbnailStatesByMediaId((current) => {
             const currentMediaRecord = mediaByIdRef.current.get(mediaRecord.id);
             const currentMediaSignature = currentMediaRecord
@@ -491,36 +673,88 @@ export function useLibraryData(): LibraryState {
               delete thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id];
               return removeThumbnailState(current, mediaRecord.id);
             }
-            if (cause instanceof Error && cause.name === "AbortError") {
-              return current;
-            }
             delete thumbnailStateSignaturesByMediaIdRef.current[mediaRecord.id];
             return removeThumbnailState(current, mediaRecord.id);
           });
         });
+      pendingRequests.push(thumbnailRequest);
     }
-  }, [client, freshThumbnailStatesByMediaId, scheduleThumbnailPriorityScopeSync]);
+    if (pendingRequests.length === 0) {
+      thumbnailStateControllersRef.current.delete(priority);
+      thumbnailStateRequestKeyByPriorityRef.current.delete(priority);
+      return;
+    }
+    void Promise.allSettled(pendingRequests).finally(() => {
+      if (thumbnailStateRequestKeyByPriorityRef.current.get(priority) !== requestKey) {
+        return;
+      }
+      thumbnailStateControllersRef.current.delete(priority);
+      thumbnailStateRequestKeyByPriorityRef.current.delete(priority);
+    });
+  }, [
+    abortThumbnailStateControllersForPriority,
+    client,
+    scheduleThumbnailPriorityScopeSync
+  ]);
 
   const loadFolderChildren = useCallback(
-    async (folderId: number) => {
-      clearFolderChildPageKeys(loadedFolderChildPageKeys.current, folderId);
+    async (folderId: number, options: { force?: boolean } = {}) => {
+      const force = options.force ?? false;
+      const cachedChildren = folderChildrenByParentRef.current[folderId];
+      if (!force && cachedChildren !== undefined) {
+        return cachedChildren;
+      }
+      const existingRequest = folderChildInitialRequestsRef.current.get(folderId);
+      if (!force && existingRequest) {
+        return existingRequest;
+      }
+      const requestKey = folderChildPageRequestKey(folderId, "initial");
+      if (force) {
+        clearFolderChildPageKeys(loadedFolderChildPageKeys.current, folderId);
+        folderChildControllersRef.current.get(requestKey)?.abort();
+        folderChildInitialRequestsRef.current.delete(folderId);
+      }
+      const controller = new AbortController();
+      folderChildControllersRef.current.set(requestKey, controller);
       setLoadingFolderIds((current) => new Set(current).add(folderId));
-      try {
+
+      const request = (async () => {
         const cursor = null;
         const page = await client.listFolderChildren(folderId, {
           cursor: cursor ?? undefined,
           limit: FOLDER_PAGE_LIMIT
+        }, {
+          signal: controller.signal
         });
-        setFolderChildrenByParent((current) => ({
-          ...current,
+        const nextChildrenByParent = {
+          ...folderChildrenByParentRef.current,
           [folderId]: page.items
-        }));
+        };
+        folderChildrenByParentRef.current = nextChildrenByParent;
+        setFolderChildrenByParent(nextChildrenByParent);
+        loadedFolderChildPageKeys.current.add(requestKey);
         setFolderChildNextCursorByParent((current) => ({
           ...current,
           [folderId]: page.nextCursor
         }));
         return page.items;
+      })();
+
+      folderChildInitialRequestsRef.current.set(folderId, request);
+      try {
+        return await request;
+      } catch (cause) {
+        if (isAbortError(cause)) {
+          return [];
+        }
+        throw cause;
       } finally {
+        if (folderChildControllersRef.current.get(requestKey) === controller) {
+          folderChildControllersRef.current.delete(requestKey);
+        }
+        if (folderChildInitialRequestsRef.current.get(folderId) === request) {
+          folderChildInitialRequestsRef.current.delete(folderId);
+        }
         setLoadingFolderIds((current) => {
           const next = new Set(current);
           next.delete(folderId);
@@ -546,12 +780,16 @@ export function useLibraryData(): LibraryState {
       }
 
       inFlightFolderChildPageKeys.current.add(requestKey);
+      const controller = new AbortController();
+      folderChildControllersRef.current.set(requestKey, controller);
       setLoadingMoreFolderIds((current) => new Set(current).add(folderId));
       setError(null);
       try {
         const page = await client.listFolderChildren(folderId, {
           cursor: cursor ?? undefined,
           limit: FOLDER_PAGE_LIMIT
+        }, {
+          signal: controller.signal
         });
         setFolderChildrenByParent((current) => ({
           ...current,
@@ -563,8 +801,14 @@ export function useLibraryData(): LibraryState {
           [folderId]: page.nextCursor
         }));
       } catch (cause) {
+        if (isAbortError(cause)) {
+          return;
+        }
         setError(errorMessage(cause));
       } finally {
+        if (folderChildControllersRef.current.get(requestKey) === controller) {
+          folderChildControllersRef.current.delete(requestKey);
+        }
         setLoadingMoreFolderIds((current) => {
           const next = new Set(current);
           next.delete(folderId);
@@ -583,32 +827,32 @@ export function useLibraryData(): LibraryState {
       }
 
       inFlightFolderDescendantIds.current.add(folderId);
+      const controller = new AbortController();
+      folderDescendantControllersRef.current.set(folderId, controller);
       setLoadingFolderDescendantIds((current) => new Set(current).add(folderId));
       try {
-        let cursor: string | null = null;
-        let descendants: FolderRecord[] = [];
-        let publishedFirstPage = false;
-        do {
-          const page = await client.listFolderChildren(folderId, {
-            cursor: cursor ?? undefined,
-            includeDescendants: true,
-            limit: FOLDER_PAGE_LIMIT
-          });
-          descendants.push(...page.items);
-          cursor = page.nextCursor;
-          if (!publishedFirstPage || !cursor) {
-            const publishedDescendants = descendants.slice();
-            setFolderDescendantsByParent((current) => ({
-              ...current,
-              [folderId]: publishedDescendants
-            }));
-            publishedFirstPage = true;
-            await yieldToBrowser();
-          }
-        } while (cursor);
-        return descendants;
+        const page = await client.listFolderChildren(folderId, {
+          includeDescendants: true,
+          limit: FOLDER_PAGE_LIMIT
+        }, {
+          signal: controller.signal
+        });
+        setFolderDescendantsByParent((current) => ({
+          ...current,
+          [folderId]: page.items
+        }));
+        await yieldToBrowser();
+        return page.items;
+      } catch (cause) {
+        if (isAbortError(cause)) {
+          return folderDescendantsByParentRef.current[folderId] ?? [];
+        }
+        throw cause;
       } finally {
         inFlightFolderDescendantIds.current.delete(folderId);
+        if (folderDescendantControllersRef.current.get(folderId) === controller) {
+          folderDescendantControllersRef.current.delete(folderId);
+        }
         setLoadingFolderDescendantIds((current) => {
           const next = new Set(current);
           next.delete(folderId);
@@ -617,6 +861,60 @@ export function useLibraryData(): LibraryState {
       }
     },
     [client]
+  );
+
+  const updateFolderNavigationHistory = useCallback(
+    (updater: (current: FolderNavigationHistory) => FolderNavigationHistory) => {
+      setFolderNavigationHistory((current) => {
+        const next = updater(current);
+        folderNavigationHistoryRef.current = next;
+        return next;
+      });
+    },
+    []
+  );
+
+  const initializeFolderNavigationHistory = useCallback(
+    (entry: FolderNavigationEntry | null) => {
+      if (!entry) {
+        return;
+      }
+      updateFolderNavigationHistory((current) => {
+        if (current.index >= 0 && current.entries.length > 0) {
+          return current;
+        }
+        return { entries: [entry], index: 0 };
+      });
+    },
+    [updateFolderNavigationHistory]
+  );
+
+  const pushFolderNavigationEntry = useCallback(
+    (entry: FolderNavigationEntry) => {
+      updateFolderNavigationHistory((current) => {
+        const activeEntry = current.entries[current.index];
+        if (sameFolderNavigationEntry(activeEntry, entry)) {
+          return current;
+        }
+        const entries =
+          current.index >= 0 ? current.entries.slice(0, current.index + 1) : [];
+        entries.push(entry);
+        return { entries, index: entries.length - 1 };
+      });
+    },
+    [updateFolderNavigationHistory]
+  );
+
+  const setFolderNavigationIndex = useCallback(
+    (index: number) => {
+      updateFolderNavigationHistory((current) => {
+        if (index < 0 || index >= current.entries.length || index === current.index) {
+          return current;
+        }
+        return { ...current, index };
+      });
+    },
+    [updateFolderNavigationHistory]
   );
 
   const loadRoots = useCallback(async (scope?: LibrarySelectionScope) => {
@@ -634,14 +932,31 @@ export function useLibraryData(): LibraryState {
     selectedRootIdRef.current = nextRootId;
     selectedFolderIdRef.current = nextFolderId;
     selectFolder(nextFolderId);
+    initializeFolderNavigationHistory(
+      nextRootId === null ? null : { rootId: nextRootId, folderId: nextFolderId }
+    );
     return { roots: response.items, selectedRoot: nextRoot ?? null, selectedFolderId: nextFolderId };
-  }, [client]);
+  }, [client, initializeFolderNavigationHistory]);
 
   const loadTasks = useCallback(async () => {
-    const response = await client.listTasks();
-    setTasks(response.items);
-    setTaskPollFailures(0);
-    return response.items;
+    if (loadTasksRequestRef.current) {
+      return loadTasksRequestRef.current;
+    }
+
+    const request = client
+      .listTasks()
+      .then((response) => {
+        setTasks(response.items);
+        setTaskPollFailures(0);
+        return response.items;
+      })
+      .finally(() => {
+        if (loadTasksRequestRef.current === request) {
+          loadTasksRequestRef.current = null;
+        }
+      });
+    loadTasksRequestRef.current = request;
+    return request;
   }, [client]);
 
   const createScanRefreshSelectionToken = useCallback((): ScanRefreshSelectionToken | null => {
@@ -672,10 +987,13 @@ export function useLibraryData(): LibraryState {
       cursor?: string;
       offset?: number;
       limit: number;
+      signal?: AbortSignal;
     }) => {
       const sort = searchStateRef.current.sort;
       return searchActiveRef.current
-        ? client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, scope))
+        ? client.searchMedia(buildSearchParams(searchStateRef.current, debouncedQRef.current, scope), {
+            signal: scope.signal
+          })
         : client.listMedia({
             cursor: scope.cursor,
             folderId: scope.folderId,
@@ -684,6 +1002,8 @@ export function useLibraryData(): LibraryState {
             offset: scope.offset,
             rootId: scope.rootId,
             sort: listMediaSort(sort)
+          }, {
+            signal: scope.signal
           });
     },
     [client]
@@ -699,14 +1019,19 @@ export function useLibraryData(): LibraryState {
       requestGeneration: number;
       selectFirst?: boolean;
     }) => {
+      if (scope.requestGeneration !== mediaPageGeneration.current) {
+        return;
+      }
       const offset = Math.max(0, scope.offset);
       const limit = Math.max(1, Math.min(MEDIA_WINDOW_MAX_LIMIT, scope.limit));
       const requestKey = mediaPageRequestKey(
         scope.rootId,
         scope.folderId,
         `offset:${offset}:${limit}`,
-        scope.includeDescendants
+        scope.includeDescendants,
+        scope.requestGeneration
       );
+      abortStaleMediaPageRequests(requestKey);
       if (
         inFlightMediaPageKeys.current.has(requestKey) ||
         loadedMediaPageKeys.current.has(requestKey)
@@ -715,6 +1040,8 @@ export function useLibraryData(): LibraryState {
       }
 
       inFlightMediaPageKeys.current.add(requestKey);
+      const controller = new AbortController();
+      mediaPageControllersRef.current.set(requestKey, controller);
       setLoadingMoreMedia(true);
       try {
         const mediaPage = await loadMediaPage({
@@ -722,7 +1049,8 @@ export function useLibraryData(): LibraryState {
           includeDescendants: scope.includeDescendants,
           limit,
           offset,
-          rootId: scope.rootId
+          rootId: scope.rootId,
+          signal: controller.signal
         });
         if (scope.requestGeneration !== mediaPageGeneration.current) {
           return;
@@ -742,25 +1070,27 @@ export function useLibraryData(): LibraryState {
         loadedMediaPageKeys.current.add(requestKey);
         setMediaNextCursor(mediaPage.nextCursor);
         if (scope.selectFirst) {
-          selectMedia((current) =>
-            current && mediaPage.items.some((item) => item.id === current)
-              ? current
-              : mediaPage.items[0]?.id ?? null
-          );
+          selectMedia((current) => current ?? mediaPage.items[0]?.id ?? null);
         }
         await yieldToBrowser();
       } catch (cause) {
+        if (isAbortError(cause)) {
+          return;
+        }
         if (scope.requestGeneration === mediaPageGeneration.current) {
           setError(errorMessage(cause));
         }
       } finally {
+        if (mediaPageControllersRef.current.get(requestKey) === controller) {
+          mediaPageControllersRef.current.delete(requestKey);
+        }
         inFlightMediaPageKeys.current.delete(requestKey);
         if (scope.requestGeneration === mediaPageGeneration.current) {
-          setLoadingMoreMedia(false);
+          setLoadingMoreMedia(mediaPageControllersRef.current.size > 0);
         }
       }
     },
-    [loadMediaPage]
+    [abortStaleMediaPageRequests, loadMediaPage]
   );
 
   const requestMediaWindow = useCallback(
@@ -811,6 +1141,7 @@ export function useLibraryData(): LibraryState {
       setLoadingState?: boolean;
     }) => {
       const requestGeneration = ++mediaPageGeneration.current;
+      abortStaleMediaPageRequests();
       const rootId = scope?.rootId ?? selectedRootId;
       const setLoadingState = scope?.setLoadingState ?? false;
       if (setLoadingState) {
@@ -846,7 +1177,7 @@ export function useLibraryData(): LibraryState {
       inFlightMediaPageKeys.current.clear();
       loadedMediaPageKeys.current.clear();
       setMedia([]);
-      setMediaSlots([]);
+      setMediaSlots(new Map());
       setMediaTotalCount(0);
       setLoadedMediaRanges([]);
       setMediaNextCursor(null);
@@ -886,6 +1217,7 @@ export function useLibraryData(): LibraryState {
     [
       isCurrentScanRefreshSelection,
       loadMediaWindow,
+      abortStaleMediaPageRequests,
       roots,
       selectedFolderId,
       selectedRootId
@@ -922,11 +1254,6 @@ export function useLibraryData(): LibraryState {
         return;
       }
       await loadFolderChildren(folderId);
-      if (showChildFolderContentsRef.current) {
-        void loadFolderDescendants(folderId).catch((cause) => {
-          setError(errorMessage(cause));
-        });
-      }
       if (!isCurrentScanRefreshSelection(selectionToken)) {
         return;
       }
@@ -950,7 +1277,6 @@ export function useLibraryData(): LibraryState {
     createScanRefreshSelectionToken,
     isCurrentScanRefreshSelection,
     loadFolderChildren,
-    loadFolderDescendants,
     loadRoots,
     loadTasks,
     reloadCurrentMedia
@@ -958,6 +1284,8 @@ export function useLibraryData(): LibraryState {
 
   const loadLibrary = useCallback(async (scope?: LibrarySelectionScope) => {
     const requestGeneration = ++mediaPageGeneration.current;
+    abortStaleMediaPageRequests();
+    abortStaleFolderRequests();
     inFlightMediaPageKeys.current.clear();
     loadedMediaPageKeys.current.clear();
     setLoading(true);
@@ -976,11 +1304,6 @@ export function useLibraryData(): LibraryState {
       if (folderId) {
         setExpandedFolderIds((current) => new Set(current).add(folderId));
         await loadFolderChildren(folderId);
-        if (includeDescendants) {
-          void loadFolderDescendants(folderId).catch((cause) => {
-            setError(errorMessage(cause));
-          });
-        }
       } else {
         setFolderChildrenByParent({});
         setFolderDescendantsByParent({});
@@ -990,7 +1313,7 @@ export function useLibraryData(): LibraryState {
       if (root) {
         const folderFilter = folderId !== null && folderId !== undefined ? folderId : undefined;
         setMedia([]);
-        setMediaSlots([]);
+      setMediaSlots(new Map());
         setMediaTotalCount(0);
         setLoadedMediaRanges([]);
         setMediaNextCursor(null);
@@ -1005,7 +1328,7 @@ export function useLibraryData(): LibraryState {
         });
       } else {
         setMedia([]);
-        setMediaSlots([]);
+        setMediaSlots(new Map());
         setMediaTotalCount(0);
         setLoadedMediaRanges([]);
         setMediaNextCursor(null);
@@ -1018,8 +1341,9 @@ export function useLibraryData(): LibraryState {
     }
   }, [
     loadMediaWindow,
+    abortStaleFolderRequests,
+    abortStaleMediaPageRequests,
     loadFolderChildren,
-    loadFolderDescendants,
     loadRoots,
     loadTasks
   ]);
@@ -1034,6 +1358,12 @@ export function useLibraryData(): LibraryState {
         window.clearTimeout(thumbnailPriorityScopeSyncTimerRef.current);
         thumbnailPriorityScopeSyncTimerRef.current = null;
       }
+      abortAllControllers(mediaPageControllersRef.current);
+      abortAllControllers(folderChildControllersRef.current);
+      abortAllControllers(folderDescendantControllersRef.current);
+      abortAllControllers(thumbnailStateControllersRef.current);
+      interactiveFolderScanControllerRef.current?.abort();
+      thumbnailPriorityScopeSyncControllerRef.current?.abort();
     };
   }, []);
 
@@ -1124,12 +1454,14 @@ export function useLibraryData(): LibraryState {
 
   useEffect(() => {
     if (!selectedMedia) {
+      abortThumbnailStateControllersForPriority("selected");
       scheduleThumbnailPriorityScopeSync("selected", []);
       return;
     }
     requestThumbnailStates([selectedMedia.id], "selected");
   }, [
     requestThumbnailStates,
+    abortThumbnailStateControllersForPriority,
     scheduleThumbnailPriorityScopeSync,
     selectedMedia,
     selectedMediaThumbnailRequestKey
@@ -1153,6 +1485,8 @@ export function useLibraryData(): LibraryState {
   ]);
 
   useEffect(() => {
+    interactiveFolderScanControllerRef.current?.abort();
+    interactiveFolderScanControllerRef.current = null;
     if (selectedFolderId === null) {
       pendingInteractiveScanRequestRef.current = null;
       return;
@@ -1188,14 +1522,32 @@ export function useLibraryData(): LibraryState {
     };
 
     let cancelled = false;
-    void client.enqueueInteractiveFolderScan(selectedFolderId).catch((cause) => {
-      if (!cancelled) {
-        pendingInteractiveScanRequestRef.current = null;
-        setError(errorMessage(cause));
+    const controller = new AbortController();
+    interactiveFolderScanControllerRef.current = controller;
+    const timer = window.setTimeout(() => {
+      if (
+        cancelled ||
+        selectedRootIdRef.current !== rootId ||
+        selectedFolderIdRef.current !== selectedFolderId
+      ) {
+        return;
       }
-    });
+      void client
+        .enqueueInteractiveFolderScan(selectedFolderId, { signal: controller.signal })
+        .catch((cause) => {
+          if (!cancelled && !isAbortError(cause)) {
+            pendingInteractiveScanRequestRef.current = null;
+            setError(errorMessage(cause));
+          }
+        });
+    }, INTERACTIVE_FOLDER_SCAN_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
+      controller.abort();
+      if (interactiveFolderScanControllerRef.current === controller) {
+        interactiveFolderScanControllerRef.current = null;
+      }
     };
   }, [client, selectedFolderId, selectedRoot?.rootFolderId]);
 
@@ -1305,19 +1657,74 @@ export function useLibraryData(): LibraryState {
   const prepareNavigationMediaReload = useCallback(() => {
     mediaPageGeneration.current += 1;
     scanRefreshSelectionVersionRef.current += 1;
+    abortStaleMediaPageRequests();
+    abortStaleFolderRequests();
+    abortAllControllers(thumbnailStateControllersRef.current);
+    thumbnailPriorityScopeSyncControllerRef.current?.abort();
+    thumbnailPriorityScopeSyncControllerRef.current = null;
+    if (thumbnailPriorityScopeSyncTimerRef.current !== null) {
+      window.clearTimeout(thumbnailPriorityScopeSyncTimerRef.current);
+      thumbnailPriorityScopeSyncTimerRef.current = null;
+    }
     setScanRefreshFailures(0);
     setLoading(true);
     setLoadingMoreMedia(false);
     setError(null);
     setMedia([]);
     setMediaNextCursor(null);
+    setSelectedFolderInfoState(null);
     selectMedia(null);
     thumbnailPriorityScopeRef.current = emptyThumbnailPriorityScope();
     thumbnailPriorityScopeSyncKeyRef.current = null;
-    void flushThumbnailPriorityScopeSync().catch((cause) => {
-      setError(errorMessage(cause));
-    });
-  }, [flushThumbnailPriorityScopeSync]);
+  }, [abortStaleFolderRequests, abortStaleMediaPageRequests]);
+
+  const selectLibraryFolder = useCallback(
+    (entry: FolderNavigationEntry, options?: { recordHistory?: boolean }) => {
+      const recordHistory = options?.recordHistory ?? true;
+      prepareNavigationMediaReload();
+      selectedRootIdRef.current = entry.rootId;
+      selectedFolderIdRef.current = entry.folderId;
+      selectRoot(entry.rootId);
+      selectFolder(entry.folderId);
+      if (recordHistory) {
+        pushFolderNavigationEntry(entry);
+      }
+      if (entry.folderId !== null) {
+        setExpandedFolderIds((current) => new Set(current).add(entry.folderId as number));
+        void loadFolderChildren(entry.folderId).catch((cause) => {
+          setError(errorMessage(cause));
+        });
+      }
+      void reloadCurrentMedia({
+        rootId: entry.rootId,
+        folderId: entry.folderId,
+        includeDescendants: showChildFolderContentsRef.current,
+        setLoadingState: true
+      }).catch((cause) => {
+        setError(errorMessage(cause));
+      });
+    },
+    [
+      loadFolderChildren,
+      prepareNavigationMediaReload,
+      pushFolderNavigationEntry,
+      reloadCurrentMedia
+    ]
+  );
+
+  const navigateFolderHistory = useCallback(
+    (direction: -1 | 1) => {
+      const history = folderNavigationHistoryRef.current;
+      const nextIndex = history.index + direction;
+      const entry = history.entries[nextIndex];
+      if (!entry) {
+        return;
+      }
+      setFolderNavigationIndex(nextIndex);
+      selectLibraryFolder(entry, { recordHistory: false });
+    },
+    [selectLibraryFolder, setFolderNavigationIndex]
+  );
 
   const addRoot = useCallback(
     async (path: string) => {
@@ -1837,8 +2244,13 @@ export function useLibraryData(): LibraryState {
     mediaTotalCount,
     loadedMediaRanges,
     showChildFolderContents,
+    canNavigateFolderBack: folderNavigationHistory.index > 0,
+    canNavigateFolderForward:
+      folderNavigationHistory.index >= 0 &&
+      folderNavigationHistory.index < folderNavigationHistory.entries.length - 1,
     selectedRootId,
     selectedFolderId,
+    selectedFolderInfo,
     selectedMediaId,
     selectedMedia,
     selectedMetadata,
@@ -1877,59 +2289,21 @@ export function useLibraryData(): LibraryState {
     setSelectedRootId: (rootId: number) => {
       const root = roots.find((item) => item.id === rootId);
       const rootFolderId = root?.rootFolderId ?? null;
-      prepareNavigationMediaReload();
-      selectedRootIdRef.current = rootId;
-      selectedFolderIdRef.current = rootFolderId;
-      selectRoot(rootId);
-      selectFolder(rootFolderId);
-      if (rootFolderId) {
-        setExpandedFolderIds((current) => new Set(current).add(rootFolderId));
-        void loadFolderChildren(rootFolderId);
-        if (showChildFolderContentsRef.current) {
-          void loadFolderDescendants(rootFolderId).catch((cause) => {
-            setError(errorMessage(cause));
-          });
-        }
-      }
-      void reloadCurrentMedia({
-        rootId,
-        folderId: rootFolderId,
-        includeDescendants: showChildFolderContentsRef.current,
-        setLoadingState: true
-      }).catch((cause) => {
-        setError(errorMessage(cause));
-      });
+      selectLibraryFolder({ rootId, folderId: rootFolderId });
     },
     setSelectedFolder: (folder: FolderRecord) => {
-      prepareNavigationMediaReload();
-      selectedRootIdRef.current = folder.rootId;
-      selectedFolderIdRef.current = folder.id;
-      selectRoot(folder.rootId);
-      selectFolder(folder.id);
-      void loadFolderChildren(folder.id);
-      if (showChildFolderContentsRef.current) {
-        void loadFolderDescendants(folder.id).catch((cause) => {
-          setError(errorMessage(cause));
-        });
-      }
-      void reloadCurrentMedia({
-        rootId: folder.rootId,
-        folderId: folder.id,
-        includeDescendants: showChildFolderContentsRef.current,
-        setLoadingState: true
-      }).catch((cause) => {
-        setError(errorMessage(cause));
-      });
+      selectLibraryFolder({ rootId: folder.rootId, folderId: folder.id });
     },
+    setSelectedFolderInfo: (folder: FolderRecord | null) => {
+      setSelectedFolderInfoState(folder);
+      selectMedia(null);
+    },
+    navigateFolderBack: () => navigateFolderHistory(-1),
+    navigateFolderForward: () => navigateFolderHistory(1),
     toggleShowChildFolderContents: () => {
       const nextShowChildFolderContents = !showChildFolderContentsRef.current;
       showChildFolderContentsRef.current = nextShowChildFolderContents;
       setShowChildFolderContents(nextShowChildFolderContents);
-      if (nextShowChildFolderContents && selectedFolderIdRef.current !== null) {
-        void loadFolderDescendants(selectedFolderIdRef.current).catch((cause) => {
-          setError(errorMessage(cause));
-        });
-      }
       prepareNavigationMediaReload();
       void reloadCurrentMedia({
         rootId: selectedRootIdRef.current ?? undefined,
@@ -1940,9 +2314,15 @@ export function useLibraryData(): LibraryState {
         setError(errorMessage(cause));
       });
     },
-    setSelectedMediaId: selectMedia,
+    setSelectedMediaId: (mediaId: number | null) => {
+      if (mediaId !== null) {
+        setSelectedFolderInfoState(null);
+      }
+      selectMedia(mediaId);
+    },
     requestThumbnailStates,
     requestMediaWindow,
+    requestFolderChildren: loadFolderChildren,
     toggleFolderExpanded: (folderId: number) => {
       setExpandedFolderIds((current) => {
         const next = new Set(current);
@@ -1950,7 +2330,9 @@ export function useLibraryData(): LibraryState {
           next.delete(folderId);
         } else {
           next.add(folderId);
-          void loadFolderChildren(folderId);
+          void loadFolderChildren(folderId).catch((cause) => {
+            setError(errorMessage(cause));
+          });
         }
         return next;
       });
@@ -2001,6 +2383,13 @@ function appendUniqueMedia(current: MediaRecord[], incoming: MediaRecord[]): Med
   return changed ? next : current;
 }
 
+function sameFolderNavigationEntry(
+  left: FolderNavigationEntry | undefined,
+  right: FolderNavigationEntry
+): boolean {
+  return Boolean(left && left.rootId === right.rootId && left.folderId === right.folderId);
+}
+
 function mergeLoadedMediaRanges(
   current: Array<{ start: number; end: number }>,
   start: number,
@@ -2044,24 +2433,16 @@ function firstMissingMediaRange(
 }
 
 function applyMediaWindowToSlots(
-  current: Array<MediaRecord | undefined>,
+  current: Map<number, MediaRecord>,
   totalCount: number,
   offset: number,
   items: MediaRecord[]
-): Array<MediaRecord | undefined> {
-  const next = current.length === totalCount
-    ? current.slice()
-    : new Array<MediaRecord | undefined>(totalCount);
-  if (current.length > 0 && current.length !== totalCount) {
-    const copyLength = Math.min(current.length, totalCount);
-    for (let index = 0; index < copyLength; index += 1) {
-      next[index] = current[index];
-    }
-  }
+): Map<number, MediaRecord> {
+  const next = new Map(current);
   items.forEach((item, index) => {
     const targetIndex = offset + index;
     if (targetIndex >= 0 && targetIndex < totalCount) {
-      next[targetIndex] = item;
+      next.set(targetIndex, item);
     }
   });
   return next;
@@ -2073,13 +2454,31 @@ function yieldToBrowser(): Promise<void> {
   });
 }
 
+function abortAllControllers<K>(controllers: Map<K, AbortController>): void {
+  for (const controller of controllers.values()) {
+    controller.abort();
+  }
+  controllers.clear();
+}
+
+function isAbortError(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === "AbortError";
+}
+
 function mediaPageRequestKey(
   rootId: number,
   folderId: number | undefined,
   cursor: string,
-  includeDescendants = false
+  includeDescendants = false,
+  generation?: number
 ): string {
-  return [rootId, folderId ?? "root", includeDescendants ? "recursive" : "direct", cursor].join(":");
+  return [
+    generation ?? "current",
+    rootId,
+    folderId ?? "root",
+    includeDescendants ? "recursive" : "direct",
+    cursor
+  ].join(":");
 }
 
 function folderChildPageRequestKey(folderId: number, cursor: string): string {

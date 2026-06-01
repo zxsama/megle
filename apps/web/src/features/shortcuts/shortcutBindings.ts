@@ -9,7 +9,8 @@ export type ShortcutActionId =
   | "previewNext"
   | "previewPrevious"
   | "zoomIn"
-  | "zoomOut";
+  | "zoomOut"
+  | "toggleSidebars";
 
 export interface ShortcutActionDefinition {
   id: ShortcutActionId;
@@ -31,7 +32,8 @@ export const DEFAULT_SHORTCUT_ACTIONS: ShortcutActionDefinition[] = [
   { id: "previewNext", label: "Preview next", defaultBinding: "ArrowRight" },
   { id: "previewPrevious", label: "Preview previous", defaultBinding: "ArrowLeft" },
   { id: "zoomIn", label: "Zoom in", defaultBinding: "Ctrl+=" },
-  { id: "zoomOut", label: "Zoom out", defaultBinding: "Ctrl+-" }
+  { id: "zoomOut", label: "Zoom out", defaultBinding: "Ctrl+-" },
+  { id: "toggleSidebars", label: "Toggle sidebars", defaultBinding: "Tab" }
 ];
 
 export const DEFAULT_SHORTCUT_BINDINGS: ShortcutBindings = Object.fromEntries(

@@ -1,14 +1,17 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { KeyboardEvent, ReactNode } from "react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import {
   mediaContentSignature,
+  mediaFileContentSignature,
   preloadImageObjectUrl,
   previewPlaceholderDataUrl,
+  prefetchOriginalPreview,
   readCachedThumbnailObjectUrl,
   rememberThumbnailObjectUrl,
+  requestOriginalPreviewBlob,
   requestThumbnailBlob,
   thumbnailObjectUrlCacheKey,
   type ThumbnailRequestPriority
@@ -26,22 +29,58 @@ import {
 } from "./layoutGeometry";
 
 const AHEAD_THUMBNAIL_ROW_COUNT = 4;
-const FOREGROUND_THUMBNAIL_REPOLL_MS = 250;
-const VISIBLE_PRIORITY_ITEM_LIMIT = 10;
+const VISIBLE_THUMBNAIL_REPOLL_MS = 150;
+const AHEAD_THUMBNAIL_REPOLL_MS = 1000;
 const AHEAD_PRIORITY_ITEM_LIMIT = 10;
+const ORIGINAL_FALLBACK_OBJECT_URL_CACHE_LIMIT = 128;
 const SECTION_HEADER_HEIGHT = 32;
+const CONTENT_HEADER_TOP_GAP = 24;
+const CONTENT_SECTION_HEADER_HEIGHT = SECTION_HEADER_HEIGHT + CONTENT_HEADER_TOP_GAP;
 const EMPTY_ROW_HEIGHT = 132;
+const PROGRESSIVE_EXACT_LAYOUT_PAGE_SIZE = 96;
 const LIST_WINDOW_ROW_HEIGHT_PX = 104;
 const LIST_WINDOW_FRAME_HEIGHT_PX = 90;
 const LIST_WINDOW_THUMBNAIL_WIDTH_PX = 108;
 const LIST_WINDOW_THUMBNAIL_HEIGHT_PX = 72;
 const WINDOWED_MEDIA_COUNT_THRESHOLD = 1000;
+const ORIGINAL_FALLBACK_IMAGE_EXTENSIONS = new Set([
+  "avif",
+  "bmp",
+  "gif",
+  "jpeg",
+  "jpg",
+  "png",
+  "tif",
+  "tiff",
+  "webp"
+]);
 const scrollPositionByKey = new Map<string, number>();
+const originalFallbackObjectUrlCache = new Map<string, string>();
 const EMPTY_MEDIA_ITEMS: MediaRecord[] = [];
 type MediaGridCssVariables = CSSProperties & {
   "--library-tile-label-gap": string;
   "--library-tile-label-visible-height": string;
+  "--subfolder-edge-shadow-alpha": string;
+  "--subfolder-label-gap": string;
+  "--subfolder-label-height": string;
+  "--subfolder-label-visible-height": string;
+  "--subfolder-cover-height": string;
+  "--subfolder-row-gap": string;
+  "--subfolder-tile-gap": string;
 };
+
+function measureVirtualGridViewport(element: HTMLElement) {
+  const style = window.getComputedStyle(element);
+  const horizontalPadding =
+    Number.parseFloat(style.paddingLeft || "0") + Number.parseFloat(style.paddingRight || "0");
+  const verticalPadding =
+    Number.parseFloat(style.paddingTop || "0") + Number.parseFloat(style.paddingBottom || "0");
+
+  return {
+    height: Math.max(0, element.clientHeight - verticalPadding),
+    width: Math.max(0, element.clientWidth - horizontalPadding)
+  };
+}
 
 type VirtualSegment =
   | { type: "folder-header"; size: number }
@@ -49,6 +88,17 @@ type VirtualSegment =
   | { type: "content-header"; size: number }
   | { type: "empty"; size: number }
   | { type: "media-row"; mediaSegmentIndex: number; size: number };
+
+interface VirtualSectionLayout {
+  contentHeaderIndex: number;
+  emptyIndex: number;
+  folderHeaderIndex: number;
+  folderRowCount: number;
+  folderRowStartIndex: number;
+  mediaRowCount: number;
+  mediaRowStartIndex: number;
+  totalCount: number;
+}
 
 interface MediaWindowGeometry {
   contentWidth: number;
@@ -64,6 +114,7 @@ interface FolderWindowGeometry {
   coverHeight: number;
   frameHeight: number;
   rowCount: number;
+  rowGap: number;
   rowHeight: number;
   tileWidth: number;
   totalSize: number;
@@ -86,7 +137,7 @@ interface MediaGridProps {
   gridPreferences: LibraryGridPreferences;
   items: MediaRecord[];
   layoutMode: LibraryLayoutMode;
-  mediaSlots?: Array<MediaRecord | undefined>;
+  mediaSlots?: Map<number, MediaRecord>;
   totalCount?: number;
   selectedMediaId: number | null;
   loading: boolean;
@@ -158,14 +209,17 @@ function buildFolderWindowGeometry({
   const columnCount = Math.max(1, Math.floor((contentWidth + gap) / (tileMinWidth + gap)));
   const tileWidth = Math.max(1, Math.floor((contentWidth - gap * (columnCount - 1)) / columnCount));
   const coverHeight = Math.round(tileWidth * 4 / 3);
-  const frameHeight = coverHeight + labelHeight;
-  const rowHeight = frameHeight + gap;
+  const contentInsetY = Math.max(24, Math.round(gap * 3));
+  const frameHeight = coverHeight + labelHeight + contentInsetY;
+  const rowGap = Math.max(3, Math.round(gap * 0.35));
+  const rowHeight = frameHeight + rowGap;
   const rowCount = Math.ceil(Math.max(0, count) / columnCount);
   return {
     columnCount,
     coverHeight,
     frameHeight,
     rowCount,
+    rowGap,
     rowHeight,
     tileWidth,
     totalSize: rowCount * rowHeight
@@ -198,6 +252,7 @@ export function MediaGrid({
   const previousMediaOffsetRef = useRef(0);
   const scrollPersistenceUnlockedRef = useRef(false);
   const restoringScrollRef = useRef(false);
+  const lastRestoredScrollKeyRef = useRef<string | undefined>(undefined);
   const [viewportSize, setViewportSize] = useState({ height: 0, width: 0 });
   const [scrollTop, setScrollTop] = useState(savedScrollTop);
 
@@ -206,12 +261,10 @@ export function MediaGrid({
     if (!element) return;
 
     scrollPersistenceUnlockedRef.current = false;
-    const observer = new ResizeObserver(([entry]) => {
-      setViewportSize({
-        height: entry.contentRect.height,
-        width: entry.contentRect.width
-      });
-    });
+    const updateViewportSize = () => {
+      setViewportSize(measureVirtualGridViewport(element));
+    };
+    const observer = new ResizeObserver(updateViewportSize);
     observer.observe(element);
 
     const unlockScrollPersistence = () => {
@@ -220,7 +273,10 @@ export function MediaGrid({
     const updateScrollTop = () => {
       const nextScrollTop = element.scrollTop;
       setScrollTop(nextScrollTop);
-      if (scrollPositionKey && !restoringScrollRef.current && scrollPersistenceUnlockedRef.current) {
+      if (!restoringScrollRef.current) {
+        scrollPersistenceUnlockedRef.current = true;
+      }
+      if (scrollPositionKey && !restoringScrollRef.current) {
         scrollPositionByKey.set(scrollPositionKey, nextScrollTop);
       }
     };
@@ -229,7 +285,7 @@ export function MediaGrid({
     element.addEventListener("wheel", unlockScrollPersistence, { passive: true });
     element.addEventListener("pointerdown", unlockScrollPersistence, { passive: true });
     element.addEventListener("keydown", unlockScrollPersistence);
-    setViewportSize({ height: element.clientHeight, width: element.clientWidth });
+    updateViewportSize();
     setScrollTop(savedScrollTop);
     if (scrollPositionKey) {
       scrollPositionByKey.set(scrollPositionKey, savedScrollTop);
@@ -245,10 +301,16 @@ export function MediaGrid({
   }, [savedScrollTop, scrollPositionKey]);
 
   const mediaItemCount = Math.max(items.length, totalCount ?? items.length);
+  const windowedLayoutMode = layoutMode === "grid" || layoutMode === "list";
   const windowedMedia =
     mediaSlots !== undefined &&
+    windowedLayoutMode &&
     (mediaItemCount > items.length || mediaItemCount > WINDOWED_MEDIA_COUNT_THRESHOLD);
-  const layoutItems = windowedMedia ? EMPTY_MEDIA_ITEMS : items;
+  const orderedLoadedMedia = useMemo(
+    () => (mediaSlots !== undefined ? compactMediaSlots(mediaSlots) : items),
+    [items, mediaSlots]
+  );
+  const layoutItems = windowedMedia ? EMPTY_MEDIA_ITEMS : orderedLoadedMedia;
   const layout = useMemo(
     () =>
       buildLayoutGeometry({
@@ -286,16 +348,16 @@ export function MediaGrid({
     () =>
       buildFolderWindowGeometry({
         count: folderSection && !folderSection.collapsed ? folderSection.itemCount : 0,
-        gap: gridPreferences.tileGap,
-        labelHeight: gridPreferences.tileLabelHeight,
+        gap: gridPreferences.folderTileGap,
+        labelHeight: gridPreferences.folderTileLabelHeight,
         tileMinWidth: workbenchLayout.tileMinWidth,
         viewportWidth: viewportSize.width
       }),
     [
       folderSection?.collapsed,
       folderSection?.itemCount,
-      gridPreferences.tileGap,
-      gridPreferences.tileLabelHeight,
+      gridPreferences.folderTileGap,
+      gridPreferences.folderTileLabelHeight,
       viewportSize.width
     ]
   );
@@ -303,15 +365,29 @@ export function MediaGrid({
   const folderHeaderHeight = folderSectionVisible ? SECTION_HEADER_HEIGHT : 0;
   const folderGridOffset = folderHeaderHeight;
   const contentHeaderOffset = folderGridOffset + folderWindow.totalSize;
-  const contentHeaderHeight = contentHeader ? SECTION_HEADER_HEIGHT : 0;
+  const contentHeaderHeight = contentHeader
+    ? folderSectionVisible
+      ? CONTENT_SECTION_HEADER_HEIGHT
+      : SECTION_HEADER_HEIGHT
+    : 0;
   const mediaOffset = contentHeaderOffset + contentHeaderHeight;
-  const itemIndexById = useMemo(() => {
+  const loadedMediaById = useMemo(() => {
+    const map = new Map<number, MediaRecord>();
+    for (const item of items) {
+      map.set(item.id, item);
+    }
+    for (const item of orderedLoadedMedia) {
+      map.set(item.id, item);
+    }
+    return map;
+  }, [items, orderedLoadedMedia]);
+  const layoutItemIndexById = useMemo(() => {
     const map = new Map<number, number>();
-    items.forEach((item, index) => {
+    layoutItems.forEach((item, index) => {
       map.set(item.id, index);
     });
     return map;
-  }, [items]);
+  }, [layoutItems]);
   const slotIndexById = useMemo(() => {
     const map = new Map<number, number>();
     mediaSlots?.forEach((item, index) => {
@@ -333,70 +409,107 @@ export function MediaGrid({
     return map;
   }, [layout.segments]);
 
-  const virtualSegments = useMemo<VirtualSegment[]>(() => {
-    const segments: VirtualSegment[] = [];
-    if (folderSectionVisible) {
-      segments.push({ type: "folder-header", size: SECTION_HEADER_HEIGHT });
-      if (!folderSection?.collapsed) {
-        for (let rowIndex = 0; rowIndex < folderWindow.rowCount; rowIndex += 1) {
-          segments.push({
-            type: "folder-row",
-            folderSegmentIndex: rowIndex,
-            size: folderWindow.rowHeight
-          });
-        }
-      }
-    }
-    if (contentHeader) {
-      segments.push({ type: "content-header", size: SECTION_HEADER_HEIGHT });
-    }
-    if (mediaItemCount === 0 && emptyContent !== undefined) {
-      segments.push({ type: "empty", size: EMPTY_ROW_HEIGHT });
-    }
-    if (windowedMedia) {
-      for (let rowIndex = 0; rowIndex < mediaWindow.rowCount; rowIndex += 1) {
-        segments.push({
-          type: "media-row",
-          mediaSegmentIndex: rowIndex,
-          size: mediaWindow.rowHeight
-        });
-      }
-    } else {
-      for (const segment of layout.segments) {
-        segments.push({
-          type: "media-row",
-          mediaSegmentIndex: segment.index,
-          size: segment.size
-        });
-      }
-    }
-    return segments;
+  const virtualSectionLayout = useMemo<VirtualSectionLayout>(() => {
+    let nextIndex = 0;
+    const folderHeaderIndex = folderSectionVisible ? nextIndex++ : -1;
+    const folderRowCount =
+      folderSectionVisible && !folderSection?.collapsed ? folderWindow.rowCount : 0;
+    const folderRowStartIndex = folderRowCount > 0 ? nextIndex : -1;
+    nextIndex += folderRowCount;
+    const contentHeaderIndex = contentHeader ? nextIndex++ : -1;
+    const emptyIndex = mediaItemCount === 0 && emptyContent !== undefined ? nextIndex++ : -1;
+    const mediaRowCount = windowedMedia ? mediaWindow.rowCount : layout.segments.length;
+    const mediaRowStartIndex = mediaRowCount > 0 ? nextIndex : -1;
+    nextIndex += mediaRowCount;
+    return {
+      contentHeaderIndex,
+      emptyIndex,
+      folderHeaderIndex,
+      folderRowCount,
+      folderRowStartIndex,
+      mediaRowCount,
+      mediaRowStartIndex,
+      totalCount: nextIndex
+    };
   }, [
     contentHeader,
     emptyContent,
     folderSection?.collapsed,
     folderSectionVisible,
     folderWindow.rowCount,
-    folderWindow.rowHeight,
-    mediaWindow.rowCount,
-    mediaWindow.rowHeight,
-    layout.segments,
+    layout.segments.length,
     mediaItemCount,
+    mediaWindow.rowCount,
     windowedMedia
   ]);
-  const mediaVirtualSegmentIndexBySegmentIndex = useMemo(() => {
-    const map = new Map<number, number>();
-    virtualSegments.forEach((segment, virtualIndex) => {
-      if (segment.type === "media-row") {
-        map.set(segment.mediaSegmentIndex, virtualIndex);
+  const resolveVirtualSegment = useCallback(
+    (index: number): VirtualSegment | null => {
+      if (index === virtualSectionLayout.folderHeaderIndex) {
+        return { type: "folder-header", size: SECTION_HEADER_HEIGHT };
       }
-    });
-    return map;
-  }, [virtualSegments]);
+      if (
+        virtualSectionLayout.folderRowStartIndex >= 0 &&
+        index >= virtualSectionLayout.folderRowStartIndex &&
+        index < virtualSectionLayout.folderRowStartIndex + virtualSectionLayout.folderRowCount
+      ) {
+        return {
+          type: "folder-row",
+          folderSegmentIndex: index - virtualSectionLayout.folderRowStartIndex,
+          size: folderWindow.rowHeight
+        };
+      }
+      if (index === virtualSectionLayout.contentHeaderIndex) {
+        return {
+          type: "content-header",
+          size: folderSectionVisible ? CONTENT_SECTION_HEADER_HEIGHT : SECTION_HEADER_HEIGHT
+        };
+      }
+      if (index === virtualSectionLayout.emptyIndex) {
+        return { type: "empty", size: EMPTY_ROW_HEIGHT };
+      }
+      if (
+        virtualSectionLayout.mediaRowStartIndex >= 0 &&
+        index >= virtualSectionLayout.mediaRowStartIndex &&
+        index < virtualSectionLayout.mediaRowStartIndex + virtualSectionLayout.mediaRowCount
+      ) {
+        const mediaSegmentIndex = index - virtualSectionLayout.mediaRowStartIndex;
+        return {
+          type: "media-row",
+          mediaSegmentIndex,
+          size: windowedMedia
+            ? mediaWindow.rowHeight
+            : layout.segments[mediaSegmentIndex]?.size ?? activeMediaEstimatedSegmentSize
+        };
+      }
+      return null;
+    },
+    [
+      activeMediaEstimatedSegmentSize,
+      folderSectionVisible,
+      folderWindow.rowHeight,
+      layout.segments,
+      mediaWindow.rowHeight,
+      virtualSectionLayout,
+      windowedMedia
+    ]
+  );
+  const resolveMediaVirtualSegmentIndex = useCallback(
+    (mediaSegmentIndex: number) => {
+      if (
+        mediaSegmentIndex < 0 ||
+        mediaSegmentIndex >= virtualSectionLayout.mediaRowCount ||
+        virtualSectionLayout.mediaRowStartIndex < 0
+      ) {
+        return undefined;
+      }
+      return virtualSectionLayout.mediaRowStartIndex + mediaSegmentIndex;
+    },
+    [virtualSectionLayout]
+  );
   const virtualRows = useVirtualizer({
-    count: virtualSegments.length,
+    count: virtualSectionLayout.totalCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => virtualSegments[index]?.size ?? activeMediaEstimatedSegmentSize,
+    estimateSize: (index) => resolveVirtualSegment(index)?.size ?? activeMediaEstimatedSegmentSize,
     initialOffset: savedScrollTop,
     overscan: layoutMode === "waterfall" ? 6 : 4,
   });
@@ -426,10 +539,23 @@ export function MediaGrid({
   useLayoutEffect(() => {
     const element = parentRef.current;
     if (!element) return;
-    if (scrollPersistenceUnlockedRef.current) {
+    const scrollKeyChanged = lastRestoredScrollKeyRef.current !== scrollPositionKey;
+    lastRestoredScrollKeyRef.current = scrollPositionKey;
+    if (!scrollKeyChanged && scrollPersistenceUnlockedRef.current) {
       return;
     }
     if (savedScrollTop > 0 && mediaItemCount === 0 && !(folderSection?.itemCount ?? 0)) {
+      return;
+    }
+    if (!scrollKeyChanged && savedScrollTop === 0 && element.scrollTop !== 0) {
+      return;
+    }
+    if (
+      !scrollKeyChanged &&
+      savedScrollTop > 0 &&
+      element.scrollTop > 0 &&
+      Math.abs(element.scrollTop - savedScrollTop) > 2
+    ) {
       return;
     }
 
@@ -498,7 +624,7 @@ export function MediaGrid({
         const ids: number[] = [];
         const signatures: string[] = [];
         for (let index = visibleMediaIndexRange.start; index < visibleMediaIndexRange.end; index += 1) {
-          const item = mediaSlots?.[index];
+          const item = mediaSlots?.get(index);
           if (!item || item.id === selectedMediaId) continue;
           ids.push(item.id);
           signatures.push(mediaContentSignature(item));
@@ -528,7 +654,7 @@ export function MediaGrid({
       const ids: number[] = [];
       const signatures: string[] = [];
       for (let index = aheadMediaIndexRange.start; index < aheadMediaIndexRange.end; index += 1) {
-        const item = mediaSlots?.[index];
+        const item = mediaSlots?.get(index);
         if (!item || item.id === selectedMediaId) continue;
         ids.push(item.id);
         signatures.push(mediaContentSignature(item));
@@ -570,55 +696,57 @@ export function MediaGrid({
     windowedMedia
   ]);
 
+  const progressiveExactNextMissingIndex =
+    !windowedMedia && mediaSlots !== undefined
+      ? firstMissingMediaSlotIndex(mediaSlots, mediaItemCount)
+      : null;
+  const progressiveExactLayoutHasMore = progressiveExactNextMissingIndex !== null;
+
   const visibleMediaIds = visibleMedia.ids;
   const visibleMediaContentSignatures = useMemo(
     () =>
       visibleMediaIds
         .map((mediaId) => {
-          const itemIndex = itemIndexById.get(mediaId);
-          return itemIndex !== undefined ? mediaContentSignature(items[itemIndex]) : "";
+          const item = loadedMediaById.get(mediaId);
+          return item ? mediaContentSignature(item) : "";
         })
         .filter(Boolean)
         .join("|"),
-    [itemIndexById, items, visibleMediaIds]
+    [loadedMediaById, visibleMediaIds]
   );
   const visibleMediaSignatureKey = visibleMedia.signatureKey || visibleMediaContentSignatures;
   const aheadMediaIds = aheadMedia.ids;
   const aheadMediaSignatureKey = aheadMedia.signatureKey;
-  const visiblePriorityMediaIds = useMemo(
-    () => visibleMediaIds.slice(0, VISIBLE_PRIORITY_ITEM_LIMIT),
-    [visibleMediaIds]
-  );
-  const visibleOverflowMediaIds = useMemo(
-    () => visibleMediaIds.slice(VISIBLE_PRIORITY_ITEM_LIMIT),
-    [visibleMediaIds]
+  const visiblePriorityMediaIds = visibleMediaIds;
+  const visiblePriorityMediaIdSet = useMemo(
+    () => new Set(visiblePriorityMediaIds),
+    [visiblePriorityMediaIds]
   );
   const aheadPriorityMediaIds = useMemo(
-    () =>
-      [...new Set([...visibleOverflowMediaIds, ...aheadMediaIds])].slice(0, AHEAD_PRIORITY_ITEM_LIMIT),
-    [aheadMediaIds, visibleOverflowMediaIds]
+    () => {
+      return aheadMediaIds
+        .filter((mediaId) => !visiblePriorityMediaIdSet.has(mediaId))
+        .slice(0, AHEAD_PRIORITY_ITEM_LIMIT);
+    },
+    [aheadMediaIds, visiblePriorityMediaIdSet]
   );
   const visiblePriorityMediaKey = visiblePriorityMediaIds.join(":");
   const aheadPriorityMediaKey = aheadPriorityMediaIds.join(":");
   const hasVisiblePending = useMemo(
     () =>
       visiblePriorityMediaIds.some((mediaId) => {
-        const item = itemIndexById.get(mediaId);
-        return item !== undefined
-          ? shouldRefreshThumbnailState(items[item], thumbnailStatesByMediaId[mediaId])
-          : false;
+        const item = loadedMediaById.get(mediaId);
+        return item ? shouldRefreshThumbnailState(item, thumbnailStatesByMediaId[mediaId]) : false;
       }),
-    [itemIndexById, items, thumbnailStatesByMediaId, visiblePriorityMediaIds]
+    [loadedMediaById, thumbnailStatesByMediaId, visiblePriorityMediaIds]
   );
   const hasAheadPending = useMemo(
     () =>
       aheadPriorityMediaIds.some((mediaId) => {
-        const item = itemIndexById.get(mediaId);
-        return item !== undefined
-          ? shouldRefreshThumbnailState(items[item], thumbnailStatesByMediaId[mediaId])
-          : false;
+        const item = loadedMediaById.get(mediaId);
+        return item ? shouldRefreshThumbnailState(item, thumbnailStatesByMediaId[mediaId]) : false;
       }),
-    [aheadPriorityMediaIds, itemIndexById, items, thumbnailStatesByMediaId]
+    [aheadPriorityMediaIds, loadedMediaById, thumbnailStatesByMediaId]
   );
 
   useEffect(() => {
@@ -628,7 +756,6 @@ export function MediaGrid({
     onRequestThumbnailStates(visiblePriorityMediaIds, "visible");
   }, [
     onRequestThumbnailStates,
-    visiblePriorityMediaIds,
     visiblePriorityMediaKey,
     visibleMediaSignatureKey
   ]);
@@ -639,7 +766,6 @@ export function MediaGrid({
     }
     onRequestThumbnailStates(aheadPriorityMediaIds, "ahead");
   }, [
-    aheadPriorityMediaIds,
     aheadPriorityMediaKey,
     aheadMediaSignatureKey,
     onRequestThumbnailStates
@@ -650,6 +776,9 @@ export function MediaGrid({
       return;
     }
 
+    const repollDelayMs = hasVisiblePending
+      ? VISIBLE_THUMBNAIL_REPOLL_MS
+      : AHEAD_THUMBNAIL_REPOLL_MS;
     const timer = window.setTimeout(() => {
       if (hasVisiblePending) {
         onRequestThumbnailStates(visiblePriorityMediaIds, "visible");
@@ -657,16 +786,14 @@ export function MediaGrid({
       if (hasAheadPending) {
         onRequestThumbnailStates(aheadPriorityMediaIds, "ahead");
       }
-    }, FOREGROUND_THUMBNAIL_REPOLL_MS);
+    }, repollDelayMs);
     return () => window.clearTimeout(timer);
   }, [
-    aheadPriorityMediaIds,
     aheadPriorityMediaKey,
     aheadMediaSignatureKey,
     hasAheadPending,
     hasVisiblePending,
     onRequestThumbnailStates,
-    visiblePriorityMediaIds,
     visiblePriorityMediaKey,
     visibleMediaSignatureKey
   ]);
@@ -676,16 +803,38 @@ export function MediaGrid({
     12,
     gridPreferences.tileLabelHeight - tileLabelGap
   );
+  const folderTileLabelGap = resolveTileLabelGap(gridPreferences.folderTileLabelHeight);
+  const folderTileLabelVisibleHeight = Math.max(
+    12,
+    gridPreferences.folderTileLabelHeight - folderTileLabelGap
+  );
   const gridStyle = useMemo<MediaGridCssVariables>(
     () => ({
       "--library-tile-label-gap": `${tileLabelGap}px`,
-      "--library-tile-label-visible-height": `${tileLabelVisibleHeight}px`
+      "--library-tile-label-visible-height": `${tileLabelVisibleHeight}px`,
+      "--subfolder-edge-shadow-alpha": `${gridPreferences.folderEdgeShadowAlpha / 100}`,
+      "--subfolder-label-gap": `${folderTileLabelGap}px`,
+      "--subfolder-label-height": `${gridPreferences.folderTileLabelHeight}px`,
+      "--subfolder-label-visible-height": `${folderTileLabelVisibleHeight}px`,
+      "--subfolder-cover-height": `${folderWindow.coverHeight}px`,
+      "--subfolder-row-gap": `${folderWindow.rowGap}px`,
+      "--subfolder-tile-gap": `${gridPreferences.folderTileGap}px`
     }),
-    [tileLabelGap, tileLabelVisibleHeight]
+    [
+      folderTileLabelGap,
+      folderTileLabelVisibleHeight,
+      folderWindow.coverHeight,
+      folderWindow.rowGap,
+      gridPreferences.folderEdgeShadowAlpha,
+      gridPreferences.folderTileGap,
+      gridPreferences.folderTileLabelHeight,
+      tileLabelGap,
+      tileLabelVisibleHeight
+    ]
   );
 
   const renderedMediaSegmentIndexes = virtualItems
-    .map((item) => virtualSegments[item.index])
+    .map((item) => resolveVirtualSegment(item.index))
     .filter((segment): segment is Extract<VirtualSegment, { type: "media-row" }> =>
       segment?.type === "media-row"
     )
@@ -706,7 +855,7 @@ export function MediaGrid({
       })
     : [];
   const renderedFolderSegmentIndexes = virtualItems
-    .map((item) => virtualSegments[item.index])
+    .map((item) => resolveVirtualSegment(item.index))
     .filter((segment): segment is Extract<VirtualSegment, { type: "folder-row" }> =>
       segment?.type === "folder-row"
     )
@@ -719,17 +868,110 @@ export function MediaGrid({
           return Array.from({ length: Math.max(0, end - start) }, (_, index) => start + index);
         })
       : [];
-  const renderedFolderIndexKey = renderedFolderIndexes.join(":");
+  const visibleFolderIndexes = useMemo(() => {
+    if (
+      !folderSection ||
+      folderSection.collapsed ||
+      folderWindow.rowHeight <= 0 ||
+      folderWindow.columnCount <= 0 ||
+      folderWindow.totalSize <= 0
+    ) {
+      return [];
+    }
+
+    const folderVisibleStart = Math.max(0, scrollTop - folderGridOffset);
+    const folderVisibleEnd = Math.min(
+      folderWindow.totalSize,
+      Math.max(0, scrollTop + viewportSize.height - folderGridOffset)
+    );
+    if (folderVisibleEnd <= folderVisibleStart) {
+      return [];
+    }
+
+    const startRow = Math.max(0, Math.floor(folderVisibleStart / folderWindow.rowHeight));
+    const endRow = Math.max(
+      startRow,
+      Math.floor(Math.max(folderVisibleStart, folderVisibleEnd - 1) / folderWindow.rowHeight)
+    );
+    const indexes: number[] = [];
+    for (let rowIndex = startRow; rowIndex <= endRow; rowIndex += 1) {
+      const start = rowIndex * folderWindow.columnCount;
+      const end = Math.min(folderSection.itemCount, start + folderWindow.columnCount);
+      for (let index = start; index < end; index += 1) {
+        indexes.push(index);
+      }
+    }
+    return indexes;
+  }, [
+    folderGridOffset,
+    folderSection,
+    folderWindow.columnCount,
+    folderWindow.rowHeight,
+    folderWindow.totalSize,
+    scrollTop,
+    viewportSize.height
+  ]);
+  const prioritizedRenderedFolderIndexes = useMemo(() => {
+    const seen = new Set<number>();
+    const indexes: number[] = [];
+    for (const index of visibleFolderIndexes) {
+      if (seen.has(index)) continue;
+      seen.add(index);
+      indexes.push(index);
+    }
+    for (const index of renderedFolderIndexes) {
+      if (seen.has(index)) continue;
+      seen.add(index);
+      indexes.push(index);
+    }
+    return indexes;
+  }, [renderedFolderIndexes, visibleFolderIndexes]);
+  const renderedFolderIndexKey = prioritizedRenderedFolderIndexes.join(":");
+
+  useEffect(() => {
+    if (
+      !progressiveExactLayoutHasMore ||
+      loadingMore ||
+      !onRequestMediaWindow ||
+      renderedMediaSegmentIndexes.length === 0 ||
+      layout.segments.length === 0
+    ) {
+      return;
+    }
+
+    const lastRenderedMediaSegment = Math.max(...renderedMediaSegmentIndexes);
+    if (lastRenderedMediaSegment < layout.segments.length - 2) {
+      return;
+    }
+
+    const nextStartIndex = progressiveExactNextMissingIndex;
+    if (nextStartIndex === null) {
+      return;
+    }
+
+    onRequestMediaWindow(
+      nextStartIndex,
+      Math.min(mediaItemCount, nextStartIndex + PROGRESSIVE_EXACT_LAYOUT_PAGE_SIZE)
+    );
+  }, [
+    layout.segments.length,
+    loadingMore,
+    mediaItemCount,
+    onRequestMediaWindow,
+    progressiveExactLayoutHasMore,
+    progressiveExactNextMissingIndex,
+    renderedMediaSegmentIndexes
+  ]);
 
   useEffect(() => {
     if (!folderSection?.onVisibleFolderIndexesChange) {
       return;
     }
-    folderSection.onVisibleFolderIndexesChange(renderedFolderIndexes);
+    folderSection.onVisibleFolderIndexesChange(prioritizedRenderedFolderIndexes);
   }, [
     folderSection,
     renderedFolderIndexKey,
-    renderedFolderIndexes
+    prioritizedRenderedFolderIndexes
   ]);
 
   function moveSelection(direction: "left" | "right" | "up" | "down") {
@@ -745,22 +987,22 @@ export function MediaGrid({
       return;
     }
 
-    if (items.length === 0) return;
+    if (layoutItems.length === 0) return;
     const currentIndex =
-      selectedMediaId !== null ? itemIndexById.get(selectedMediaId) ?? 0 : 0;
+      selectedMediaId !== null ? layoutItemIndexById.get(selectedMediaId) ?? 0 : 0;
     const nextIndex = findDirectionalNeighborIndex(layout.placements, currentIndex, direction);
     selectIndex(nextIndex);
   }
 
   function selectIndex(index: number) {
-    const item = items[index];
+    const item = layoutItems[index];
     const placement = layout.placements[index];
     if (!item || !placement) return;
 
     onSelect(item.id);
     const segmentIndex = placementSegmentIndexByPlacementIndex.get(index);
     const virtualSegmentIndex =
-      segmentIndex !== undefined ? mediaVirtualSegmentIndexBySegmentIndex.get(segmentIndex) : undefined;
+      segmentIndex !== undefined ? resolveMediaVirtualSegmentIndex(segmentIndex) : undefined;
     if (virtualSegmentIndex !== undefined) {
       virtualRows.scrollToIndex(virtualSegmentIndex, { align: "auto" });
     }
@@ -783,7 +1025,7 @@ export function MediaGrid({
   function selectWindowedIndex(index: number) {
     if (mediaItemCount === 0) return;
     const clampedIndex = Math.max(0, Math.min(mediaItemCount - 1, index));
-    const item = mediaSlots?.[clampedIndex];
+    const item = mediaSlots?.get(clampedIndex);
     if (item) {
       onSelect(item.id);
     } else {
@@ -794,7 +1036,7 @@ export function MediaGrid({
     }
 
     const rowIndex = Math.floor(clampedIndex / mediaWindow.columnCount);
-    const virtualSegmentIndex = mediaVirtualSegmentIndexBySegmentIndex.get(rowIndex);
+    const virtualSegmentIndex = resolveMediaVirtualSegmentIndex(rowIndex);
     if (virtualSegmentIndex !== undefined) {
       virtualRows.scrollToIndex(virtualSegmentIndex, { align: "auto" });
     }
@@ -822,14 +1064,14 @@ export function MediaGrid({
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       moveSelection("up");
-    } else if (event.key === "Home" && (windowedMedia ? mediaItemCount > 0 : items[0])) {
+    } else if (event.key === "Home" && (windowedMedia ? mediaItemCount > 0 : layoutItems[0])) {
       event.preventDefault();
       if (windowedMedia) selectWindowedIndex(0);
       else selectIndex(0);
-    } else if (event.key === "End" && (windowedMedia ? mediaItemCount > 0 : items[items.length - 1])) {
+    } else if (event.key === "End" && (windowedMedia ? mediaItemCount > 0 : layoutItems[layoutItems.length - 1])) {
       event.preventDefault();
       if (windowedMedia) selectWindowedIndex(mediaItemCount - 1);
-      else selectIndex(items.length - 1);
+      else selectIndex(layoutItems.length - 1);
     } else if ((event.key === "Enter" || event.key === " ") && selectedMediaId !== null) {
       event.preventDefault();
       onOpenPreview(selectedMediaId);
@@ -848,7 +1090,7 @@ export function MediaGrid({
       onKeyDown={handleKeyDown}
     >
       <div className="virtual-grid-spacer" style={{ height: virtualRows.getTotalSize() }}>
-        {folderSectionVisible && virtualItems.some((item) => virtualSegments[item.index]?.type === "folder-header") ? (
+        {folderSectionVisible && virtualItems.some((item) => resolveVirtualSegment(item.index)?.type === "folder-header") ? (
           <div
             className="virtual-grid-section-header virtual-grid-folder-header"
             style={{
@@ -865,14 +1107,19 @@ export function MediaGrid({
 
         {folderSection && !folderSection.collapsed
           ? renderedFolderIndexes.map((folderIndex) => {
-              const placement = resolveFolderWindowPlacement(
-                folderIndex,
-                folderWindow,
-                gridPreferences.tileGap
-              );
+            const placement = resolveFolderWindowPlacement(
+              folderIndex,
+              folderWindow,
+              gridPreferences.folderTileGap
+            );
+            const folderColumnIndex = placement.itemIndex % folderWindow.columnCount;
+            const rowStart = folderColumnIndex === 0;
+            const rowEnd =
+              folderColumnIndex === folderWindow.columnCount - 1 ||
+              placement.itemIndex === (folderSection?.itemCount ?? 0) - 1;
               return (
                 <div
-                  className="folder-gridcell"
+                  className={`folder-gridcell${rowStart ? " folder-gridcell--row-start" : ""}${rowEnd ? " folder-gridcell--row-end" : ""}`}
                   key={`folder-${placement.itemIndex}`}
                   role="listitem"
                   style={{
@@ -889,12 +1136,14 @@ export function MediaGrid({
             })
           : null}
 
-        {contentHeader && virtualItems.some((item) => virtualSegments[item.index]?.type === "content-header") ? (
+        {contentHeader && virtualItems.some((item) => resolveVirtualSegment(item.index)?.type === "content-header") ? (
           <div
             className="virtual-grid-section-header virtual-grid-content-header"
             style={{
-              height: SECTION_HEADER_HEIGHT,
+              boxSizing: "border-box",
+              height: folderSectionVisible ? CONTENT_SECTION_HEADER_HEIGHT : SECTION_HEADER_HEIGHT,
               left: 0,
+              paddingTop: folderSectionVisible ? CONTENT_HEADER_TOP_GAP : 0,
               position: "absolute",
               top: contentHeaderOffset,
               width: "100%"
@@ -906,7 +1155,7 @@ export function MediaGrid({
 
         {mediaItemCount === 0 &&
         emptyContent !== undefined &&
-        virtualItems.some((item) => virtualSegments[item.index]?.type === "empty") ? (
+        virtualItems.some((item) => resolveVirtualSegment(item.index)?.type === "empty") ? (
           <div
             className="virtual-grid-empty-row"
             style={{
@@ -922,7 +1171,7 @@ export function MediaGrid({
         ) : null}
 
         {renderedWindowedMediaIndexes.map((mediaIndex) => {
-          const item = mediaSlots?.[mediaIndex];
+          const item = mediaSlots?.get(mediaIndex);
           const placement = resolveMediaWindowPlacement(
             mediaIndex,
             mediaWindow,
@@ -930,6 +1179,12 @@ export function MediaGrid({
             gridPreferences.tileGap,
             gridPreferences.tileLabelHeight
           );
+          const selected = item ? item.id === selectedMediaId : false;
+          const thumbnailLoadPriority: ThumbnailRequestPriority = selected
+            ? "selected"
+            : item && visiblePriorityMediaIdSet.has(item.id)
+              ? "visible"
+              : "ahead";
 
           return (
             <div
@@ -956,10 +1211,13 @@ export function MediaGrid({
                     layoutMode={layoutMode}
                     onContextMenu={onContextMenu}
                     onOpenPreview={onOpenPreview}
+                    onRequestThumbnailStates={onRequestThumbnailStates}
                     onSelect={onSelect}
                     placement={placement}
-                    selected={item.id === selectedMediaId}
+                    selected={selected}
                     thumbnail={thumbnailStatesByMediaId[item.id]}
+                    thumbnailLoadPriority={thumbnailLoadPriority}
+                    allowOriginalFallback={thumbnailLoadPriority !== "ahead"}
                   />
                 ) : (
                   <MediaTileSkeleton layoutMode={layoutMode} placement={placement} />
@@ -975,6 +1233,12 @@ export function MediaGrid({
           if (!placement || !item) {
             return null;
           }
+          const selected = item.id === selectedMediaId;
+          const thumbnailLoadPriority: ThumbnailRequestPriority = selected
+            ? "selected"
+            : visiblePriorityMediaIdSet.has(item.id)
+              ? "visible"
+              : "ahead";
 
           return (
             <div
@@ -1000,10 +1264,13 @@ export function MediaGrid({
                   layoutMode={layoutMode}
                   onContextMenu={onContextMenu}
                   onOpenPreview={onOpenPreview}
+                  onRequestThumbnailStates={onRequestThumbnailStates}
                   onSelect={onSelect}
                   placement={placement}
-                  selected={item.id === selectedMediaId}
+                  selected={selected}
                   thumbnail={thumbnailStatesByMediaId[item.id]}
+                  thumbnailLoadPriority={thumbnailLoadPriority}
+                  allowOriginalFallback={thumbnailLoadPriority !== "ahead"}
                 />
               </div>
             </div>
@@ -1067,35 +1334,57 @@ function resolveFolderWindowPlacement(
 }
 
 function MediaTile({
+  allowOriginalFallback,
   labelGap,
   item,
   layoutMode,
   onSelect,
   onOpenPreview,
+  onRequestThumbnailStates,
   onContextMenu,
   placement,
   selected,
-  thumbnail
+  thumbnail,
+  thumbnailLoadPriority
 }: {
+  allowOriginalFallback: boolean;
   labelGap: number;
   item: MediaRecord;
   layoutMode: LibraryLayoutMode;
   onSelect: (mediaId: number) => void;
   onOpenPreview: (mediaId: number) => void;
+  onRequestThumbnailStates: (mediaIds: number[], priority: ThumbnailRequestPriority) => void;
   onContextMenu?: (event: { item: MediaRecord; x: number; y: number; shiftKey: boolean }) => void;
   placement: { frameHeight: number; thumbHeight: number; thumbWidth: number; width: number };
   selected: boolean;
   thumbnail?: ThumbnailResponse;
+  thumbnailLoadPriority: ThumbnailRequestPriority;
 }) {
   const listMode = layoutMode === "list";
+  const thumbnailState = thumbnail?.state ?? normalizeMediaThumbnailState(item.thumbnailState);
+  const prioritizeSelectedMedia = () => {
+    onRequestThumbnailStates([item.id], "selected");
+    if (isLikelyImageMedia(item)) {
+      prefetchOriginalPreview(item, {
+        requestPriority: "interactive",
+        resourcePriority: "preview"
+      });
+    }
+  };
+
   return (
     <button
       aria-label={`Select ${item.name}; press Enter or Space, or double-click, to open preview`}
       className={selected ? `media-tile media-tile--${layoutMode} selected` : `media-tile media-tile--${layoutMode}`}
+      data-media-id={item.id}
+      data-thumb-state={thumbnailState}
+      data-interactive-pointer-target-selector=".tile-thumb"
       onClick={() => {
+        prioritizeSelectedMedia();
         onSelect(item.id);
       }}
       onDoubleClick={() => {
+        prioritizeSelectedMedia();
         onSelect(item.id);
         onOpenPreview(item.id);
       }}
@@ -1103,6 +1392,7 @@ function MediaTile({
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           event.stopPropagation();
+          prioritizeSelectedMedia();
           onSelect(item.id);
           onOpenPreview(item.id);
         }
@@ -1110,6 +1400,7 @@ function MediaTile({
       onContextMenu={(event) => {
         if (!onContextMenu) return;
         event.preventDefault();
+        prioritizeSelectedMedia();
         onSelect(item.id);
         onContextMenu({ item, x: event.clientX, y: event.clientY, shiftKey: event.shiftKey });
       }}
@@ -1136,9 +1427,12 @@ function MediaTile({
       type="button"
     >
       <ThumbnailStateView
+        allowOriginalFallback={allowOriginalFallback}
         item={item}
         layoutMode={layoutMode}
+        selected={selected}
         thumbnail={thumbnail}
+        thumbnailLoadPriority={thumbnailLoadPriority}
         thumbHeight={placement.thumbHeight}
         thumbWidth={placement.thumbWidth}
       />
@@ -1212,16 +1506,40 @@ function resolveTileLabelGap(tileLabelHeight: number) {
   return Math.max(1, Math.round(tileLabelHeight / 6));
 }
 
+function compactMediaSlots(mediaSlots: Map<number, MediaRecord>) {
+  return Array.from(mediaSlots.entries())
+    .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
+    .map(([, item]) => item);
+}
+
+function firstMissingMediaSlotIndex(
+  mediaSlots: Map<number, MediaRecord>,
+  totalCount: number
+) {
+  for (let index = 0; index < totalCount; index += 1) {
+    if (!mediaSlots.has(index)) {
+      return index;
+    }
+  }
+  return null;
+}
+
 function ThumbnailStateView({
+  allowOriginalFallback,
   item,
   layoutMode,
+  selected,
   thumbnail,
+  thumbnailLoadPriority,
   thumbHeight,
   thumbWidth
 }: {
+  allowOriginalFallback: boolean;
   item: MediaRecord;
   layoutMode: LibraryLayoutMode;
+  selected: boolean;
   thumbnail?: ThumbnailResponse;
+  thumbnailLoadPriority: ThumbnailRequestPriority;
   thumbHeight: number;
   thumbWidth: number;
 }) {
@@ -1229,8 +1547,16 @@ function ThumbnailStateView({
   const state = thumbnail?.state ?? rowState;
   const previewPlaceholderUrl = previewPlaceholderDataUrl(item);
   const hasLiveReadyThumbnail = thumbnail?.state === "ready" && thumbnail.updatedAt !== null;
-  const canLoadCurrentThumbnailBlob = hasLiveReadyThumbnail || rowState === "ready" || state === "ready";
+  const canLoadCurrentThumbnailBlob = hasLiveReadyThumbnail;
   const presentationStyle = thumbnailPresentationStyle(layoutMode, thumbWidth, thumbHeight);
+  const resourcePriority = selected
+    ? "preview"
+    : thumbnailLoadPriority === "visible"
+      ? "visible"
+      : "ahead";
+  const originalFallbackResourcePriority =
+    selected ? "preview" : thumbnailLoadPriority === "visible" ? "visible" : "fallback";
+  const requestPriority = selected ? "interactive" : "resource";
 
   if (canLoadCurrentThumbnailBlob) {
     return (
@@ -1238,8 +1564,13 @@ function ThumbnailStateView({
         alt={item.name}
         className={`tile-thumb tile-thumb--${layoutMode}`}
         fileId={item.id}
+        item={item}
         mediaSignature={mediaContentSignature(item)}
+        originalFallbackResourcePriority={originalFallbackResourcePriority}
+        allowOriginalFallback={allowOriginalFallback}
         previewPlaceholderUrl={previewPlaceholderUrl}
+        requestPriority={requestPriority}
+        resourcePriority={resourcePriority}
         style={presentationStyle}
         thumbnailUpdatedAt={hasLiveReadyThumbnail ? thumbnail.updatedAt : null}
       />
@@ -1250,6 +1581,7 @@ function ThumbnailStateView({
     return (
       <div className={`tile-thumb tile-thumb-failed tile-thumb--${layoutMode}`} style={presentationStyle}>
         <span>failed</span>
+        <ThumbnailInteractionRing />
       </div>
     );
   }
@@ -1268,11 +1600,25 @@ function ThumbnailStateView({
     return (
       <div className={`tile-thumb tile-thumb-skipped tile-thumb--${layoutMode}`} style={presentationStyle}>
         <span>{item.kind ?? "file"}</span>
+        <ThumbnailInteractionRing />
       </div>
     );
   }
 
   if (state === "queued") {
+    if (allowOriginalFallback && isLikelyImageMedia(item)) {
+      return (
+        <OriginalFallbackThumbnail
+          alt={item.name}
+          className={`tile-thumb tile-thumb--${layoutMode}`}
+          fallbackUrl={previewPlaceholderUrl}
+          item={item}
+          requestPriority={requestPriority}
+          resourcePriority={originalFallbackResourcePriority}
+          style={presentationStyle}
+        />
+      );
+    }
     if (previewPlaceholderUrl) {
       return (
         <PlaceholderThumbnail
@@ -1283,7 +1629,25 @@ function ThumbnailStateView({
         />
       );
     }
-    return <div className={`tile-thumb tile-thumb-loading tile-thumb--${layoutMode}`} style={presentationStyle} />;
+    return (
+      <div className={`tile-thumb tile-thumb-loading tile-thumb--${layoutMode}`} style={presentationStyle}>
+        <ThumbnailInteractionRing />
+      </div>
+    );
+  }
+
+  if (allowOriginalFallback && isLikelyImageMedia(item)) {
+    return (
+      <OriginalFallbackThumbnail
+        alt={item.name}
+        className={`tile-thumb tile-thumb--${layoutMode}`}
+        fallbackUrl={previewPlaceholderUrl}
+        item={item}
+        requestPriority={requestPriority}
+        resourcePriority={originalFallbackResourcePriority}
+        style={presentationStyle}
+      />
+    );
   }
 
   if (previewPlaceholderUrl) {
@@ -1297,7 +1661,23 @@ function ThumbnailStateView({
     );
   }
 
-  return <div className={`tile-thumb tile-thumb-loading tile-thumb--${layoutMode}`} style={presentationStyle} />;
+  return (
+    <div className={`tile-thumb tile-thumb-loading tile-thumb--${layoutMode}`} style={presentationStyle}>
+      <ThumbnailInteractionRing />
+    </div>
+  );
+}
+
+function ThumbnailInteractionRing() {
+  return <span aria-hidden="true" className="library-thumbnail-interaction-ring" />;
+}
+
+function isLikelyImageMedia(item: MediaRecord): boolean {
+  if (item.kind?.toLowerCase() === "image") {
+    return true;
+  }
+  const normalizedExt = (item.ext ?? "").trim().toLowerCase().replace(/^\./, "");
+  return ORIGINAL_FALLBACK_IMAGE_EXTENSIONS.has(normalizedExt);
 }
 
 function thumbnailPresentationStyle(
@@ -1396,32 +1776,211 @@ function PlaceholderThumbnail({
 }) {
   return (
     <div className={className} data-preview-placeholder="grid" style={style}>
-      <img alt={alt} className="tile-thumb-image" loading="lazy" src={src} />
+      <img alt={alt} className="tile-thumb-image" decoding="async" loading="eager" src={src} />
+      <ThumbnailInteractionRing />
+    </div>
+  );
+}
+
+function rememberOriginalFallbackObjectUrl(cacheKey: string, objectUrl: string) {
+  const existing = originalFallbackObjectUrlCache.get(cacheKey);
+  if (existing && existing !== objectUrl) {
+    URL.revokeObjectURL(existing);
+  }
+  originalFallbackObjectUrlCache.delete(cacheKey);
+  originalFallbackObjectUrlCache.set(cacheKey, objectUrl);
+  while (originalFallbackObjectUrlCache.size > ORIGINAL_FALLBACK_OBJECT_URL_CACHE_LIMIT) {
+    const firstKey = originalFallbackObjectUrlCache.keys().next().value;
+    if (!firstKey) break;
+    const staleObjectUrl = originalFallbackObjectUrlCache.get(firstKey);
+    originalFallbackObjectUrlCache.delete(firstKey);
+    if (staleObjectUrl) URL.revokeObjectURL(staleObjectUrl);
+  }
+}
+
+function OriginalFallbackThumbnail({
+  alt,
+  className,
+  fallbackUrl,
+  item,
+  requestPriority,
+  resourcePriority,
+  style
+}: {
+  alt: string;
+  className: string;
+  fallbackUrl: string | null;
+  item: MediaRecord;
+  requestPriority: "interactive" | "resource";
+  resourcePriority: "preview" | "visible" | "fallback";
+  style: CSSProperties;
+}) {
+  const cacheKey = `original:${mediaFileContentSignature(item)}`;
+  const [src, setSrc] = useState<string | null>(
+    () => originalFallbackObjectUrlCache.get(cacheKey) ?? null
+  );
+  const [error, setError] = useState(false);
+  const [retryToken, setRetryToken] = useState(0);
+  const itemRef = useRef(item);
+  const objectUrlRef = useRef<string | null>(src);
+  itemRef.current = item;
+
+  useEffect(() => {
+    const cachedObjectUrl = originalFallbackObjectUrlCache.get(cacheKey);
+    if (cachedObjectUrl) {
+      objectUrlRef.current = cachedObjectUrl;
+      setSrc(cachedObjectUrl);
+      setError(false);
+      return undefined;
+    }
+
+    let revoked = false;
+    let objectUrl: string | null = null;
+    let retryTimer: number | null = null;
+    const controller = new AbortController();
+    setError(false);
+
+    // The cache key captures media identity/content. Do not restart this request
+    // when thumbnail polling replaces the row object with the same file state.
+    requestOriginalPreviewBlob(itemRef.current, {
+      requestPriority,
+      resourcePriority,
+      signal: controller.signal
+    })
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        const nextObjectUrl = objectUrl;
+        if (revoked) {
+          URL.revokeObjectURL(nextObjectUrl);
+          return;
+        }
+
+        const commitObjectUrl = () => {
+          if (revoked) {
+            return;
+          }
+          objectUrlRef.current = nextObjectUrl;
+          rememberOriginalFallbackObjectUrl(cacheKey, nextObjectUrl);
+          setSrc(nextObjectUrl);
+        };
+
+        if (!objectUrlRef.current) {
+          commitObjectUrl();
+          void preloadImageObjectUrl(nextObjectUrl).catch(() => {
+            if (revoked || objectUrlRef.current !== nextObjectUrl) {
+              return;
+            }
+            originalFallbackObjectUrlCache.delete(cacheKey);
+            setError(true);
+          });
+          return;
+        }
+
+        void preloadImageObjectUrl(nextObjectUrl)
+          .then(() => {
+            commitObjectUrl();
+          })
+          .catch(() => {
+            if (revoked) {
+              return;
+            }
+            if (objectUrl && objectUrlRef.current !== objectUrl) {
+              URL.revokeObjectURL(objectUrl);
+              objectUrl = null;
+            }
+            setError(true);
+          });
+      })
+      .catch((cause) => {
+        if (objectUrl && objectUrlRef.current !== objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
+        if (revoked) {
+          return;
+        }
+        if (cause instanceof Error && cause.name === "AbortError") {
+          retryTimer = window.setTimeout(() => {
+            if (!revoked) setRetryToken((current) => current + 1);
+          }, 80);
+          return;
+        }
+        setError(true);
+      });
+
+    return () => {
+      revoked = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      controller.abort();
+      if (objectUrl && objectUrlRef.current !== objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [cacheKey, requestPriority, resourcePriority, retryToken]);
+
+  if (error && !src) {
+    if (fallbackUrl) {
+      return <PlaceholderThumbnail alt={alt} className={className} src={fallbackUrl} style={style} />;
+    }
+    return (
+      <div className={`${className} tile-thumb-failed`} style={style}>
+        <span>load error</span>
+        <ThumbnailInteractionRing />
+      </div>
+    );
+  }
+
+  if (!src) {
+    if (fallbackUrl) {
+      return <PlaceholderThumbnail alt={alt} className={className} src={fallbackUrl} style={style} />;
+    }
+    return (
+      <div className={`${className} tile-thumb-loading`} style={style}>
+        <ThumbnailInteractionRing />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${className} tile-thumb-original-fallback`} style={style}>
+      <img alt={alt} className="tile-thumb-image" decoding="async" loading="eager" src={src} />
+      <ThumbnailInteractionRing />
     </div>
   );
 }
 
 function ReadyThumbnail({
   alt,
+  allowOriginalFallback,
   className,
   fileId,
+  item,
   mediaSignature,
+  originalFallbackResourcePriority,
   previewPlaceholderUrl,
+  requestPriority,
+  resourcePriority,
   style,
   thumbnailUpdatedAt
 }: {
   alt: string;
+  allowOriginalFallback: boolean;
   className: string;
   fileId: number;
+  item: MediaRecord;
   mediaSignature: string;
+  originalFallbackResourcePriority: "preview" | "visible" | "fallback";
   previewPlaceholderUrl: string | null;
+  requestPriority: "interactive" | "resource";
+  resourcePriority: "preview" | "visible" | "ahead";
   style: CSSProperties;
   thumbnailUpdatedAt: number | null;
 }) {
   const cacheKey = thumbnailObjectUrlCacheKey(fileId, mediaSignature, thumbnailUpdatedAt);
   const [src, setSrc] = useState<string | null>(() => readCachedThumbnailObjectUrl(cacheKey));
   const [error, setError] = useState(false);
-  const objectUrlRef = useRef<string | null>(null);
+  const [retryToken, setRetryToken] = useState(0);
+  const objectUrlRef = useRef<string | null>(src);
 
   useEffect(() => {
     const cachedObjectUrl = readCachedThumbnailObjectUrl(cacheKey);
@@ -1434,61 +1993,136 @@ function ReadyThumbnail({
 
     let revoked = false;
     let objectUrl: string | null = null;
+    let retryTimer: number | null = null;
+    const controller = new AbortController();
     setError(false);
 
-    requestThumbnailBlob(fileId, thumbnailUpdatedAt)
+    requestThumbnailBlob(fileId, thumbnailUpdatedAt, {
+      requestPriority,
+      resourcePriority,
+      signal: controller.signal
+    })
       .then((blob) => {
         objectUrl = URL.createObjectURL(blob);
-        return preloadImageObjectUrl(objectUrl);
-      })
-      .then(() => {
-        if (!objectUrl) {
-          return;
-        }
+        const nextObjectUrl = objectUrl;
         if (revoked) {
-          URL.revokeObjectURL(objectUrl);
+          URL.revokeObjectURL(nextObjectUrl);
           return;
         }
-        objectUrlRef.current = objectUrl;
-        rememberThumbnailObjectUrl(cacheKey, objectUrl);
-        setSrc(objectUrl);
+
+        const commitObjectUrl = () => {
+          if (revoked) {
+            return;
+          }
+          objectUrlRef.current = nextObjectUrl;
+          rememberThumbnailObjectUrl(cacheKey, nextObjectUrl);
+          setSrc(nextObjectUrl);
+        };
+
+        if (!objectUrlRef.current) {
+          commitObjectUrl();
+          void preloadImageObjectUrl(nextObjectUrl).catch(() => {
+            if (revoked || objectUrlRef.current !== nextObjectUrl) {
+              return;
+            }
+            setError(true);
+          });
+          return;
+        }
+
+        void preloadImageObjectUrl(nextObjectUrl)
+          .then(() => {
+            commitObjectUrl();
+          })
+          .catch(() => {
+            if (revoked) {
+              return;
+            }
+            if (objectUrl && objectUrlRef.current !== objectUrl) {
+              URL.revokeObjectURL(objectUrl);
+              objectUrl = null;
+            }
+            setError(true);
+          });
       })
-      .catch(() => {
+      .catch((cause) => {
         if (objectUrl && objectUrlRef.current !== objectUrl) {
           URL.revokeObjectURL(objectUrl);
           objectUrl = null;
         }
-        if (!revoked) setError(true);
+        if (revoked) {
+          return;
+        }
+        if (cause instanceof Error && cause.name === "AbortError") {
+          retryTimer = window.setTimeout(() => {
+            if (!revoked) setRetryToken((current) => current + 1);
+          }, 80);
+          return;
+        }
+        setError(true);
       });
 
     return () => {
       revoked = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      controller.abort();
       if (objectUrl && objectUrlRef.current !== objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [cacheKey, fileId, thumbnailUpdatedAt]);
+  }, [cacheKey, fileId, requestPriority, resourcePriority, retryToken, thumbnailUpdatedAt]);
 
   if (error && !src) {
     return (
       <div className={`${className} tile-thumb-failed`} style={style}>
         <span>load error</span>
+        <ThumbnailInteractionRing />
       </div>
     );
   }
 
   if (!src) {
+    if (isLikelyImageMedia(item)) {
+      if (allowOriginalFallback) {
+        return (
+          <OriginalFallbackThumbnail
+            alt={alt}
+            className={className}
+            fallbackUrl={previewPlaceholderUrl}
+            item={item}
+            requestPriority={requestPriority}
+            resourcePriority={originalFallbackResourcePriority}
+            style={style}
+          />
+        );
+      }
+      if (previewPlaceholderUrl) {
+        return (
+          <PlaceholderThumbnail alt={alt} className={className} src={previewPlaceholderUrl} style={style} />
+        );
+      }
+      return (
+        <div className={`${className} tile-thumb-loading`} style={style}>
+          <ThumbnailInteractionRing />
+        </div>
+      );
+    }
     if (previewPlaceholderUrl) {
       return (
         <PlaceholderThumbnail alt={alt} className={className} src={previewPlaceholderUrl} style={style} />
       );
     }
-    return <div className={`${className} tile-thumb-loading`} style={style} />;
+    return (
+      <div className={`${className} tile-thumb-loading`} style={style}>
+        <ThumbnailInteractionRing />
+      </div>
+    );
   }
 
   return (
-    <div className={className} style={style}>
-      <img alt={alt} className="tile-thumb-image" loading="lazy" src={src} />
+    <div className={`${className} tile-thumb-ready`} style={style}>
+      <img alt={alt} className="tile-thumb-image" decoding="async" loading="eager" src={src} />
+      <ThumbnailInteractionRing />
     </div>
   );
 }

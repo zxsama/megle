@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import type { FolderRecord, MediaRecord, RootRecord } from "@megle/core-client";
+import type { FolderRecord, MediaRecord } from "@megle/core-client";
 import type { LibraryState } from "../../core/useLibraryData";
-import { LiquidGlassButton } from "../../design/liquid-glass";
 import { MediaGrid } from "../media-grid/MediaGrid";
 import type { LibraryGridPreferences } from "../media-grid/gridPreferences";
 import type { LibraryLayoutMode } from "../media-grid/layoutMode";
@@ -9,9 +8,11 @@ import { CentralPreviewStage } from "../preview/CentralPreviewStage";
 import { InspectorMetadata } from "../preview/InspectorMetadata";
 import { PreviewPanel } from "../preview/PreviewPanel";
 import { SubfolderCard, SubfolderStrip } from "./SubfolderStrip";
+import { buildVisibleSubfolderEntries } from "./subfolderHierarchy";
 import { useFolderCovers } from "./useFolderCovers";
 
 const AHEAD_THUMBNAIL_ROW_COUNT = 4;
+const SUBFOLDER_CHILD_PROBE_LIMIT = 12;
 const SUBFOLDER_STRIP_COLLAPSED_STORAGE_KEY = "megle.library.subfolder-strip-collapsed";
 
 interface LibraryViewProps {
@@ -103,26 +104,34 @@ export function LibraryCenterPane({
     readStoredSubfolderStripCollapsed()
   );
   const [folderCoverPriorityIndexes, setFolderCoverPriorityIndexes] = useState<number[]>([]);
+  const [expandedSubfolderIds, setExpandedSubfolderIds] = useState<Set<number>>(() => new Set());
   const currentFolderId = library.selectedFolderId ?? selectedRoot?.rootFolderId ?? null;
-  const directChildFolders = currentFolderId ? library.folderChildrenByParent[currentFolderId] ?? [] : [];
-  const recursiveChildFolders =
-    currentFolderId && library.showChildFolderContents
-      ? library.folderDescendantsByParent[currentFolderId] ?? directChildFolders
-      : directChildFolders;
+  const visibleSubfolderEntries = useMemo(
+    () =>
+      buildVisibleSubfolderEntries({
+        childFoldersByParentId: library.folderChildrenByParent,
+        expandedFolderIds: expandedSubfolderIds,
+        parentFolderId: currentFolderId,
+        recursiveExpansionEnabled: library.showChildFolderContents
+      }),
+    [
+      currentFolderId,
+      expandedSubfolderIds,
+      library.folderChildrenByParent,
+      library.showChildFolderContents
+    ]
+  );
   const childFoldersLoading = currentFolderId
-    ? library.loadingFolderIds.has(currentFolderId) ||
-      (library.showChildFolderContents && library.loadingFolderDescendantIds.has(currentFolderId))
+    ? library.loadingFolderIds.has(currentFolderId)
     : false;
-  const showSubfolderStrip = !previewMedia && (recursiveChildFolders.length > 0 || childFoldersLoading);
+  const showSubfolderStrip =
+    !previewMedia && (visibleSubfolderEntries.length > 0 || childFoldersLoading);
   const folderCoverPriorityFolders = useMemo(() => {
-    const indexes =
-      folderCoverPriorityIndexes.length > 0
-        ? folderCoverPriorityIndexes
-        : recursiveChildFolders.slice(0, 48).map((_, index) => index);
+    const indexes = folderCoverPriorityIndexes;
     const seen = new Set<number>();
     const folders: FolderRecord[] = [];
     for (const index of indexes) {
-      const folder = recursiveChildFolders[index];
+      const folder = visibleSubfolderEntries[index]?.folder;
       if (!folder || seen.has(folder.id)) {
         continue;
       }
@@ -130,8 +139,10 @@ export function LibraryCenterPane({
       folders.push(folder);
     }
     return folders;
-  }, [folderCoverPriorityIndexes, recursiveChildFolders]);
-  const coverMediaByFolderId = useFolderCovers(folderCoverPriorityFolders);
+  }, [folderCoverPriorityIndexes, visibleSubfolderEntries]);
+  const coverMediaByFolderId = useFolderCovers(folderCoverPriorityFolders, {
+    disabled: library.loading
+  });
   const contentCount = Math.max(library.mediaTotalCount, library.media.length);
   const contentCountLabel = `${contentCount}`;
   const folderSection =
@@ -141,14 +152,14 @@ export function LibraryCenterPane({
           header: (
             <SubfolderStrip
               collapsed={subfolderStripCollapsed}
-              folderCount={recursiveChildFolders.length}
+              folderCount={visibleSubfolderEntries.length}
               loading={childFoldersLoading}
               showChildContents={library.showChildFolderContents}
               onToggleCollapsed={() => setSubfolderStripCollapsed((current) => !current)}
               onToggleShowChildContents={library.toggleShowChildFolderContents}
             />
           ),
-          itemCount: recursiveChildFolders.length,
+          itemCount: visibleSubfolderEntries.length,
           loading: childFoldersLoading,
           onVisibleFolderIndexesChange: (indexes: number[]) => {
             setFolderCoverPriorityIndexes((current) => {
@@ -162,27 +173,66 @@ export function LibraryCenterPane({
             });
           },
           renderFolder: (index: number) => {
-            const folder = recursiveChildFolders[index];
+            const entry = visibleSubfolderEntries[index];
+            const folder = entry?.folder;
             if (!folder) {
               return null;
             }
+            const folderChildrenLoaded = library.folderChildrenByParent[folder.id] !== undefined;
+            const folderChildren = library.folderChildrenByParent[folder.id] ?? [];
+            const folderChildrenLoading = library.loadingFolderIds.has(folder.id);
+            const hasLoadedChildren = folderChildren.length > 0;
+            const childStatus = folderChildrenLoading
+              ? "loading"
+              : folderChildrenLoaded
+                ? hasLoadedChildren
+                  ? "has-children"
+                  : "empty"
+                : "unknown";
+            const folderExpanded = expandedSubfolderIds.has(folder.id) && hasLoadedChildren;
+            const coverLoaded = coverMediaByFolderId.has(folder.id);
             return (
               <SubfolderCard
+                childStatus={childStatus}
+                coverLoaded={coverLoaded}
                 coverMedia={coverMediaByFolderId.get(folder.id) ?? []}
+                depth={entry.depth}
+                expandable={library.showChildFolderContents && hasLoadedChildren}
+                expanded={folderExpanded}
                 folder={folder}
+                hasExpandedChildren={folderExpanded}
+                inheritedGroupPosition={entry.inheritedGroupPosition}
+                loadingChildren={folderChildrenLoading}
+                nestedGroupPosition={entry.depth > 0 ? entry.siblingPosition : null}
                 onFolderContextMenu={onFolderContextMenu}
-                onSelectFolder={library.setSelectedFolder}
-                selected={folder.id === library.selectedFolderId}
+                onOpenFolder={library.setSelectedFolder}
+                onSelectFolder={library.setSelectedFolderInfo}
+                onToggleExpanded={() => {
+                  const expanding = !folderExpanded;
+                  setExpandedSubfolderIds((current) => {
+                    const next = new Set(current);
+                    if (next.has(folder.id)) {
+                      next.delete(folder.id);
+                    } else {
+                      next.add(folder.id);
+                    }
+                    return next;
+                  });
+                  if (expanding && !folderChildrenLoaded && !folderChildrenLoading) {
+                    void library.requestFolderChildren(folder.id).catch(() => undefined);
+                  }
+                }}
+                selected={folder.id === library.selectedFolderInfo?.id}
               />
             );
           }
         }
       : undefined;
-  const contentHeader = previewMedia ? null : (
+  const contentHeader = !previewMedia && contentCount > 0 ? (
     <div className="library-browser-content-header">
       <div className="library-browser-content-title">{`内容 (${contentCountLabel})`}</div>
     </div>
-  );
+  ) : null;
 
   useEffect(() => {
     if (previewOpen && !selectedMedia) {
@@ -204,6 +254,83 @@ export function LibraryCenterPane({
   useEffect(() => {
     setFolderCoverPriorityIndexes([]);
   }, [currentFolderId, library.showChildFolderContents]);
+
+  useEffect(() => {
+    if (library.showChildFolderContents) {
+      return;
+    }
+    setExpandedSubfolderIds(new Set());
+  }, [library.showChildFolderContents]);
+
+  useEffect(() => {
+    if (!library.showChildFolderContents || subfolderStripCollapsed) {
+      return;
+    }
+    const probeIndexes =
+      folderCoverPriorityIndexes.length > 0
+        ? folderCoverPriorityIndexes
+        : visibleSubfolderEntries
+            .slice(0, SUBFOLDER_CHILD_PROBE_LIMIT)
+            .map((_, index) => index);
+    const folderIds = new Set<number>();
+    for (const index of probeIndexes) {
+      const folder = visibleSubfolderEntries[index]?.folder;
+      if (!folder) {
+        continue;
+      }
+      if (
+        library.folderChildrenByParent[folder.id] === undefined &&
+        !library.loadingFolderIds.has(folder.id)
+      ) {
+        folderIds.add(folder.id);
+      }
+      if (folderIds.size >= SUBFOLDER_CHILD_PROBE_LIMIT) {
+        break;
+      }
+    }
+    for (const folderId of folderIds) {
+      void library.requestFolderChildren(folderId).catch(() => undefined);
+    }
+  }, [
+    folderCoverPriorityIndexes,
+    library.folderChildrenByParent,
+    library.loadingFolderIds,
+    library.requestFolderChildren,
+    library.showChildFolderContents,
+    subfolderStripCollapsed,
+    visibleSubfolderEntries
+  ]);
+
+  useEffect(() => {
+    if (!library.showChildFolderContents || folderCoverPriorityIndexes.length === 0) {
+      return;
+    }
+    const parentIds = new Set<number>();
+    for (const index of folderCoverPriorityIndexes) {
+      const entry = visibleSubfolderEntries[index];
+      if (!entry) {
+        continue;
+      }
+      if (
+        entry.siblingIndex >= entry.siblingCount - 8 &&
+        library.folderChildNextCursorByParent[entry.parentId] &&
+        !library.loadingMoreFolderIds.has(entry.parentId)
+      ) {
+        parentIds.add(entry.parentId);
+      }
+    }
+    for (const parentId of parentIds) {
+      void library.loadMoreFolderChildren(parentId);
+    }
+  }, [
+    folderCoverPriorityIndexes,
+    library.folderChildNextCursorByParent,
+    library.folderChildrenByParent,
+    library.loadMoreFolderChildren,
+    library.loadingMoreFolderIds,
+    library.showChildFolderContents,
+    visibleSubfolderEntries
+  ]);
 
   function handleOpenPreview(mediaId: number) {
     onOpenPreview(mediaId);
@@ -232,7 +359,7 @@ export function LibraryCenterPane({
               <MediaGrid
                 aheadRowCount={AHEAD_THUMBNAIL_ROW_COUNT}
                 contentHeader={contentHeader}
-                emptyContent={library.loading ? null : renderEmptyState({ library, selectedRoot })}
+                emptyContent={undefined}
                 folderSection={folderSection}
                 gridPreferences={gridPreferences}
                 items={library.media}
@@ -263,12 +390,26 @@ export function LibraryInspectorPane({
   previewOpen
 }: Pick<LibraryViewProps, "library" | "previewOpen">) {
   const selectedMedia = library.selectedMedia;
+  const selectedFolder = library.selectedFolderInfo;
+  const selectedFolderCoverMediaByFolderId = useFolderCovers(
+    selectedFolder ? [selectedFolder] : [],
+    { disabled: selectedFolder === null }
+  );
+  const selectedFolderCoverMedia = selectedFolder
+    ? selectedFolderCoverMediaByFolderId.get(selectedFolder.id) ?? []
+    : [];
+  const selectedFolderCover = selectedFolderCoverMedia[0] ?? null;
 
   return (
     <PreviewPanel
+      selectedFolder={library.selectedFolderInfo}
+      selectedFolderCoverMedia={selectedFolderCoverMedia}
       selectedMedia={selectedMedia}
       showPreviewImage={!previewOpen}
       thumbnail={selectedMedia ? library.thumbnailStatesByMediaId[selectedMedia.id] : undefined}
+      selectedFolderCoverThumbnail={
+        selectedFolderCover ? library.thumbnailStatesByMediaId[selectedFolderCover.id] : undefined
+      }
     >
       {selectedMedia ? (
         <InspectorMetadata
@@ -285,56 +426,6 @@ export function LibraryInspectorPane({
       ) : null}
     </PreviewPanel>
   );
-}
-
-function renderEmptyState({
-  library,
-  selectedRoot
-}: {
-  library: LibraryState;
-  selectedRoot: RootRecord | null;
-}) {
-  if (library.loading || library.media.length > 0) {
-    return null;
-  }
-
-  if (library.searchActive) {
-    return (
-      <div className="grid-empty grid-empty-search" role="status">
-        <p className="grid-empty-title">Nothing matched.</p>
-        <p className="grid-empty-copy">
-          Try different filters, or clear the current ones.
-        </p>
-        <LiquidGlassButton
-          className="grid-empty-action"
-          onClick={() => library.clearFilters()}
-          tone="primary"
-          type="button"
-        >
-          Clear filters
-        </LiquidGlassButton>
-      </div>
-    );
-  }
-
-  if (selectedRoot) {
-    return (
-      <div className="grid-empty grid-empty-folder" role="status">
-        <p className="grid-empty-title">Empty folder</p>
-        <p className="grid-empty-copy">
-          Add image or video files in{" "}
-          <code className="grid-empty-path" title={selectedRoot.path}>
-            {selectedRoot.path}
-          </code>
-          {library.showChildFolderContents
-            ? " or its child folders and they\u2019ll appear here."
-            : " and they\u2019ll appear here."}
-        </p>
-      </div>
-    );
-  }
-
-  return null;
 }
 
 function mediaScrollPositionKey(

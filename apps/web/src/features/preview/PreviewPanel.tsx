@@ -1,8 +1,12 @@
-import { type CSSProperties, type ReactNode } from "react";
-import type { MediaRecord, ThumbnailResponse } from "@megle/core-client";
+import { Folder as FolderIcon } from "lucide-react";
+import { type ReactNode } from "react";
+import type { FolderRecord, MediaRecord, ThumbnailResponse } from "@megle/core-client";
 import { MediaPreview } from "./MediaPreview";
 
 interface PreviewPanelProps {
+  selectedFolder: FolderRecord | null;
+  selectedFolderCoverMedia: MediaRecord[];
+  selectedFolderCoverThumbnail?: ThumbnailResponse;
   selectedMedia: MediaRecord | null;
   thumbnail?: ThumbnailResponse;
   showPreviewImage?: boolean;
@@ -10,11 +14,16 @@ interface PreviewPanelProps {
 }
 
 export function PreviewPanel({
+  selectedFolder,
+  selectedFolderCoverMedia,
+  selectedFolderCoverThumbnail,
   selectedMedia,
   showPreviewImage = true,
   thumbnail,
   children
 }: PreviewPanelProps) {
+  const folderCoverMedia = selectedFolderCoverMedia[0] ?? null;
+
   return (
     <aside
       className="inspector-panel preview-panel"
@@ -23,12 +32,13 @@ export function PreviewPanel({
       {selectedMedia ? (
         <>
           {showPreviewImage ? (
-            <div className="preview-stage" style={previewStageStyle(selectedMedia)}>
+            <div className="preview-stage">
               <MediaPreview
                 media={selectedMedia}
                 onMediaReady={undefined}
                 source="thumbnail"
                 thumbnail={thumbnail}
+                preserveNaturalFrame={false}
                 preferOriginalWhilePending
               />
             </div>
@@ -46,6 +56,37 @@ export function PreviewPanel({
             <dd>{thumbnailStatus(thumbnail?.state ?? selectedMedia.thumbnailState)}</dd>
           </dl>
           {children}
+        </>
+      ) : selectedFolder ? (
+        <>
+          <div className="preview-stage">
+            {folderCoverMedia ? (
+              <MediaPreview
+                media={folderCoverMedia}
+                onMediaReady={undefined}
+                source="thumbnail"
+                thumbnail={selectedFolderCoverThumbnail}
+                preserveNaturalFrame={false}
+                preferOriginalWhilePending
+              />
+            ) : (
+              <div className="preview-folder-cover-empty" aria-hidden="true">
+                <FolderIcon size={34} />
+              </div>
+            )}
+          </div>
+          <dl className="metadata-list">
+            <dt>Name</dt>
+            <dd>{selectedFolder.name}</dd>
+            <dt>Kind</dt>
+            <dd>folder</dd>
+            <dt>Status</dt>
+            <dd>{selectedFolder.status}</dd>
+            <dt>Root</dt>
+            <dd>{selectedFolder.rootId}</dd>
+            <dt>Parent</dt>
+            <dd>{selectedFolder.parentId ?? "root"}</dd>
+          </dl>
         </>
       ) : (
         <div className="empty-panel">No selection</div>
@@ -69,13 +110,6 @@ function thumbnailStatus(state: ThumbnailResponse["state"] | string | null | und
       <span className="central-preview-loading-spinner" aria-hidden="true" />
     </span>
   );
-}
-
-function previewStageStyle(media: MediaRecord): CSSProperties | undefined {
-  if (!media.width || !media.height || media.width <= 0 || media.height <= 0) {
-    return undefined;
-  }
-  return { aspectRatio: `${media.width} / ${media.height}` };
 }
 
 function formatDimensions(media: MediaRecord): string {

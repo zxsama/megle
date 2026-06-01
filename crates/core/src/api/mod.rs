@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::Request;
@@ -26,6 +26,7 @@ pub const SESSION_HEADER: &str = "X-Megle-Session";
 pub struct AppState {
     pub database: Arc<Mutex<Database>>,
     pub task_queue: TaskSender,
+    read_database_path: Option<PathBuf>,
     /// Resolved at startup so route handlers (notably
     /// `POST /api/plugins/discover`) agree with `main.rs` on where to look
     /// for plugin manifests. `None` when the API is built without a
@@ -46,12 +47,14 @@ impl AppState {
         Self {
             database: Arc::new(Mutex::new(database)),
             task_queue,
+            read_database_path: None,
             plugins_dir: None,
             _watcher: None,
         }
     }
 
     pub fn new_with_worker(database: Database, worker_database: Database) -> Self {
+        let read_database_path = database.path().map(Path::to_path_buf);
         let watcher_database = database.reopen().expect("reopen watcher database");
         let database = Arc::new(Mutex::new(database));
         let task_queue = start_worker(worker_database);
@@ -60,9 +63,17 @@ impl AppState {
         Self {
             database,
             task_queue,
+            read_database_path,
             plugins_dir: None,
             _watcher: watcher,
         }
+    }
+
+    pub fn open_read_database(&self) -> anyhow::Result<Option<Database>> {
+        let Some(path) = &self.read_database_path else {
+            return Ok(None);
+        };
+        Ok(Some(Database::open(path)?))
     }
 }
 
