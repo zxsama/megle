@@ -3,6 +3,11 @@ import type {
   AddFileTagRequest,
   CreateTagRequest,
   DeletePluginResponse,
+  ThumbnailCacheClearResponse,
+  ThumbnailCacheEnqueueResponse,
+  ThumbnailCacheScopeParams,
+  ThumbnailCacheTaskRequest,
+  ThumbnailCacheStatsResponse,
   DeleteRequest,
   DeleteTagResponse,
   FileOperationListResponse,
@@ -179,6 +184,30 @@ export function createCoreClient(config: CoreClientConfig) {
         method: "POST",
         requestPriority: options.requestPriority ?? "interactive",
         body: JSON.stringify(input),
+        signal: options.signal
+      }),
+    getThumbnailCacheStats: (
+      params: ThumbnailCacheScopeParams = {},
+      options: CoreRequestOptions = {}
+    ) =>
+      request<ThumbnailCacheStatsResponse>(`/thumbnails/cache/stats${query(params)}`, {
+        requestPriority: options.requestPriority ?? "metadata",
+        signal: options.signal
+      }),
+    enqueueThumbnailCache: (
+      input: ThumbnailCacheTaskRequest,
+      options: CoreRequestOptions = {}
+    ) =>
+      request<ThumbnailCacheEnqueueResponse>("/tasks/thumbnail-cache", {
+        method: "POST",
+        requestPriority: options.requestPriority ?? "background",
+        body: JSON.stringify(input),
+        signal: options.signal
+      }),
+    clearThumbnailCache: (options: CoreRequestOptions = {}) =>
+      request<ThumbnailCacheClearResponse>("/thumbnails/cache/clear", {
+        method: "POST",
+        requestPriority: options.requestPriority ?? "interactive",
         signal: options.signal
       }),
     cancelTask: (taskId: number) =>

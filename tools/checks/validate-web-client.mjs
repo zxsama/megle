@@ -1269,6 +1269,26 @@ if (
   fail("Preview browsing must expose a persisted 5120MB thumbnail cache and enforce it with an LRU byte budget");
 }
 if (
+  !/persistentThumbnailCacheAutoRefresh:\s*boolean/.test(previewPreferences) ||
+  !/persistentThumbnailCacheAutoRefresh:\s*false/.test(previewPreferences) ||
+  !/persistentThumbnailCacheAutoRefresh\s*===\s*true/.test(previewPreferences) ||
+  !/persistentThumbnailCacheAutoRefresh/.test(app) ||
+  !/useLibraryData\(\{\s*persistentThumbnailCacheAutoRefresh/.test(app) ||
+  !/Persistent thumbnail cache/.test(settingsView) ||
+  !/Auto-refresh on folder open/.test(settingsView) ||
+  !/Generate current folder thumbnails/.test(settingsView) ||
+  !/Generate current tree thumbnails/.test(settingsView) ||
+  !/Generate all thumbnails/.test(settingsView) ||
+  !/Retry failed \/ stale thumbnails/.test(settingsView) ||
+  !/Clear persistent thumbnail cache/.test(settingsView) ||
+  !/getThumbnailCacheStats/.test(useLibraryData) ||
+  !/enqueueThumbnailCache/.test(useLibraryData) ||
+  !/clearThumbnailCache/.test(useLibraryData) ||
+  !/refreshThumbnailCacheStats/.test(useLibraryData)
+) {
+  fail("Persistent thumbnail cache settings must expose stats, bulk actions, and a persisted auto-refresh preference through core-client");
+}
+if (
   !/originalPreviewBlobCacheBytes/.test(mediaResources) ||
   !/configureOriginalPreviewBuffer/.test(mediaResources) ||
   !/blob\.size/.test(mediaResources) ||

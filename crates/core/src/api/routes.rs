@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 use crate::api::AppState;
 use crate::db::{
     Database, FolderRecord, MediaPageQuery, MediaRecord, NewRoot, PluginRecord, RootRecord,
-    SearchQuery, TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailRecord,
-    ThumbnailTaskPriority, UserMetadataPatch, UserMetadataRecord, THUMBNAIL_BACKGROUND_PRIORITY,
+    SearchQuery, TagError, TagRecord, TaskRecord, ThumbBlobRecord, ThumbnailCacheClearResult,
+    ThumbnailCacheEnqueueResult, ThumbnailCacheRefreshMode, ThumbnailCacheScope,
+    ThumbnailCacheStats, ThumbnailRecord, ThumbnailTaskPriority, UserMetadataPatch,
+    UserMetadataRecord, THUMBNAIL_BACKGROUND_PRIORITY, THUMBNAIL_BULK_PRIORITY,
 };
 use crate::fsops::{
     self, DeleteRequest, FileOperationRecord, FsOpsError, FsOpsErrorCode, MoveRequest,
@@ -80,6 +82,8 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/media/{fileId}",
     "/api/media/{fileId}/thumbnail",
     "/api/media/{fileId}/thumbnail/blob",
+    "/api/thumbnails/cache/stats",
+    "/api/thumbnails/cache/clear",
     "/api/media/{fileId}/preview",
     "/api/media/{fileId}/metadata",
     "/api/media/{fileId}/tags",
@@ -90,6 +94,7 @@ pub const PHASE1_API_PATHS: &[&str] = &[
     "/api/tasks",
     "/api/tasks/scan",
     "/api/tasks/interactive-folder-scan",
+    "/api/tasks/thumbnail-cache",
     "/api/tasks/thumbnail-priority-scope",
     "/api/tasks/{taskId}/cancel",
     "/api/tasks/{taskId}/retry",
@@ -213,6 +218,61 @@ struct ListMediaQuery {
 struct ThumbnailQuery {
     priority: Option<String>,
     target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThumbnailCacheScopeQuery {
+    #[serde(rename = "rootId")]
+    root_id: Option<i64>,
+    #[serde(rename = "folderId")]
+    folder_id: Option<i64>,
+    #[serde(rename = "includeDescendants")]
+    include_descendants: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailCacheTaskRequestBody {
+    root_id: Option<i64>,
+    folder_id: Option<i64>,
+    include_descendants: Option<bool>,
+    #[serde(rename = "fileIds")]
+    file_ids: Option<Vec<i64>>,
+    refresh_mode: String,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailCacheStatsResponse {
+    cached_count: i64,
+    missing_count: i64,
+    stale_count: i64,
+    failed_count: i64,
+    pending_candidate_count: i64,
+    total_blob_bytes: i64,
+    active_bulk_task_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailCacheEnqueueResponse {
+    accepted_count: usize,
+    cached_count: i64,
+    missing_count: i64,
+    stale_count: i64,
+    failed_count: i64,
+    pending_candidate_count: i64,
+    total_blob_bytes: i64,
+    active_bulk_task_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailCacheClearResponse {
+    cleared: bool,
+    deleted_blob_count: usize,
+    reset_thumbnail_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -405,6 +465,11 @@ pub fn router(state: AppState) -> Router {
             "/api/media/:file_id/thumbnail/blob",
             get(get_thumbnail_blob),
         )
+        .route(
+            "/api/thumbnails/cache/stats",
+            get(get_thumbnail_cache_stats),
+        )
+        .route("/api/thumbnails/cache/clear", post(clear_thumbnail_cache))
         .route("/api/media/:file_id/preview", get(get_preview))
         .route(
             "/api/media/:file_id/metadata",
@@ -427,6 +492,7 @@ pub fn router(state: AppState) -> Router {
             "/api/tasks/interactive-folder-scan",
             post(enqueue_interactive_folder_scan),
         )
+        .route("/api/tasks/thumbnail-cache", post(enqueue_thumbnail_cache))
         .route(
             "/api/tasks/thumbnail-priority-scope",
             post(sync_thumbnail_priority_scope),
@@ -776,6 +842,89 @@ async fn get_thumbnail_blob(
         .header("x-megle-served-by", "db_blob")
         .body(axum::body::Body::from(blob.data))
         .map_err(|err| CoreError::bad_request(format!("failed to build thumbnail response: {err}")))
+}
+
+async fn get_thumbnail_cache_stats(
+    State(state): State<AppState>,
+    Query(query): Query<ThumbnailCacheScopeQuery>,
+) -> ApiResult<Json<ThumbnailCacheStatsResponse>> {
+    let scope = thumbnail_cache_scope(query);
+    let stats = run_read_database(state, move |database| {
+        database
+            .get_thumbnail_cache_stats(scope)
+            .map(thumbnail_cache_stats_response)
+            .map(Json)
+            .map_err(CoreError::from)
+    })
+    .await?;
+    Ok(stats)
+}
+
+async fn enqueue_thumbnail_cache(
+    State(state): State<AppState>,
+    Json(body): Json<ThumbnailCacheTaskRequestBody>,
+) -> ApiResult<(StatusCode, Json<ThumbnailCacheEnqueueResponse>)> {
+    let refresh_mode = ThumbnailCacheRefreshMode::from_wire_value(body.refresh_mode.as_str())
+        .ok_or_else(|| {
+            CoreError::bad_request(format!(
+                "unsupported thumbnail cache refresh mode: {}",
+                body.refresh_mode
+            ))
+        })?;
+    let scope = ThumbnailCacheScope {
+        root_id: body.root_id,
+        folder_id: body.folder_id,
+        include_descendants: body.include_descendants.unwrap_or(false),
+    };
+    let file_ids = body.file_ids.unwrap_or_default();
+    let limit = body.limit.unwrap_or(256).clamp(1, 4096);
+    let (response, wakeup) = run_shared_database(state.clone(), move |database| {
+        let result = if file_ids.is_empty() {
+            database
+                .enqueue_thumbnail_cache_tasks(scope, refresh_mode, limit)
+                .map_err(CoreError::from)?
+        } else {
+            database
+                .enqueue_thumbnail_cache_tasks_for_file_ids(&file_ids, refresh_mode, limit)
+                .map_err(CoreError::from)?
+        };
+        let wakeup = result
+            .task_id_to_wake
+            .map(|task_id| {
+                database
+                    .current_task_attempt_generation(task_id)
+                    .map(|attempt_generation| (task_id, attempt_generation))
+            })
+            .transpose()
+            .map_err(CoreError::from)?;
+        Ok((thumbnail_cache_enqueue_response(result), wakeup))
+    })
+    .await?;
+    if let Some((task_id, attempt_generation)) = wakeup {
+        enqueue_thumbnail_task_wakeup(
+            &state,
+            task_id,
+            attempt_generation,
+            THUMBNAIL_BULK_PRIORITY,
+            false,
+        )
+        .await?;
+    }
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn clear_thumbnail_cache(
+    State(state): State<AppState>,
+) -> ApiResult<Json<ThumbnailCacheClearResponse>> {
+    let response = run_shared_database(state, move |database| {
+        database
+            .clear_thumbnail_cache()
+            .map(thumbnail_cache_clear_response)
+            .map(Json)
+            .map_err(CoreError::from)
+    })
+    .await?;
+    Ok(response)
 }
 
 async fn get_preview(
@@ -1387,6 +1536,51 @@ fn thumbnail_response(
     }
 }
 
+fn thumbnail_cache_scope(query: ThumbnailCacheScopeQuery) -> ThumbnailCacheScope {
+    ThumbnailCacheScope {
+        root_id: query.root_id,
+        folder_id: query.folder_id,
+        include_descendants: query.include_descendants.unwrap_or(false),
+    }
+}
+
+fn thumbnail_cache_stats_response(stats: ThumbnailCacheStats) -> ThumbnailCacheStatsResponse {
+    ThumbnailCacheStatsResponse {
+        cached_count: stats.cached_count,
+        missing_count: stats.missing_count,
+        stale_count: stats.stale_count,
+        failed_count: stats.failed_count,
+        pending_candidate_count: stats.pending_candidate_count,
+        total_blob_bytes: stats.total_blob_bytes,
+        active_bulk_task_count: stats.active_bulk_task_count,
+    }
+}
+
+fn thumbnail_cache_enqueue_response(
+    result: ThumbnailCacheEnqueueResult,
+) -> ThumbnailCacheEnqueueResponse {
+    ThumbnailCacheEnqueueResponse {
+        accepted_count: result.accepted_count,
+        cached_count: result.stats.cached_count,
+        missing_count: result.stats.missing_count,
+        stale_count: result.stats.stale_count,
+        failed_count: result.stats.failed_count,
+        pending_candidate_count: result.stats.pending_candidate_count,
+        total_blob_bytes: result.stats.total_blob_bytes,
+        active_bulk_task_count: result.stats.active_bulk_task_count,
+    }
+}
+
+fn thumbnail_cache_clear_response(
+    result: ThumbnailCacheClearResult,
+) -> ThumbnailCacheClearResponse {
+    ThumbnailCacheClearResponse {
+        cleared: result.deleted_blob_count != 0 || result.reset_thumbnail_count != 0,
+        deleted_blob_count: result.deleted_blob_count,
+        reset_thumbnail_count: result.reset_thumbnail_count,
+    }
+}
+
 fn parse_media_sort(value: Option<&str>) -> ApiResult<&'static str> {
     let value = value.unwrap_or("mtime_desc");
     MEDIA_SORT_VALUES
@@ -1654,8 +1848,21 @@ async fn enqueue_task(state: &AppState, task_id: i64, attempt_generation: i64) -
         Ok(()) => Ok(()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             // The task row is already durable. If the worker channel is full,
-            // returning immediately keeps foreground browsing responsive; the
-            // worker drains persisted pending tasks after each queued message.
+            // returning immediately keeps foreground browsing responsive, but
+            // still queue a best-effort async send so the task is not reliant
+            // on later incidental drain ticks to start.
+            let state = state.clone();
+            tokio::spawn(async move {
+                if state.task_queue.send(task_id).await.is_err() {
+                    let error = anyhow::anyhow!("background task queue is closed");
+                    let database = state.database.lock().expect("database mutex poisoned");
+                    let _ = database.mark_task_failed_for_attempt(
+                        task_id,
+                        attempt_generation,
+                        &error.to_string(),
+                    );
+                }
+            });
             Ok(())
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -2428,6 +2635,384 @@ mod tests {
             .await
             .expect("read blob body");
         assert_eq!(&bytes[..], blob_bytes.as_slice());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_cache_stats_route_reports_scope_counts() {
+        let database = test_database();
+        let (root_id, folder_id) = seed_thumbnail_cache_scope_fixture(&database, "cache-stats");
+        seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "cached.jpg",
+            "ready",
+            true,
+            false,
+        );
+        seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "missing.jpg",
+            "absent",
+            false,
+            false,
+        );
+        seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "stale.jpg",
+            "ready",
+            true,
+            true,
+        );
+        seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "failed.jpg",
+            "failed",
+            false,
+            false,
+        );
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/thumbnails/cache/stats?rootId={root_id}&folderId={folder_id}&includeDescendants=false"
+                    ))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("get thumbnail cache stats");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["cachedCount"], 1);
+        assert_eq!(body["missingCount"], 1);
+        assert_eq!(body["staleCount"], 1);
+        assert_eq!(body["failedCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_cache_enqueue_route_queues_bulk_candidates() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let (database, inspector) = test_database_pair(db_path);
+        let (root_id, folder_id) =
+            seed_thumbnail_cache_scope_fixture(&database, "cache-enqueue-route");
+        let missing_file_id = seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "missing.jpg",
+            "absent",
+            false,
+            false,
+        );
+        let stale_file_id = seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "stale.jpg",
+            "ready",
+            true,
+            true,
+        );
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-cache")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        "{{\"rootId\":{root_id},\"folderId\":{folder_id},\"includeDescendants\":false,\"refreshMode\":\"staleOrMissing\",\"limit\":2}}"
+                    )))
+                    .expect("build request"),
+            )
+            .await
+            .expect("enqueue thumbnail cache");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_json(response).await;
+        assert_eq!(body["acceptedCount"], 2);
+
+        let bulk_file_ids: Vec<i64> = inspector
+            .list_tasks()
+            .expect("list tasks")
+            .into_iter()
+            .filter(|task| {
+                task.kind == "thumbnail" && task.priority == crate::db::THUMBNAIL_BULK_PRIORITY
+            })
+            .filter_map(|task| task.file_id)
+            .collect();
+        assert!(bulk_file_ids.contains(&missing_file_id));
+        assert!(bulk_file_ids.contains(&stale_file_id));
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_cache_enqueue_route_respects_include_descendants() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let (database, inspector) = test_database_pair(db_path);
+        let (root_id, folder_id) =
+            seed_thumbnail_cache_scope_fixture(&database, "cache-enqueue-descendants");
+        let child_folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: Some(folder_id),
+                name: "child".to_string(),
+                path_hash: "cache-enqueue-descendants-child".to_string(),
+                mtime: Some(11),
+            })
+            .expect("insert child folder");
+        let child_file_id = seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            child_folder_id,
+            "descendant-missing.jpg",
+            "absent",
+            false,
+            false,
+        );
+        let app = router(AppState::new(database));
+
+        let direct_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-cache")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        "{{\"rootId\":{root_id},\"folderId\":{folder_id},\"includeDescendants\":false,\"refreshMode\":\"staleOrMissing\",\"limit\":4}}"
+                    )))
+                    .expect("build direct request"),
+            )
+            .await
+            .expect("enqueue direct thumbnail cache");
+        assert_eq!(direct_response.status(), StatusCode::ACCEPTED);
+        let direct_body = response_json(direct_response).await;
+        assert_eq!(direct_body["acceptedCount"], 0);
+
+        let recursive_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-cache")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        "{{\"rootId\":{root_id},\"folderId\":{folder_id},\"includeDescendants\":true,\"refreshMode\":\"staleOrMissing\",\"limit\":4}}"
+                    )))
+                    .expect("build recursive request"),
+            )
+            .await
+            .expect("enqueue recursive thumbnail cache");
+        assert_eq!(recursive_response.status(), StatusCode::ACCEPTED);
+        let recursive_body = response_json(recursive_response).await;
+        assert_eq!(recursive_body["acceptedCount"], 1);
+
+        let recursive_task = inspector
+            .list_tasks()
+            .expect("list recursive tasks")
+            .into_iter()
+            .find(|task| {
+                task.file_id == Some(child_file_id)
+                    && task.priority == crate::db::THUMBNAIL_BULK_PRIORITY
+            });
+        assert!(recursive_task.is_some());
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_cache_enqueue_route_retries_failed_only_when_requested() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let (database, inspector) = test_database_pair(db_path);
+        let (root_id, folder_id) =
+            seed_thumbnail_cache_scope_fixture(&database, "cache-enqueue-retry");
+        let failed_file_id = seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "failed.jpg",
+            "failed",
+            false,
+            false,
+        );
+        let app = router(AppState::new(database));
+
+        let missing_only_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-cache")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        "{{\"rootId\":{root_id},\"folderId\":{folder_id},\"includeDescendants\":false,\"refreshMode\":\"staleOrMissing\",\"limit\":4}}"
+                    )))
+                    .expect("build stale request"),
+            )
+            .await
+            .expect("enqueue stale thumbnail cache");
+        assert_eq!(missing_only_response.status(), StatusCode::ACCEPTED);
+        let missing_only_body = response_json(missing_only_response).await;
+        assert_eq!(missing_only_body["acceptedCount"], 0);
+
+        let retry_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-cache")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        "{{\"rootId\":{root_id},\"folderId\":{folder_id},\"includeDescendants\":false,\"refreshMode\":\"retryFailedAndStale\",\"limit\":4}}"
+                    )))
+                    .expect("build retry request"),
+            )
+            .await
+            .expect("enqueue retry thumbnail cache");
+        assert_eq!(retry_response.status(), StatusCode::ACCEPTED);
+        let retry_body = response_json(retry_response).await;
+        assert_eq!(retry_body["acceptedCount"], 1);
+
+        let retry_task = inspector
+            .list_tasks()
+            .expect("list retry tasks")
+            .into_iter()
+            .find(|task| {
+                task.file_id == Some(failed_file_id)
+                    && task.priority == crate::db::THUMBNAIL_BULK_PRIORITY
+            });
+        assert!(retry_task.is_some());
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_cache_enqueue_route_rejects_invalid_refresh_mode() {
+        let database = test_database();
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-cache")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"refreshMode\":\"bogus\"}"))
+                    .expect("build invalid request"),
+            )
+            .await
+            .expect("enqueue invalid thumbnail cache");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_cache_enqueue_route_accepts_explicit_file_ids() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let (database, inspector) = test_database_pair(db_path);
+        let (root_id, folder_id) =
+            seed_thumbnail_cache_scope_fixture(&database, "cache-explicit-route");
+        let missing_file_id = seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "missing.jpg",
+            "absent",
+            false,
+            false,
+        );
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/thumbnail-cache")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        "{{\"fileIds\":[{missing_file_id}],\"refreshMode\":\"staleOrMissing\",\"limit\":16}}"
+                    )))
+                    .expect("build explicit file id request"),
+            )
+            .await
+            .expect("enqueue explicit file ids");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_json(response).await;
+        assert_eq!(body["acceptedCount"], 1);
+        let queued_task = inspector
+            .list_tasks()
+            .expect("list explicit route tasks")
+            .into_iter()
+            .find(|task| {
+                task.kind == "thumbnail"
+                    && task.file_id == Some(missing_file_id)
+                    && task.priority == crate::db::THUMBNAIL_BULK_PRIORITY
+            });
+        assert!(queued_task.is_some());
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_cache_clear_route_clears_blobs_and_resets_states() {
+        let db_dir = unique_temp_dir();
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("megle.sqlite");
+        let (database, inspector) = test_database_pair(db_path);
+        let (root_id, folder_id) =
+            seed_thumbnail_cache_scope_fixture(&database, "cache-clear-route");
+        let file_id = seed_thumbnail_cache_candidate(
+            &database,
+            root_id,
+            folder_id,
+            "clear.jpg",
+            "ready",
+            true,
+            false,
+        );
+        let app = router(AppState::new(database));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/thumbnails/cache/clear")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("clear thumbnail cache");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["cleared"], true);
+        assert!(inspector
+            .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumb blob")
+            .is_none());
+        let thumbnail = inspector
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "pending");
+        let _ = fs::remove_dir_all(db_dir);
     }
 
     #[tokio::test]
@@ -4771,6 +5356,109 @@ mod tests {
             file_ids.push(file_id);
         }
         (root_id, file_ids)
+    }
+
+    fn seed_thumbnail_cache_scope_fixture(database: &Database, label: &str) -> (i64, i64) {
+        let root_id = database
+            .add_root(crate::db::NewRoot {
+                path: format!("D:/Pictures/{label}"),
+                display_name: format!("Pictures {label}"),
+            })
+            .expect("add cache scope root");
+        let folder_id = database
+            .upsert_folder(crate::db::FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: format!("{label}-root-hash"),
+                mtime: Some(10),
+            })
+            .expect("insert cache scope folder");
+        (root_id, folder_id)
+    }
+
+    fn seed_thumbnail_cache_candidate(
+        database: &Database,
+        root_id: i64,
+        folder_id: i64,
+        name: &str,
+        thumbnail_state: &str,
+        with_blob: bool,
+        stale_fingerprint: bool,
+    ) -> i64 {
+        let file_id = database
+            .upsert_file(crate::db::FileUpsert {
+                root_id,
+                folder_id,
+                name: name.to_string(),
+                ext: ".jpg".to_string(),
+                size: 4096,
+                mtime: 123,
+                ctime: None,
+                file_key: Some(format!("cache-{name}")),
+            })
+            .expect("insert cache candidate file");
+        database
+            .upsert_media_kind(file_id, "image")
+            .expect("insert cache candidate media");
+        let current_fingerprint = database
+            .get_thumbnail_source(file_id)
+            .expect("get cache candidate source")
+            .expect("cache candidate source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        if thumbnail_state != "absent" {
+            database
+                .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                    file_id,
+                    profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                    state: thumbnail_state.to_string(),
+                    cache_key: None,
+                    width: if thumbnail_state == "ready" {
+                        Some(320)
+                    } else {
+                        None
+                    },
+                    height: if thumbnail_state == "ready" {
+                        Some(160)
+                    } else {
+                        None
+                    },
+                    byte_size: if thumbnail_state == "ready" {
+                        Some(42)
+                    } else {
+                        None
+                    },
+                    error: if thumbnail_state == "failed" {
+                        Some("decode failed".to_string())
+                    } else {
+                        None
+                    },
+                    source_fingerprint: if thumbnail_state == "pending" {
+                        None
+                    } else if stale_fingerprint {
+                        Some(format!("stale-{name}"))
+                    } else {
+                        Some(current_fingerprint)
+                    },
+                })
+                .expect("seed cache candidate state");
+        }
+        if with_blob {
+            database
+                .upsert_thumb_blob(crate::db::ThumbBlobRecord {
+                    file_id,
+                    profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                    data: b"RIFF\x04\0\0\0WEBP".to_vec(),
+                    width: 320,
+                    height: 160,
+                    byte_size: 12,
+                    output_format: crate::thumbnails::GENERATED_FORMAT.to_string(),
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .expect("seed cache candidate blob");
+        }
+        file_id
     }
 
     fn unique_temp_dir() -> PathBuf {

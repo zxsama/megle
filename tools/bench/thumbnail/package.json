@@ -6,7 +6,8 @@
     "generate:samples": "python generate_samples.py",
     "bench:image": "node image_thumb_bench.mjs",
     "bench:formats": "node image_format_bench.mjs",
-    "bench:video": "node video_poster_bench.mjs"
+    "bench:video": "node video_poster_bench.mjs",
+    "bench:persistent-cache": "node persistent_cache_pressure_harness.mjs"
   },
   "dependencies": {
     "sharp": "^0.34.0"

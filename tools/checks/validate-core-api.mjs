@@ -515,6 +515,16 @@ for (const name of ["get_thumbnail", "enqueue_interactive_folder_scan", "sync_th
     fail(`${name} route must offload shared database writes from the async handler`);
   }
 }
+for (const name of ["get_thumbnail_cache_stats"]) {
+  if (!functionBody(name).includes("run_read_database")) {
+    fail(`${name} route must use the read database spawn_blocking helper`);
+  }
+}
+for (const name of ["enqueue_thumbnail_cache", "clear_thumbnail_cache"]) {
+  if (!functionBody(name).includes("run_shared_database")) {
+    fail(`${name} route must offload shared database writes from the async handler`);
+  }
+}
 for (const [name, action] of [
   ["cancel_task", "cancel_task"],
   ["retry_task", "retry_task"]
@@ -539,6 +549,41 @@ const thumbnailBlobOperation = operationBlock("/media/{fileId}/thumbnail/blob", 
 for (const value of ["target", "image/webp", "x-megle-served-by", "db_blob"]) {
   if (!thumbnailBlobOperation.includes(value)) {
     fail(`OpenAPI GET /media/{fileId}/thumbnail/blob missing ${value}`);
+  }
+}
+const thumbnailCacheStatsOperation = operationBlock("/thumbnails/cache/stats", "get");
+for (const value of [
+  "operationId: getThumbnailCacheStats",
+  "rootId",
+  "folderId",
+  "includeDescendants",
+  "ThumbnailCacheStatsResponse"
+]) {
+  if (!thumbnailCacheStatsOperation.includes(value)) {
+    fail(`OpenAPI GET /thumbnails/cache/stats missing ${value}`);
+  }
+}
+const thumbnailCacheTaskOperation = operationBlock("/tasks/thumbnail-cache", "post");
+for (const value of ["operationId: enqueueThumbnailCache", "ThumbnailCacheTaskRequest", "ThumbnailCacheEnqueueResponse"]) {
+  if (!thumbnailCacheTaskOperation.includes(value)) {
+    fail(`OpenAPI POST /tasks/thumbnail-cache missing ${value}`);
+  }
+}
+if (!openApi.includes("fileIds:")) {
+  fail("OpenAPI thumbnail cache task schema missing fileIds");
+}
+for (const value of ["retryFailedAndStale", "staleOrMissing", "missingOnly"]) {
+  if (!openApi.includes(value)) {
+    fail(`OpenAPI thumbnail cache refresh mode schema missing ${value}`);
+  }
+}
+const thumbnailCacheClearOperation = operationBlock("/thumbnails/cache/clear", "post");
+for (const value of [
+  "operationId: clearThumbnailCache",
+  "ThumbnailCacheClearResponse"
+]) {
+  if (!thumbnailCacheClearOperation.includes(value)) {
+    fail(`OpenAPI POST /thumbnails/cache/clear missing ${value}`);
   }
 }
 const previewOperation = operationBlock("/media/{fileId}/preview", "get");
@@ -570,6 +615,45 @@ for (const value of [
 }
 if (previewBody.includes("StatusCode::ACCEPTED")) {
   fail("GET /api/media/{fileId}/preview must not be a 202 Accepted placeholder");
+}
+for (const value of [
+  '"/api/thumbnails/cache/stats"',
+  '"/api/thumbnails/cache/clear"',
+  '"/api/tasks/thumbnail-cache"'
+]) {
+  if (!routesRs.includes(value)) {
+    fail(`PHASE1_API_PATHS must include ${value}`);
+  }
+}
+const thumbnailCacheStatsBody = functionBody("get_thumbnail_cache_stats");
+for (const value of [
+  "thumbnail_cache_scope(query)",
+  "get_thumbnail_cache_stats",
+  "thumbnail_cache_stats_response"
+]) {
+  if (!thumbnailCacheStatsBody.includes(value)) {
+    fail(`GET /api/thumbnails/cache/stats implementation missing ${value}`);
+  }
+}
+const thumbnailCacheEnqueueBody = functionBody("enqueue_thumbnail_cache");
+for (const value of [
+  "ThumbnailCacheRefreshMode::from_wire_value",
+  "file_ids",
+  "enqueue_thumbnail_cache_tasks",
+  "enqueue_thumbnail_cache_tasks_for_file_ids",
+  "enqueue_thumbnail_task_wakeup",
+  "THUMBNAIL_BULK_PRIORITY",
+  "thumbnail_cache_enqueue_response"
+]) {
+  if (!thumbnailCacheEnqueueBody.includes(value)) {
+    fail(`POST /api/tasks/thumbnail-cache implementation missing ${value}`);
+  }
+}
+const thumbnailCacheClearBody = functionBody("clear_thumbnail_cache");
+for (const value of ["clear_thumbnail_cache", "thumbnail_cache_clear_response"]) {
+  if (!thumbnailCacheClearBody.includes(value)) {
+    fail(`POST /api/thumbnails/cache/clear implementation missing ${value}`);
+  }
 }
 for (const value of [
   "offset:",

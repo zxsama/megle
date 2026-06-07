@@ -791,6 +791,63 @@ mod tests {
     }
 
     #[test]
+    fn completed_scan_removes_thumb_blob_for_missing_media() {
+        let temp_root = unique_temp_dir();
+        fs::create_dir_all(&temp_root).expect("create root dir");
+        let delete_path = temp_root.join("delete.jpg");
+        write_test_image(&delete_path, 800, 400);
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = add_test_root(&database, &temp_root, "scan-reconcile-delete-blob-test");
+        let root = test_root(&database, root_id);
+
+        scan_root(&mut database, &root).expect("first scan");
+        let media = single_media(&database, root_id);
+        let source_fingerprint = database
+            .get_thumbnail_source(media.id)
+            .expect("get source")
+            .expect("source exists")
+            .source_fingerprint(crate::thumbnails::GRID_320_PROFILE);
+        database
+            .upsert_thumbnail_state(crate::db::ThumbnailStateUpsert {
+                file_id: media.id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                state: "ready".to_string(),
+                cache_key: None,
+                width: Some(320),
+                height: Some(160),
+                byte_size: Some(42),
+                error: None,
+                source_fingerprint: Some(source_fingerprint),
+            })
+            .expect("seed ready thumbnail");
+        database
+            .upsert_thumb_blob(crate::db::ThumbBlobRecord {
+                file_id: media.id,
+                profile: crate::thumbnails::GRID_320_PROFILE.to_string(),
+                data: vec![1, 2, 3, 4],
+                width: 320,
+                height: 160,
+                byte_size: 4,
+                output_format: crate::thumbnails::GENERATED_FORMAT.to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .expect("seed thumb blob");
+
+        fs::remove_file(delete_path).expect("delete image");
+        scan_root(&mut database, &root).expect("second scan");
+
+        assert!(database
+            .get_thumb_blob(media.id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumb blob")
+            .is_none());
+
+        fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    }
+
+    #[test]
     fn folder_boundaries_do_not_flush_pending_files_before_batch_threshold() {
         use std::cell::RefCell;
         use std::rc::Rc;

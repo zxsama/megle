@@ -767,6 +767,7 @@ fn delete_file(
         params![file_id],
     )?;
     transaction.execute("DELETE FROM media_fts WHERE rowid = ?1", params![file_id])?;
+    crate::db::cleanup_inactive_thumbnail_artifacts_in_transaction(&transaction)?;
 
     let record = insert_operation(
         &transaction,
@@ -871,6 +872,7 @@ fn delete_folder(
         "#,
         params![folder_id],
     )?;
+    crate::db::cleanup_inactive_thumbnail_artifacts_in_transaction(&transaction)?;
     for file_id in &descendant_files {
         transaction.execute("DELETE FROM media_fts WHERE rowid = ?1", params![*file_id])?;
     }

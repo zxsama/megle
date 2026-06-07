@@ -1,5 +1,5 @@
-import { CheckCircle2, Database, FolderCog, Trash2, XCircle } from "lucide-react";
-import { useState, type KeyboardEvent } from "react";
+import { CheckCircle2, Database, FolderCog, RefreshCw, Trash2, XCircle } from "lucide-react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import type { LibraryState } from "../../core/useLibraryData";
 import { LiquidGlassSurface, type InterfaceStyleController } from "../../design/liquid-glass";
 import {
@@ -102,30 +102,11 @@ export function SettingsView({
           previewPreferences={previewPreferences}
         />
 
-        <LiquidGlassSurface
-          as="section"
-          className="settings-section"
-          aria-labelledby="settings-cache-title"
-          interactive
-          scrollable
-          tone="panel"
-        >
-          <h2 className="settings-section-title" id="settings-cache-title">
-            Disk thumbnail cache
-          </h2>
-          <p className="settings-section-copy">
-            The thumbnail cache holds generated WebP files used for the grid and preview.
-          </p>
-          <button
-            className="settings-action"
-            disabled
-            title="Available in a future release"
-            type="button"
-          >
-            <Trash2 aria-hidden="true" size={14} />
-            <span>Clear thumbnail cache</span>
-          </button>
-        </LiquidGlassSurface>
+        <PersistentThumbnailCacheSection
+          library={library}
+          onPreviewPreferencesChange={onPreviewPreferencesChange}
+          previewPreferences={previewPreferences}
+        />
 
         <ShortcutBindingsEditor />
       </div>
@@ -240,7 +221,8 @@ function PreviewBrowsingSection({
       </h2>
       <p className="settings-section-copy">
         Control how much original image data and grid thumbnail data Megle keeps in memory
-        while browsing.
+        while browsing. The persistent thumbnail cache below is stored in SQLite and survives
+        restarts.
       </p>
       <div className="settings-style-group">
         <StyleSlider
@@ -257,7 +239,7 @@ function PreviewBrowsingSection({
         />
         <StyleSlider
           id="thumbnail-cache-limit"
-          label="Thumbnail cache"
+          label="Thumbnail cache (memory)"
           max={PREVIEW_PREFERENCE_LIMITS.thumbnailCacheLimitMb.max}
           min={PREVIEW_PREFERENCE_LIMITS.thumbnailCacheLimitMb.min}
           onChange={(thumbnailCacheLimitMb) =>
@@ -267,6 +249,149 @@ function PreviewBrowsingSection({
           unit="MB"
           value={previewPreferences.thumbnailCacheLimitMb}
         />
+      </div>
+    </LiquidGlassSurface>
+  );
+}
+
+function PersistentThumbnailCacheSection({
+  library,
+  onPreviewPreferencesChange,
+  previewPreferences
+}: Pick<SettingsViewProps, "library" | "onPreviewPreferencesChange" | "previewPreferences">) {
+  useEffect(() => {
+    void library.refreshThumbnailCacheStats();
+    const interval = window.setInterval(() => {
+      void library.refreshThumbnailCacheStats();
+    }, library.thumbnailCacheActionBusy || (library.thumbnailCacheStats?.activeBulkTaskCount ?? 0) > 0 ? 2500 : 10000);
+    return () => window.clearInterval(interval);
+  }, [
+    library.refreshThumbnailCacheStats,
+    library.selectedRootId,
+    library.selectedFolderId,
+    library.showChildFolderContents,
+    library.thumbnailCacheActionBusy,
+    library.thumbnailCacheStats?.activeBulkTaskCount
+  ]);
+
+  const stats = library.thumbnailCacheStats;
+  const currentFolderLabel = library.showChildFolderContents
+    ? "Generate current folder thumbnails"
+    : "Generate current folder thumbnails";
+  const currentFolderDisabled = library.selectedFolderId === null || library.thumbnailCacheActionBusy;
+
+  return (
+    <LiquidGlassSurface
+      as="section"
+      className="settings-section"
+      aria-labelledby="settings-cache-title"
+      interactive
+      scrollable
+      tone="panel"
+    >
+      <div className="settings-section-heading">
+        <h2 className="settings-section-title" id="settings-cache-title">
+          Persistent thumbnail cache
+        </h2>
+        <button
+          className="settings-action"
+          disabled={library.thumbnailCacheStatsLoading}
+          onClick={() => void library.refreshThumbnailCacheStats()}
+          type="button"
+        >
+          <RefreshCw aria-hidden="true" size={14} />
+          <span>{library.thumbnailCacheStatsLoading ? "Refreshing..." : "Refresh stats"}</span>
+        </button>
+      </div>
+      <p className="settings-section-copy">
+        Generated thumbnails are stored in SQLite and reused after folder reopen and app restart.
+        Bulk generation stays behind selected, visible, and ahead-of-scroll thumbnail work.
+      </p>
+      <dl className="settings-grid">
+        <div className="settings-row">
+          <dt className="settings-row-label">Cached</dt>
+          <dd className="settings-row-value">{stats ? stats.cachedCount.toLocaleString() : "-"}</dd>
+        </div>
+        <div className="settings-row">
+          <dt className="settings-row-label">Missing / stale</dt>
+          <dd className="settings-row-value">
+            {stats ? (stats.missingCount + stats.staleCount).toLocaleString() : "-"}
+          </dd>
+        </div>
+        <div className="settings-row">
+          <dt className="settings-row-label">Failed</dt>
+          <dd className="settings-row-value">{stats ? stats.failedCount.toLocaleString() : "-"}</dd>
+        </div>
+        <div className="settings-row">
+          <dt className="settings-row-label">DB blob bytes</dt>
+          <dd className="settings-row-value">{stats ? formatCacheBytes(stats.totalBlobBytes) : "-"}</dd>
+        </div>
+        <div className="settings-row">
+          <dt className="settings-row-label">Active bulk tasks</dt>
+          <dd className="settings-row-value">
+            {stats ? stats.activeBulkTaskCount.toLocaleString() : "-"}
+          </dd>
+        </div>
+      </dl>
+      <div className="settings-style-group">
+        <button
+          className="settings-action"
+          onClick={() =>
+            onPreviewPreferencesChange({
+              persistentThumbnailCacheAutoRefresh:
+                !previewPreferences.persistentThumbnailCacheAutoRefresh
+            })
+          }
+          type="button"
+        >
+          <span>
+            Auto-refresh on folder open:{" "}
+            {previewPreferences.persistentThumbnailCacheAutoRefresh ? "On" : "Off"}
+          </span>
+        </button>
+      </div>
+      <div className="settings-style-group">
+        <button
+          className="settings-action"
+          disabled={currentFolderDisabled}
+          onClick={() => void library.generateCurrentFolderThumbnailCache()}
+          type="button"
+        >
+          <span>{currentFolderLabel}</span>
+        </button>
+        <button
+          className="settings-action"
+          disabled={currentFolderDisabled}
+          onClick={() => void library.generateCurrentTreeThumbnailCache()}
+          type="button"
+        >
+          <span>Generate current tree thumbnails</span>
+        </button>
+        <button
+          className="settings-action"
+          disabled={library.thumbnailCacheActionBusy}
+          onClick={() => void library.generateAllThumbnailCache()}
+          type="button"
+        >
+          <span>{library.thumbnailCacheActionBusy ? "Generating..." : "Generate all thumbnails"}</span>
+        </button>
+        <button
+          className="settings-action"
+          disabled={library.thumbnailCacheActionBusy}
+          onClick={() => void library.retryThumbnailCacheFailures()}
+          type="button"
+        >
+          <span>Retry failed / stale thumbnails</span>
+        </button>
+        <button
+          className="settings-action"
+          disabled={library.thumbnailCacheActionBusy}
+          onClick={() => void library.clearThumbnailCache()}
+          type="button"
+        >
+          <Trash2 aria-hidden="true" size={14} />
+          <span>Clear persistent thumbnail cache</span>
+        </button>
       </div>
     </LiquidGlassSurface>
   );
@@ -657,6 +782,21 @@ function formatStyleValue(value: number, unit: "%" | "MB" | "px" | "x") {
   if (unit === "%") return `${rounded}%`;
   if (unit === "MB") return `${rounded} MB`;
   return unit === "px" ? `${rounded}px` : `${rounded}x`;
+}
+
+function formatCacheBytes(value: number) {
+  if (value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let amount = value;
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  const rounded = amount >= 10 || unitIndex === 0 ? amount.toFixed(0) : amount.toFixed(1);
+  return `${rounded} ${units[unitIndex]}`;
 }
 
 function ShortcutBindingsEditor() {

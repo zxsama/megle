@@ -8,6 +8,8 @@ import type {
   SearchParams,
   TagRecord,
   TaskRecord,
+  ThumbnailCacheRefreshMode,
+  ThumbnailCacheStatsResponse,
   ThumbnailResponse,
   UserMetadataRecord,
   UserMetadataUpdate
@@ -35,6 +37,9 @@ const SCAN_REFRESH_INTERVAL_MS = 800;
 const SELECTED_THUMBNAIL_REPOLL_MS = 150;
 const THUMBNAIL_SCOPE_SYNC_DEBOUNCE_MS = 0;
 const SHOW_SUBFOLDER_CONTENTS_STORAGE_KEY = "megle.library.subfolder-content-open";
+const SEEN_THUMBNAIL_PERSIST_BATCH_SIZE = 128;
+const SEEN_THUMBNAIL_PERSIST_DEBOUNCE_MS = 500;
+const SEEN_THUMBNAIL_PERSIST_RETRY_MS = 10_000;
 
 export type LibrarySort =
   | "mtime_desc"
@@ -106,7 +111,16 @@ export interface LibraryState {
   recentOpsLoading: boolean;
   diagnostics: DesktopDiagnostics | null;
   diagnosticsProbed: boolean;
+  thumbnailCacheStats: ThumbnailCacheStatsResponse | null;
+  thumbnailCacheStatsLoading: boolean;
+  thumbnailCacheActionBusy: boolean;
   loadRecentOps: () => Promise<void>;
+  refreshThumbnailCacheStats: () => Promise<ThumbnailCacheStatsResponse | null>;
+  generateCurrentFolderThumbnailCache: () => Promise<void>;
+  generateCurrentTreeThumbnailCache: () => Promise<void>;
+  generateAllThumbnailCache: () => Promise<void>;
+  retryThumbnailCacheFailures: () => Promise<void>;
+  clearThumbnailCache: () => Promise<void>;
   renameFile: (fileId: number, newName: string) => Promise<FileOpResult>;
   renameFolder: (folderId: number, newName: string) => Promise<FileOpResult>;
   moveItems: (input: {
@@ -186,7 +200,13 @@ type PendingInteractiveScanRequest = {
   knownTaskIds: Set<number>;
 };
 
-export function useLibraryData(): LibraryState {
+type UseLibraryDataOptions = {
+  persistentThumbnailCacheAutoRefresh: boolean;
+};
+
+export function useLibraryData(
+  options: UseLibraryDataOptions = { persistentThumbnailCacheAutoRefresh: false }
+): LibraryState {
   const client = useMemo(() => createCoreClient(), []);
   const mediaPageGeneration = useRef(0);
   const inFlightMediaPageKeys = useRef<Set<string>>(new Set());
@@ -203,9 +223,18 @@ export function useLibraryData(): LibraryState {
   const thumbnailStateControllersRef = useRef<Map<ThumbnailRequestPriority, AbortController>>(
     new Map()
   );
+  const seenThumbnailPersistIdsRef = useRef<Set<number>>(new Set());
+  const seenThumbnailPersistFlushTimerRef = useRef<number | null>(null);
+  const seenThumbnailPersistFlushInFlightRef = useRef(false);
+  const seenThumbnailPersistControllerRef = useRef<AbortController | null>(null);
+  const seenThumbnailPersistActiveRef = useRef(true);
   const loadTasksRequestRef = useRef<Promise<TaskRecord[]> | null>(null);
   const interactiveFolderScanControllerRef = useRef<AbortController | null>(null);
   const thumbnailPriorityScopeSyncControllerRef = useRef<AbortController | null>(null);
+  const thumbnailCacheStatsControllerRef = useRef<AbortController | null>(null);
+  const thumbnailCacheActionControllerRef = useRef<AbortController | null>(null);
+  const thumbnailCacheAutoRefreshTimerRef = useRef<number | null>(null);
+  const lastThumbnailCacheAutoRefreshScopeKeyRef = useRef<string | null>(null);
   const scanRefreshInFlightRef = useRef(false);
   const scanRefreshActiveRootIdRef = useRef<number | null>(null);
   const scanRefreshSelectionVersionRef = useRef(0);
@@ -295,6 +324,10 @@ export function useLibraryData(): LibraryState {
   const [recentOpsLoading, setRecentOpsLoading] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | null>(null);
   const [diagnosticsProbed, setDiagnosticsProbed] = useState(false);
+  const [thumbnailCacheStats, setThumbnailCacheStats] =
+    useState<ThumbnailCacheStatsResponse | null>(null);
+  const [thumbnailCacheStatsLoading, setThumbnailCacheStatsLoading] = useState(false);
+  const [thumbnailCacheActionBusy, setThumbnailCacheActionBusy] = useState(false);
   const loadedMediaById = useMemo(() => {
     const next = new Map<number, MediaRecord>();
     media.forEach((item) => next.set(item.id, item));
@@ -388,6 +421,96 @@ export function useLibraryData(): LibraryState {
   selectedFolderIdRef.current = selectedFolderId;
   selectedMediaIdRef.current = selectedMediaId;
   folderNavigationHistoryRef.current = folderNavigationHistory;
+
+  const currentThumbnailCacheScope = useCallback(
+    (includeDescendants = showChildFolderContentsRef.current) => {
+      const rootId = selectedRootIdRef.current;
+      if (rootId === null) {
+        return null;
+      }
+      return {
+        rootId,
+        folderId: selectedFolderIdRef.current ?? undefined,
+        includeDescendants
+      };
+    },
+    []
+  );
+
+  const refreshThumbnailCacheStats = useCallback(async () => {
+    const scope = currentThumbnailCacheScope();
+    if (!scope) {
+      setThumbnailCacheStats(null);
+      return null;
+    }
+    thumbnailCacheStatsControllerRef.current?.abort();
+    const controller = new AbortController();
+    thumbnailCacheStatsControllerRef.current = controller;
+    setThumbnailCacheStatsLoading(true);
+    try {
+      const stats = await client.getThumbnailCacheStats(scope, {
+        requestPriority: "metadata",
+        signal: controller.signal
+      });
+      if (thumbnailCacheStatsControllerRef.current === controller) {
+        setThumbnailCacheStats(stats);
+      }
+      return stats;
+    } catch (cause) {
+      if (isAbortError(cause)) {
+        return null;
+      }
+      setError(errorMessage(cause));
+      return null;
+    } finally {
+      if (thumbnailCacheStatsControllerRef.current === controller) {
+        thumbnailCacheStatsControllerRef.current = null;
+      }
+      setThumbnailCacheStatsLoading(false);
+    }
+  }, [client, currentThumbnailCacheScope]);
+
+  const enqueueThumbnailCacheLoop = useCallback(
+    async (scope: { rootId?: number; folderId?: number; includeDescendants?: boolean }, refreshMode: ThumbnailCacheRefreshMode) => {
+      thumbnailCacheActionControllerRef.current?.abort();
+      const controller = new AbortController();
+      thumbnailCacheActionControllerRef.current = controller;
+      setThumbnailCacheActionBusy(true);
+      try {
+        while (!controller.signal.aborted) {
+          const response = await client.enqueueThumbnailCache(
+            {
+              ...scope,
+              refreshMode,
+              limit: MEDIA_WINDOW_MAX_LIMIT
+            },
+            {
+              requestPriority: "background",
+              signal: controller.signal
+            }
+          );
+          setThumbnailCacheStats(response);
+          const nothingLeft =
+            response.pendingCandidateCount === 0 &&
+            (refreshMode !== "retryFailedAndStale" || response.failedCount === 0);
+          if (response.acceptedCount === 0 || nothingLeft) {
+            break;
+          }
+          await yieldToBrowser();
+        }
+      } catch (cause) {
+        if (!isAbortError(cause)) {
+          setError(errorMessage(cause));
+        }
+      } finally {
+        if (thumbnailCacheActionControllerRef.current === controller) {
+          thumbnailCacheActionControllerRef.current = null;
+        }
+        setThumbnailCacheActionBusy(false);
+      }
+    },
+    [client]
+  );
 
   const abortStaleMediaPageRequests = useCallback((keepRequestKey?: string) => {
     if (!keepRequestKey) {
@@ -506,6 +629,92 @@ export function useLibraryData(): LibraryState {
     [flushThumbnailPriorityScopeSync]
   );
 
+  const flushSeenThumbnailPersistQueue = useCallback(async () => {
+    if (!seenThumbnailPersistActiveRef.current) {
+      return;
+    }
+    if (seenThumbnailPersistFlushInFlightRef.current) {
+      return;
+    }
+    if (seenThumbnailPersistFlushTimerRef.current !== null) {
+      window.clearTimeout(seenThumbnailPersistFlushTimerRef.current);
+      seenThumbnailPersistFlushTimerRef.current = null;
+    }
+    const batch = Array.from(seenThumbnailPersistIdsRef.current).slice(
+      0,
+      SEEN_THUMBNAIL_PERSIST_BATCH_SIZE
+    );
+    if (batch.length === 0) {
+      return;
+    }
+    seenThumbnailPersistFlushInFlightRef.current = true;
+    const controller = new AbortController();
+    seenThumbnailPersistControllerRef.current = controller;
+    let retryDelayMs = SEEN_THUMBNAIL_PERSIST_DEBOUNCE_MS;
+    try {
+      await client.enqueueThumbnailCache(
+        {
+          fileIds: batch,
+          refreshMode: "staleOrMissing",
+          limit: batch.length
+        },
+        {
+          requestPriority: "background",
+          signal: controller.signal
+        }
+      );
+      for (const fileId of batch) {
+        seenThumbnailPersistIdsRef.current.delete(fileId);
+      }
+    } catch (cause) {
+      if (!isAbortError(cause)) {
+        retryDelayMs = SEEN_THUMBNAIL_PERSIST_RETRY_MS;
+        setError(errorMessage(cause));
+      }
+    } finally {
+      if (seenThumbnailPersistControllerRef.current === controller) {
+        seenThumbnailPersistControllerRef.current = null;
+      }
+      seenThumbnailPersistFlushInFlightRef.current = false;
+      if (!seenThumbnailPersistActiveRef.current) {
+        return;
+      }
+      if (seenThumbnailPersistIdsRef.current.size > 0) {
+        if (seenThumbnailPersistFlushTimerRef.current !== null) {
+          window.clearTimeout(seenThumbnailPersistFlushTimerRef.current);
+        }
+        seenThumbnailPersistFlushTimerRef.current = window.setTimeout(() => {
+          seenThumbnailPersistFlushTimerRef.current = null;
+          void flushSeenThumbnailPersistQueue();
+        }, retryDelayMs);
+      }
+    }
+  }, [client]);
+
+  const scheduleSeenThumbnailPersist = useCallback(
+    (mediaIds: number[]) => {
+      if (!seenThumbnailPersistActiveRef.current) {
+        return;
+      }
+      if (mediaIds.length === 0) {
+        return;
+      }
+      for (const mediaId of mediaIds) {
+        if (mediaId > 0) {
+          seenThumbnailPersistIdsRef.current.add(mediaId);
+        }
+      }
+      if (seenThumbnailPersistFlushTimerRef.current !== null) {
+        return;
+      }
+      seenThumbnailPersistFlushTimerRef.current = window.setTimeout(() => {
+        seenThumbnailPersistFlushTimerRef.current = null;
+        void flushSeenThumbnailPersistQueue();
+      }, SEEN_THUMBNAIL_PERSIST_DEBOUNCE_MS);
+    },
+    [flushSeenThumbnailPersistQueue]
+  );
+
   const abortThumbnailStateControllersForPriority = useCallback(
     (priority: ThumbnailRequestPriority) => {
       const priorities: ThumbnailRequestPriority[] =
@@ -538,6 +747,9 @@ export function useLibraryData(): LibraryState {
       .filter((mediaRecord): mediaRecord is MediaRecord => Boolean(mediaRecord));
     if (mediaRecords.length === 0) {
       return;
+    }
+    if (priority !== "background") {
+      scheduleSeenThumbnailPersist(normalizedMediaIds);
     }
     const requestKey = [
       priority,
@@ -694,6 +906,7 @@ export function useLibraryData(): LibraryState {
   }, [
     abortThumbnailStateControllersForPriority,
     client,
+    scheduleSeenThumbnailPersist,
     scheduleThumbnailPriorityScopeSync
   ]);
 
@@ -1353,17 +1566,32 @@ export function useLibraryData(): LibraryState {
   }, [loadLibrary]);
 
   useEffect(() => {
+    seenThumbnailPersistActiveRef.current = true;
     return () => {
       if (thumbnailPriorityScopeSyncTimerRef.current !== null) {
         window.clearTimeout(thumbnailPriorityScopeSyncTimerRef.current);
         thumbnailPriorityScopeSyncTimerRef.current = null;
       }
+      seenThumbnailPersistActiveRef.current = false;
+      seenThumbnailPersistIdsRef.current.clear();
+      if (seenThumbnailPersistFlushTimerRef.current !== null) {
+        window.clearTimeout(seenThumbnailPersistFlushTimerRef.current);
+        seenThumbnailPersistFlushTimerRef.current = null;
+      }
+      seenThumbnailPersistControllerRef.current?.abort();
+      seenThumbnailPersistControllerRef.current = null;
       abortAllControllers(mediaPageControllersRef.current);
       abortAllControllers(folderChildControllersRef.current);
       abortAllControllers(folderDescendantControllersRef.current);
       abortAllControllers(thumbnailStateControllersRef.current);
       interactiveFolderScanControllerRef.current?.abort();
       thumbnailPriorityScopeSyncControllerRef.current?.abort();
+      thumbnailCacheStatsControllerRef.current?.abort();
+      thumbnailCacheActionControllerRef.current?.abort();
+      if (thumbnailCacheAutoRefreshTimerRef.current !== null) {
+        window.clearTimeout(thumbnailCacheAutoRefreshTimerRef.current);
+        thumbnailCacheAutoRefreshTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -1483,6 +1711,64 @@ export function useLibraryData(): LibraryState {
     selectedThumbnail?.state,
     selectedThumbnail?.updatedAt
   ]);
+
+  useEffect(() => {
+    if (!options.persistentThumbnailCacheAutoRefresh) {
+      if (thumbnailCacheAutoRefreshTimerRef.current !== null) {
+        window.clearTimeout(thumbnailCacheAutoRefreshTimerRef.current);
+        thumbnailCacheAutoRefreshTimerRef.current = null;
+      }
+      lastThumbnailCacheAutoRefreshScopeKeyRef.current = null;
+      return;
+    }
+
+    const scope = currentThumbnailCacheScope();
+    if (!scope || scope.folderId === undefined) {
+      return;
+    }
+
+    const scopeKey = `${scope.rootId}:${scope.folderId}:${scope.includeDescendants ? "tree" : "folder"}`;
+    if (lastThumbnailCacheAutoRefreshScopeKeyRef.current === scopeKey) {
+      return;
+    }
+    if (thumbnailCacheAutoRefreshTimerRef.current !== null) {
+      window.clearTimeout(thumbnailCacheAutoRefreshTimerRef.current);
+      thumbnailCacheAutoRefreshTimerRef.current = null;
+    }
+
+    let cancelled = false;
+    thumbnailCacheAutoRefreshTimerRef.current = window.setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+      lastThumbnailCacheAutoRefreshScopeKeyRef.current = scopeKey;
+      void client
+        .enqueueThumbnailCache(
+          {
+            ...scope,
+            refreshMode: "staleOrMissing",
+            limit: MEDIA_WINDOW_MAX_LIMIT
+          },
+          { requestPriority: "background" }
+        )
+        .then((response) => {
+          setThumbnailCacheStats(response);
+        })
+        .catch((cause) => {
+          if (!isAbortError(cause)) {
+            setError(errorMessage(cause));
+          }
+        });
+    }, INTERACTIVE_FOLDER_SCAN_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      if (thumbnailCacheAutoRefreshTimerRef.current !== null) {
+        window.clearTimeout(thumbnailCacheAutoRefreshTimerRef.current);
+        thumbnailCacheAutoRefreshTimerRef.current = null;
+      }
+    };
+  }, [client, currentThumbnailCacheScope, options.persistentThumbnailCacheAutoRefresh, selectedFolderId, selectedRootId, showChildFolderContents]);
 
   useEffect(() => {
     interactiveFolderScanControllerRef.current?.abort();
@@ -2236,6 +2522,44 @@ export function useLibraryData(): LibraryState {
     ]
   );
 
+  const generateCurrentFolderThumbnailCache = useCallback(async () => {
+    const scope = currentThumbnailCacheScope(false);
+    if (!scope || scope.folderId === undefined) {
+      return;
+    }
+    await enqueueThumbnailCacheLoop(scope, "staleOrMissing");
+  }, [currentThumbnailCacheScope, enqueueThumbnailCacheLoop]);
+
+  const generateCurrentTreeThumbnailCache = useCallback(async () => {
+    const scope = currentThumbnailCacheScope(true);
+    if (!scope || scope.folderId === undefined) {
+      return;
+    }
+    await enqueueThumbnailCacheLoop(scope, "staleOrMissing");
+  }, [currentThumbnailCacheScope, enqueueThumbnailCacheLoop]);
+
+  const generateAllThumbnailCache = useCallback(async () => {
+    await enqueueThumbnailCacheLoop({}, "staleOrMissing");
+  }, [enqueueThumbnailCacheLoop]);
+
+  const retryThumbnailCacheFailures = useCallback(async () => {
+    await enqueueThumbnailCacheLoop(currentThumbnailCacheScope() ?? {}, "retryFailedAndStale");
+  }, [currentThumbnailCacheScope, enqueueThumbnailCacheLoop]);
+
+  const clearPersistentThumbnailCache = useCallback(async () => {
+    try {
+      setThumbnailCacheActionBusy(true);
+      await client.clearThumbnailCache({ requestPriority: "interactive" });
+      await refreshThumbnailCacheStats();
+    } catch (cause) {
+      if (!isAbortError(cause)) {
+        setError(errorMessage(cause));
+      }
+    } finally {
+      setThumbnailCacheActionBusy(false);
+    }
+  }, [client, refreshThumbnailCacheStats]);
+
   return {
     roots,
     folders,
@@ -2281,7 +2605,16 @@ export function useLibraryData(): LibraryState {
     recentOpsLoading,
     diagnostics,
     diagnosticsProbed,
+    thumbnailCacheStats,
+    thumbnailCacheStatsLoading,
+    thumbnailCacheActionBusy,
     loadRecentOps,
+    refreshThumbnailCacheStats,
+    generateCurrentFolderThumbnailCache,
+    generateCurrentTreeThumbnailCache,
+    generateAllThumbnailCache,
+    retryThumbnailCacheFailures,
+    clearThumbnailCache: clearPersistentThumbnailCache,
     renameFile,
     renameFolder,
     moveItems,

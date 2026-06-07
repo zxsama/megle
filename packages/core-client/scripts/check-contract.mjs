@@ -61,7 +61,9 @@ function expectedPropertyLine(name, schema, required) {
 }
 
 function interfaceBody(name) {
-  const pattern = new RegExp(`export\\s+interface\\s+${name}(?:<[^>]+>)?\\s*{([\\s\\S]*?)\\n}`);
+  const pattern = new RegExp(
+    `export\\s+interface\\s+${name}(?:<[^>]+>)?(?:\\s+extends[^\\{]+)?\\s*{([\\s\\S]*?)\\n}`
+  );
   const match = generated.match(pattern);
   return match?.[1] ?? "";
 }
@@ -431,6 +433,47 @@ for (const line of [
     "generated-contract.ts ThumbnailPriorityScopeSyncRequest"
   );
 }
+const thumbnailCacheScopeBody = interfaceBody("ThumbnailCacheScopeParams");
+for (const line of ["rootId?: number;", "folderId?: number;", "includeDescendants?: boolean;"]) {
+  requireLine(thumbnailCacheScopeBody, line, "generated-contract.ts ThumbnailCacheScopeParams");
+}
+if (
+  !generated.includes(
+    'export type ThumbnailCacheRefreshMode =\n  | "missingOnly"\n  | "staleOrMissing"\n  | "retryFailedAndStale";'
+  )
+) {
+  fail("generated-contract.ts must define ThumbnailCacheRefreshMode");
+}
+const thumbnailCacheTaskBody = interfaceBody("ThumbnailCacheTaskRequest");
+for (const line of ["fileIds?: number[];", "refreshMode: ThumbnailCacheRefreshMode;", "limit?: number;"]) {
+  requireLine(thumbnailCacheTaskBody, line, "generated-contract.ts ThumbnailCacheTaskRequest");
+}
+const thumbnailCacheStatsBody = interfaceBody("ThumbnailCacheStatsResponse");
+for (const line of [
+  "cachedCount: number;",
+  "missingCount: number;",
+  "staleCount: number;",
+  "failedCount: number;",
+  "pendingCandidateCount: number;",
+  "totalBlobBytes: number;",
+  "activeBulkTaskCount: number;"
+]) {
+  requireLine(thumbnailCacheStatsBody, line, "generated-contract.ts ThumbnailCacheStatsResponse");
+}
+const thumbnailCacheEnqueueBody = interfaceBody("ThumbnailCacheEnqueueResponse");
+requireLine(
+  thumbnailCacheEnqueueBody,
+  "acceptedCount: number;",
+  "generated-contract.ts ThumbnailCacheEnqueueResponse"
+);
+const thumbnailCacheClearBody = interfaceBody("ThumbnailCacheClearResponse");
+for (const line of [
+  "cleared: boolean;",
+  "deletedBlobCount: number;",
+  "resetThumbnailCount: number;"
+]) {
+  requireLine(thumbnailCacheClearBody, line, "generated-contract.ts ThumbnailCacheClearResponse");
+}
 if (
   !/getThumbnail:\s*\(\s*fileId:\s*number,\s*target:\s*"grid_320"\s*=\s*"grid_320",\s*priority:\s*ThumbnailPriority\s*=\s*"background",\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>[\s\S]*?request<ThumbnailResponse>\(`\/media\/\$\{fileId\}\/thumbnail\$\{query\(\{\s*target,\s*priority\s*}\)\}`,\s*\{[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*thumbnailPriorityCoreRequestPriority\(priority\),[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
     client
@@ -491,6 +534,27 @@ if (
   fail(
     "client.ts syncThumbnailPriorityScope must call POST /tasks/thumbnail-priority-scope with the typed scope payload at interactive priority and forward abort signals"
   );
+}
+if (
+  !/getThumbnailCacheStats:\s*\(\s*params:\s*ThumbnailCacheScopeParams\s*=\s*\{\},\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>\s*request<ThumbnailCacheStatsResponse>\(`\/thumbnails\/cache\/stats\$\{query\(params\)\}`,\s*\{[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"metadata",[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
+    client
+  )
+) {
+  fail("client.ts getThumbnailCacheStats must serialize typed scope params and forward abort signals");
+}
+if (
+  !/enqueueThumbnailCache:\s*\(\s*input:\s*ThumbnailCacheTaskRequest,\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>\s*request<ThumbnailCacheEnqueueResponse>\("\/tasks\/thumbnail-cache",\s*\{[\s\S]*?method:\s*"POST",[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"background",[\s\S]*?body:\s*JSON\.stringify\(input\),[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
+    client
+  )
+) {
+  fail("client.ts enqueueThumbnailCache must call POST /tasks/thumbnail-cache with typed body and forward abort signals");
+}
+if (
+  !/clearThumbnailCache:\s*\(\s*options:\s*CoreRequestOptions\s*=\s*\{\}\s*\)\s*=>\s*request<ThumbnailCacheClearResponse>\("\/thumbnails\/cache\/clear",\s*\{[\s\S]*?method:\s*"POST",[\s\S]*?requestPriority:\s*options\.requestPriority\s*\?\?\s*"interactive",[\s\S]*?signal:\s*options\.signal\s*\}\)/.test(
+    client
+  )
+) {
+  fail("client.ts clearThumbnailCache must call POST /thumbnails/cache/clear");
 }
 
 if (!/async function readResponseBody\(response:\s*Response\):\s*Promise<unknown>/.test(client)) {

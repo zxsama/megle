@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { createWriteStream, statSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import WebSocket from "ws";
@@ -9,15 +10,26 @@ import WebSocket from "ws";
 const root = "D:\\Megle";
 const visualRoot = path.join(root, ".tmp", "visual-check");
 const logDir = path.join(visualRoot, "logs");
-const dataDir = path.join(visualRoot, "data-artists-million");
+const dataDir =
+  process.env.MEGLE_ARTISTS_SWEEP_DATA_DIR ?? path.join(visualRoot, "data-artists-million");
+const dbPath = path.join(dataDir, "megle.sqlite");
 const electronUserDataDir = path.join(dataDir, "electron-user-data");
 const startDesktopCommand = path.join(root, "start-desktop.cmd");
 const autoRoot = process.env.MEGLE_ARTISTS_SWEEP_ROOT ?? "Y:\\Repository\\Billfish\\Artists";
 const webUrl = process.env.MEGLE_ARTISTS_SWEEP_WEB_URL ?? "http://127.0.0.1:5181";
-const debugPort = Number(process.env.MEGLE_ARTISTS_SWEEP_DEBUG_PORT ?? 9251);
+let debugPort = Number(process.env.MEGLE_ARTISTS_SWEEP_DEBUG_PORT ?? 9251);
 const targetOperationCount = Number(process.env.MEGLE_ARTISTS_SWEEP_OPERATION_COUNT ?? 500);
 const resetData = process.env.MEGLE_ARTISTS_SWEEP_RESET_DB !== "0";
 const failOnSlow = process.env.MEGLE_ARTISTS_SWEEP_FAIL_ON_SLOW === "1";
+const allowPartialCoverage = process.env.MEGLE_ARTISTS_SWEEP_ALLOW_PARTIAL_COVERAGE === "1";
+const thumbnailCacheMode = process.env.MEGLE_ARTISTS_SWEEP_THUMBNAIL_CACHE_MODE ?? "none";
+const thumbnailCacheBatchLimit = Number(
+  process.env.MEGLE_ARTISTS_SWEEP_THUMBNAIL_CACHE_LIMIT ?? 256
+);
+const waitForBulkIdleBeforeSweep = process.env.MEGLE_ARTISTS_SWEEP_WAIT_FOR_BULK_IDLE_BEFORE_SWEEP === "1";
+const waitForThumbnailTaskDrainAfterSweep =
+  process.env.MEGLE_ARTISTS_SWEEP_WAIT_FOR_THUMBNAIL_TASK_DRAIN_AFTER_SWEEP === "1";
+const warmSeenFileIdsPath = process.env.MEGLE_ARTISTS_SWEEP_WARM_FILE_IDS_PATH ?? "";
 const FETCH_REPORT_LIMIT = 20;
 const TILE_READY_SELECTOR = ".tile-thumb-ready, .tile-thumb-image, .tile-thumb-failed, img";
 const REQUIRED_LAYOUT_CLASSES = [
@@ -38,6 +50,8 @@ const failures = [];
 const consoleErrors = [];
 const networkProblems = [];
 const startupOutput = [];
+let thumbnailCacheStatsBefore = null;
+let thumbnailCacheStatsAfter = null;
 let child;
 
 if (resetData) {
@@ -54,6 +68,37 @@ function appendOutput(source, chunk) {
   else stdout.write(text);
 }
 
+function fileStats(filePath) {
+  try {
+    const stats = statSync(filePath);
+    return {
+      path: filePath,
+      bytes: stats.size,
+      mtimeUtc: stats.mtime.toISOString()
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        path: filePath,
+        bytes: 0,
+        missing: true
+      };
+    }
+    return {
+      path: filePath,
+      error: String(error?.message ?? error)
+    };
+  }
+}
+
+function collectDatabaseFileStats() {
+  return {
+    sqlite: fileStats(dbPath),
+    wal: fileStats(`${dbPath}-wal`),
+    shm: fileStats(`${dbPath}-shm`)
+  };
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -64,7 +109,7 @@ function startDevApp() {
     env: {
       ...process.env,
       MEGLE_WEB_URL: webUrl,
-      MEGLE_DB_PATH: path.join(dataDir, "megle.sqlite"),
+      MEGLE_DB_PATH: dbPath,
       MEGLE_ELECTRON_USER_DATA_DIR: electronUserDataDir,
       MEGLE_AUTO_ADD_ROOT: autoRoot,
       MEGLE_REMOTE_DEBUG: "1",
@@ -134,6 +179,236 @@ async function waitForUrl(url, timeoutMs = 60_000) {
     await delay(250);
   }
   throw new Error(`Timed out waiting for ${url}: ${String(lastError)}`);
+}
+
+function canBindPort(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", () => {
+      resolve(false);
+    });
+    server.listen({ host: "127.0.0.1", port }, () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+async function resolveDebugPort(startPort, maxAttempts = 2000) {
+  for (let candidate = startPort; candidate < startPort + maxAttempts; candidate += 1) {
+    if (await canBindPort(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(`Unable to find a bindable debug port starting at ${startPort}`);
+}
+
+async function waitForThumbnailCacheIdle(client, timeoutMs = 10 * 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStats = null;
+  while (Date.now() < deadline) {
+    lastStats = await desktopApiJson(client, "/thumbnails/cache/stats");
+    if (
+      (lastStats.pendingCandidateCount ?? 0) === 0 &&
+      (lastStats.activeBulkTaskCount ?? 0) === 0
+    ) {
+      return lastStats;
+    }
+    await delay(1_000);
+  }
+  throw new Error(
+    `Timed out waiting for thumbnail cache to go idle: ${JSON.stringify(lastStats)}`
+  );
+}
+
+async function waitForThumbnailTaskDrain(client, timeoutMs = 10 * 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastActiveTasks = null;
+  while (Date.now() < deadline) {
+    const tasksPage = await desktopApiJson(client, "/tasks");
+    const tasks = Array.isArray(tasksPage?.items) ? tasksPage.items : [];
+    const activeThumbnailTasks = tasks.filter(
+      (task) =>
+        task?.kind === "thumbnail" &&
+        (task?.status === "pending" || task?.status === "running")
+    );
+    lastActiveTasks = activeThumbnailTasks.map((task) => ({
+      id: task.id,
+      priority: task.priority,
+      status: task.status,
+      fileId: task.fileId
+    }));
+    if (activeThumbnailTasks.length === 0) {
+      return lastActiveTasks;
+    }
+    await delay(1_000);
+  }
+  throw new Error(
+    `Timed out waiting for thumbnail tasks to drain: ${JSON.stringify(lastActiveTasks)}`
+  );
+}
+
+function isTerminalThumbnailState(state) {
+  return state === "ready" || state === "failed" || state === "skipped_small";
+}
+
+function takeRotatingWarmSeenBatch(pendingFileIds, cursor, batchSize) {
+  const fileIds = Array.from(pendingFileIds);
+  if (fileIds.length === 0) {
+    return { batch: [], cursor: 0 };
+  }
+  const batch = [];
+  const start = cursor % fileIds.length;
+  const count = Math.min(batchSize, fileIds.length);
+  for (let index = 0; index < count; index += 1) {
+    batch.push(fileIds[(start + index) % fileIds.length]);
+  }
+  return { batch, cursor: cursor + count };
+}
+
+function addWarmSeenDiagnosticGroup(groups, groupName, fileId, detail = null) {
+  const group = groups.get(groupName) ?? { count: 0, ids: [], details: [] };
+  group.count += 1;
+  if (group.ids.length < 8) {
+    group.ids.push(fileId);
+  }
+  if (detail && group.details.length < 3 && !group.details.includes(detail)) {
+    group.details.push(detail);
+  }
+  groups.set(groupName, group);
+}
+
+function compactErrorMessage(error) {
+  return String(error?.message ?? error).replace(/\s+/g, " ").slice(0, 180);
+}
+
+async function summarizeWarmSeenRemaining(client, pendingFileIds) {
+  const fileIds = Array.from(pendingFileIds);
+  const groups = new Map();
+  for (let offset = 0; offset < fileIds.length; offset += 32) {
+    const batch = fileIds.slice(offset, offset + 32);
+    const responses = await Promise.all(
+      batch.map((fileId) =>
+        desktopApiJson(client, `/media/${fileId}/thumbnail?target=grid_320&priority=background`)
+          .then((thumbnail) => ({ fileId, thumbnail }))
+          .catch((error) => ({ fileId, error }))
+      )
+    );
+    for (const result of responses) {
+      if ("error" in result) {
+        addWarmSeenDiagnosticGroup(
+          groups,
+          "request_error",
+          result.fileId,
+          compactErrorMessage(result.error)
+        );
+        continue;
+      }
+      addWarmSeenDiagnosticGroup(
+        groups,
+        result.thumbnail?.state ?? "unknown",
+        result.fileId,
+        result.thumbnail?.error ? String(result.thumbnail.error).slice(0, 180) : null
+      );
+    }
+  }
+  return Object.fromEntries(
+    [...groups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([state, group]) => {
+        if (group.details.length === 0) {
+          return [state, { count: group.count, ids: group.ids }];
+        }
+        return [state, group];
+      })
+  );
+}
+
+async function prepareThumbnailCacheScenario(client) {
+  thumbnailCacheStatsBefore = await desktopApiJson(client, "/thumbnails/cache/stats");
+  if (thumbnailCacheMode === "clear" || thumbnailCacheMode === "bulk") {
+    await desktopApiJson(client, "/thumbnails/cache/clear", { method: "POST", body: "" });
+  }
+  if (thumbnailCacheMode === "bulk") {
+    const enqueueOnce = () =>
+      desktopApiJson(client, "/tasks/thumbnail-cache", {
+        method: "POST",
+        body: JSON.stringify({
+          refreshMode: "staleOrMissing",
+          limit: thumbnailCacheBatchLimit
+        })
+      });
+
+    if (waitForBulkIdleBeforeSweep) {
+      while (true) {
+        const response = await enqueueOnce();
+        if ((response.acceptedCount ?? 0) === 0) {
+          break;
+        }
+        await delay(50);
+      }
+      await waitForThumbnailCacheIdle(client);
+    } else {
+      await enqueueOnce();
+    }
+  }
+  if (thumbnailCacheMode === "warmSeen") {
+    const raw = warmSeenFileIdsPath ? await readFile(warmSeenFileIdsPath, "utf8") : "[]";
+    const seenFileIds = JSON.parse(raw);
+    if (!Array.isArray(seenFileIds)) {
+      throw new Error("warm seen file id payload must be an array");
+    }
+    const pendingFileIds = new Set(
+      seenFileIds.filter((fileId) => Number.isInteger(fileId) && fileId > 0)
+    );
+    for (let offset = 0; offset < seenFileIds.length; offset += 128) {
+      const batch = seenFileIds
+        .slice(offset, offset + 128)
+        .filter((fileId) => Number.isInteger(fileId) && fileId > 0);
+      if (batch.length === 0) {
+        continue;
+      }
+      await desktopApiJson(client, "/tasks/thumbnail-cache", {
+        method: "POST",
+        body: JSON.stringify({
+          fileIds: batch,
+          refreshMode: "staleOrMissing",
+          limit: batch.length
+        })
+      });
+    }
+    const deadline = Date.now() + 10 * 60_000;
+    let pendingCursor = 0;
+    while (pendingFileIds.size > 0) {
+      if (Date.now() >= deadline) {
+        const remainingStateSummary = await summarizeWarmSeenRemaining(client, pendingFileIds);
+        throw new Error(
+          `Timed out warming seen thumbnails: remaining=${pendingFileIds.size}; states=${JSON.stringify(
+            remainingStateSummary
+          )}`
+        );
+      }
+      const rotated = takeRotatingWarmSeenBatch(pendingFileIds, pendingCursor, 32);
+      pendingCursor = rotated.cursor;
+      const batch = rotated.batch;
+      const responses = await Promise.all(
+        batch.map((fileId) =>
+          desktopApiJson(client, `/media/${fileId}/thumbnail?target=grid_320&priority=background`)
+            .then((thumbnail) => ({ fileId, thumbnail }))
+            .catch((error) => ({ fileId, error }))
+        )
+      );
+      for (const result of responses) {
+        if ("error" in result) {
+          continue;
+        }
+        if (isTerminalThumbnailState(result.thumbnail?.state)) {
+          pendingFileIds.delete(result.fileId);
+        }
+      }
+      await delay(250);
+    }
+  }
 }
 
 async function waitForTarget(timeoutMs = 180_000) {
@@ -225,6 +500,42 @@ async function evaluate(client, expression, timeoutMs = 30_000) {
   );
   if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
   return result.result?.value;
+}
+
+async function desktopApiJson(client, pathname, init = {}) {
+  const payload = JSON.stringify({
+    pathname,
+    method: init.method ?? "GET",
+    headers: init.headers ?? {},
+    body: init.body ?? null
+  });
+  return evaluate(
+    client,
+    `(() => {
+      const input = ${payload};
+      const bridge = window.megleDesktop;
+      if (!bridge?.coreUrl || !bridge?.sessionToken) {
+        throw new Error("desktop bridge core/session not ready");
+      }
+      const url = new URL(input.pathname.replace(/^\\//, ""), bridge.coreUrl.endsWith("/") ? bridge.coreUrl : bridge.coreUrl + "/").toString();
+      return fetch(url, {
+        method: input.method,
+        headers: {
+          "content-type": "application/json",
+          "x-megle-session": bridge.sessionToken,
+          ...input.headers
+        },
+        body: input.body
+      }).then(async (response) => {
+        const text = await response.text();
+        if (!response.ok) {
+          throw new Error(url + " returned " + response.status + ": " + text);
+        }
+        return text ? JSON.parse(text) : null;
+      });
+    })()`,
+    60_000
+  );
 }
 
 async function waitFor(client, expression, timeoutMs = 60_000, label = expression) {
@@ -373,6 +684,9 @@ async function installInstrumentation(client) {
           folder.querySelector('[data-cover-status="ready"], [data-cover-status="empty"], [data-cover-status="failed"]')
         );
         const selectedTile = document.querySelector(".media-tile.selected");
+        const visibleMediaIds = visibleTiles
+          .map((tile) => Number(tile.getAttribute("data-media-id")))
+          .filter((value) => Number.isInteger(value) && value > 0);
         const previewReady = Boolean(document.querySelector(".central-preview-stage .preview-placeholder.ready, .central-preview-stage img, .central-preview-stage video"));
         const tree = document.querySelector(".tree-list");
         const selectedTreeItem = document.querySelector(".tree-item.selected");
@@ -393,6 +707,7 @@ async function installInstrumentation(client) {
             subfolderCards: document.querySelectorAll(".subfolder-card").length,
             mediaTiles: document.querySelectorAll("button.media-tile").length,
             visibleTiles: visibleTiles.length,
+            visibleMediaIds,
             visibleReadyThumbs: visibleReadyThumbs.length,
             visibleNotReadyThumbDetails,
             visibleFolderCovers: visibleFolderCards.length,
@@ -2071,6 +2386,12 @@ function buildCoverage() {
 
 function validateCoverage(coverage) {
   const failures = [];
+  if (allowPartialCoverage) {
+    return failures;
+  }
+  if (targetOperationCount === 0) {
+    return failures;
+  }
   if (operationRecords.length < targetOperationCount) {
     failures.push(`operation count too low: ${operationRecords.length}/${targetOperationCount}`);
     return failures;
@@ -2130,17 +2451,39 @@ function buildSummary(ok) {
   const coverage = buildCoverage();
   const coverageFailures = validateCoverage(coverage);
   const runOk = ok && coverageFailures.length === 0;
+  const databaseFiles = collectDatabaseFileStats();
   return {
     run: {
       ok: runOk,
       root: autoRoot,
       launchCommand: startDesktopCommand,
+      dataDir,
+      dbPath,
+      debugPort,
       targetOperationCount,
       actualOperationCount: operationRecords.length,
       resetData,
+      allowPartialCoverage,
+      thumbnailCacheMode,
+      thumbnailCacheBatchLimit,
+      waitForBulkIdleBeforeSweep,
+      waitForThumbnailTaskDrainAfterSweep,
       startedAtUtc: new Date(startedAt).toISOString(),
       completedAtUtc: new Date().toISOString()
     },
+    seenMediaIds: [
+      ...new Set(
+        operationRecords.flatMap((record) => [
+          ...(record.dom?.visibleMediaIds ?? []),
+          ...(record.dom?.selectedMediaId ? [Number(record.dom.selectedMediaId)] : [])
+        ])
+      )
+    ].filter((value) => Number.isInteger(value) && value > 0),
+    thumbnailCache: {
+      before: thumbnailCacheStatsBefore,
+      after: thumbnailCacheStatsAfter
+    },
+    databaseFiles,
     stats: {
       folderSwitch: statsFor(/folder|subfolder|tree/i),
       scroll: statsFor(/scroll/i),
@@ -2202,6 +2545,8 @@ function summarizeActionWait(key) {
 const startedAt = Date.now();
 
 try {
+  debugPort = await resolveDebugPort(debugPort);
+  console.log(`Using Electron debug port ${debugPort}`);
   startDevApp();
   await waitForUrl(webUrl, 90_000);
   const client = new CdpClient(await waitForTarget());
@@ -2210,8 +2555,39 @@ try {
   await client.send("Runtime.enable");
   await client.send("Log.enable");
   await client.send("Network.enable");
+  await waitFor(
+    client,
+    "Boolean(window.megleDesktop?.coreUrl && window.megleDesktop?.sessionToken)",
+    90_000,
+    "desktop bridge core session"
+  );
+  await waitFor(
+    client,
+    `(async () => {
+      const bridge = window.megleDesktop;
+      if (!bridge?.coreUrl || !bridge?.sessionToken) return false;
+      try {
+        const url = new URL("health", bridge.coreUrl.endsWith("/") ? bridge.coreUrl : bridge.coreUrl + "/").toString();
+        const response = await fetch(url, {
+          headers: { "x-megle-session": bridge.sessionToken }
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    })()`,
+    90_000,
+    "desktop core api health"
+  );
+  await prepareThumbnailCacheScenario(client);
   await installInstrumentation(client);
   await runSweep(client);
+  if (waitForThumbnailTaskDrainAfterSweep) {
+    await waitForThumbnailTaskDrain(client);
+  }
+  thumbnailCacheStatsAfter = await desktopApiJson(client, "/thumbnails/cache/stats").catch(
+    () => null
+  );
   client.close();
   const slowOperations = operationRecords.filter((record) => record.slow);
   if (failOnSlow && slowOperations.length > 0) {

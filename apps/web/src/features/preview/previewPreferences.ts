@@ -6,6 +6,7 @@ export const DEFAULT_THUMBNAIL_CACHE_LIMIT_MB = 5120;
 export interface PreviewPreferences {
   previewBufferLimitMb: number;
   thumbnailCacheLimitMb: number;
+  persistentThumbnailCacheAutoRefresh: boolean;
 }
 
 export const PREVIEW_PREFERENCE_LIMITS = {
@@ -15,7 +16,8 @@ export const PREVIEW_PREFERENCE_LIMITS = {
 
 export const DEFAULT_PREVIEW_PREFERENCES: PreviewPreferences = {
   previewBufferLimitMb: DEFAULT_PREVIEW_BUFFER_LIMIT_MB,
-  thumbnailCacheLimitMb: DEFAULT_THUMBNAIL_CACHE_LIMIT_MB
+  thumbnailCacheLimitMb: DEFAULT_THUMBNAIL_CACHE_LIMIT_MB,
+  persistentThumbnailCacheAutoRefresh: false
 };
 
 export function readStoredPreviewPreferences(): PreviewPreferences {
@@ -57,7 +59,8 @@ export function normalizePreviewPreferences(
       PREVIEW_PREFERENCE_LIMITS.thumbnailCacheLimitMb.min,
       PREVIEW_PREFERENCE_LIMITS.thumbnailCacheLimitMb.max,
       DEFAULT_PREVIEW_PREFERENCES.thumbnailCacheLimitMb
-    )
+    ),
+    persistentThumbnailCacheAutoRefresh: value.persistentThumbnailCacheAutoRefresh === true
   };
 }
 

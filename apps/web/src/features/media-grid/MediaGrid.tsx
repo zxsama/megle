@@ -32,6 +32,8 @@ const AHEAD_THUMBNAIL_ROW_COUNT = 4;
 const VISIBLE_THUMBNAIL_REPOLL_MS = 150;
 const AHEAD_THUMBNAIL_REPOLL_MS = 1000;
 const AHEAD_PRIORITY_ITEM_LIMIT = 10;
+const RECENT_VISIBLE_THUMBNAIL_STICKY_ITEM_LIMIT = 1024;
+const RECENT_VISIBLE_THUMBNAIL_STICKY_MS = 10 * 60_000;
 const ORIGINAL_FALLBACK_OBJECT_URL_CACHE_LIMIT = 128;
 const SECTION_HEADER_HEIGHT = 32;
 const CONTENT_HEADER_TOP_GAP = 24;
@@ -718,19 +720,50 @@ export function MediaGrid({
   const aheadMediaIds = aheadMedia.ids;
   const aheadMediaSignatureKey = aheadMedia.signatureKey;
   const visiblePriorityMediaIds = visibleMediaIds;
+  const visiblePriorityMediaKey = visiblePriorityMediaIds.join(":");
+  const recentVisibleThumbnailIdsRef = useRef<Map<number, number>>(new Map());
   const visiblePriorityMediaIdSet = useMemo(
     () => new Set(visiblePriorityMediaIds),
     [visiblePriorityMediaIds]
   );
+  useEffect(() => {
+    const now = Date.now();
+    const recent = recentVisibleThumbnailIdsRef.current;
+    for (const mediaId of visiblePriorityMediaIds) {
+      recent.set(mediaId, now);
+    }
+    for (const [mediaId, seenAt] of recent) {
+      if (now - seenAt > RECENT_VISIBLE_THUMBNAIL_STICKY_MS) {
+        recent.delete(mediaId);
+      }
+    }
+    while (recent.size > RECENT_VISIBLE_THUMBNAIL_STICKY_ITEM_LIMIT * 4) {
+      const oldestKey = recent.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      recent.delete(oldestKey);
+    }
+  }, [visiblePriorityMediaKey]);
   const aheadPriorityMediaIds = useMemo(
     () => {
-      return aheadMediaIds
+      const aheadIds = aheadMediaIds
         .filter((mediaId) => !visiblePriorityMediaIdSet.has(mediaId))
         .slice(0, AHEAD_PRIORITY_ITEM_LIMIT);
+      const stickyPendingIds = Array.from(recentVisibleThumbnailIdsRef.current.entries())
+        .sort((left, right) => right[1] - left[1])
+        .map(([mediaId]) => mediaId)
+        .filter((mediaId) => !visiblePriorityMediaIdSet.has(mediaId))
+        .filter((mediaId) => !aheadIds.includes(mediaId))
+        .filter((mediaId) => {
+          const item = loadedMediaById.get(mediaId);
+          return item ? shouldRefreshThumbnailState(item, thumbnailStatesByMediaId[mediaId]) : false;
+        })
+        .slice(0, RECENT_VISIBLE_THUMBNAIL_STICKY_ITEM_LIMIT);
+      return [...aheadIds, ...stickyPendingIds];
     },
-    [aheadMediaIds, visiblePriorityMediaIdSet]
+    [aheadMediaIds, loadedMediaById, thumbnailStatesByMediaId, visiblePriorityMediaIdSet]
   );
-  const visiblePriorityMediaKey = visiblePriorityMediaIds.join(":");
   const aheadPriorityMediaKey = aheadPriorityMediaIds.join(":");
   const hasVisiblePending = useMemo(
     () =>

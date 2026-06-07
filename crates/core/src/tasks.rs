@@ -19,7 +19,8 @@ const THUMBNAIL_SOURCE_CHANGED_ERROR: &str = "thumbnail source changed while pro
 const FFMPEG_NOT_AVAILABLE_ERROR: &str = "ffmpeg not available";
 const THUMBNAIL_SELECTED_WORKER_CONCURRENCY: usize = 1;
 const THUMBNAIL_FOREGROUND_WORKER_CONCURRENCY: usize = 12;
-const THUMBNAIL_BACKGROUND_WORKER_CONCURRENCY: usize = 1;
+const THUMBNAIL_BACKGROUND_WORKER_CONCURRENCY: usize = 2;
+const IDLE_PENDING_TASK_DRAIN_INTERVAL_MS: u64 = 250;
 
 pub type TaskSender = mpsc::Sender<i64>;
 
@@ -205,72 +206,77 @@ pub fn start_worker_with_ffmpeg(worker_database: Database, ffmpeg_available: boo
     worker_database
         .reset_running_thumbnail_tasks_for_recovery()
         .expect("reset running thumbnail tasks for startup recovery");
-    // Take the startup pending-task snapshot synchronously, before spawning
-    // the worker task. This avoids a race where a freshly-enqueued task is
-    // both delivered through the channel and picked up by the in-spawn
-    // recovery drain.
-    let recovery_task_ids =
-        pending_drain_task_ids(&worker_database).expect("list pending tasks for startup recovery");
-
     let (sender, mut receiver) = mpsc::channel(128);
-    let (thumbnail_completion_sender, mut thumbnail_completion_receiver) =
-        mpsc::unbounded_channel();
+    let (task_completion_sender, mut task_completion_receiver) = mpsc::unbounded_channel();
     let thumbnail_permits = ThumbnailWorkerPermits {
         selected: Arc::new(Semaphore::new(THUMBNAIL_SELECTED_WORKER_CONCURRENCY)),
         foreground: Arc::new(Semaphore::new(THUMBNAIL_FOREGROUND_WORKER_CONCURRENCY)),
         background: Arc::new(Semaphore::new(THUMBNAIL_BACKGROUND_WORKER_CONCURRENCY)),
     };
+    let non_thumbnail_permit = Arc::new(Semaphore::new(1));
     tokio::spawn(async move {
-        replay_startup_recovery_task_ids(
-            &mut worker_database,
-            &recovery_task_ids,
-            ffmpeg_available,
-        );
         let mut in_flight_thumbnail_task_ids = HashSet::new();
-        schedule_pending_tasks_with_thumbnail_concurrency(
+        let mut in_flight_non_thumbnail_task_ids = HashSet::new();
+        schedule_pending_worker_tasks_with_concurrency(
             &mut worker_database,
             ffmpeg_available,
             &thumbnail_permits,
-            &thumbnail_completion_sender,
+            &non_thumbnail_permit,
+            &task_completion_sender,
             &mut in_flight_thumbnail_task_ids,
+            &mut in_flight_non_thumbnail_task_ids,
         );
+        let mut idle_drain_interval = tokio::time::interval(std::time::Duration::from_millis(
+            IDLE_PENDING_TASK_DRAIN_INTERVAL_MS,
+        ));
+        idle_drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut receiver_closed = false;
         loop {
-            if receiver_closed && in_flight_thumbnail_task_ids.is_empty() {
+            if receiver_closed
+                && in_flight_thumbnail_task_ids.is_empty()
+                && in_flight_non_thumbnail_task_ids.is_empty()
+            {
                 break;
             }
 
             tokio::select! {
-                maybe_completed_task_id = thumbnail_completion_receiver.recv() => {
+                maybe_completed_task_id = task_completion_receiver.recv() => {
                     if let Some(completed_task_id) = maybe_completed_task_id {
                         in_flight_thumbnail_task_ids.remove(&completed_task_id);
-                        schedule_pending_tasks_with_thumbnail_concurrency(
+                        in_flight_non_thumbnail_task_ids.remove(&completed_task_id);
+                        schedule_pending_worker_tasks_with_concurrency(
                             &mut worker_database,
                             ffmpeg_available,
                             &thumbnail_permits,
-                            &thumbnail_completion_sender,
+                            &non_thumbnail_permit,
+                            &task_completion_sender,
                             &mut in_flight_thumbnail_task_ids,
+                            &mut in_flight_non_thumbnail_task_ids,
                         );
                     }
                 }
                 maybe_task_id = receiver.recv(), if !receiver_closed => {
                     match maybe_task_id {
                         Some(task_id) => {
-                            dispatch_task_with_thumbnail_concurrency(
+                            dispatch_worker_task_with_concurrency(
                                 &mut worker_database,
                                 task_id,
                                 ffmpeg_available,
                                 &thumbnail_permits,
-                                &thumbnail_completion_sender,
+                                &non_thumbnail_permit,
+                                &task_completion_sender,
                                 &mut in_flight_thumbnail_task_ids,
+                                &mut in_flight_non_thumbnail_task_ids,
                             );
-                            schedule_pending_tasks_with_thumbnail_concurrency(
+                            schedule_pending_worker_tasks_with_concurrency(
                                 &mut worker_database,
                                 ffmpeg_available,
                                 &thumbnail_permits,
-                                &thumbnail_completion_sender,
+                                &non_thumbnail_permit,
+                                &task_completion_sender,
                                 &mut in_flight_thumbnail_task_ids,
+                                &mut in_flight_non_thumbnail_task_ids,
                             );
                         }
                         None => {
@@ -278,23 +284,21 @@ pub fn start_worker_with_ffmpeg(worker_database: Database, ffmpeg_available: boo
                         }
                     }
                 }
+                _ = idle_drain_interval.tick() => {
+                    schedule_pending_worker_tasks_with_concurrency(
+                        &mut worker_database,
+                        ffmpeg_available,
+                        &thumbnail_permits,
+                        &non_thumbnail_permit,
+                        &task_completion_sender,
+                        &mut in_flight_thumbnail_task_ids,
+                        &mut in_flight_non_thumbnail_task_ids,
+                    );
+                }
             }
         }
     });
     sender
-}
-
-fn replay_startup_recovery_task_ids(
-    database: &mut Database,
-    task_ids: &[i64],
-    ffmpeg_available: bool,
-) {
-    replay_startup_recovery_task_ids_with_after_each(
-        database,
-        task_ids,
-        ffmpeg_available,
-        |_, _| {},
-    );
 }
 
 fn replay_startup_recovery_task_ids_with_after_each(
@@ -336,6 +340,64 @@ fn drain_pending_persisted_tasks(database: &mut Database, ffmpeg_available: bool
     }
 }
 
+fn reconcile_in_flight_thumbnail_task_ids(
+    database: &Database,
+    in_flight_thumbnail_task_ids: &mut HashSet<i64>,
+) {
+    in_flight_thumbnail_task_ids.retain(|task_id| {
+        database
+            .get_task(*task_id)
+            .ok()
+            .flatten()
+            .is_some_and(|task| task.kind == "thumbnail" && task.status == "running")
+    });
+}
+
+fn reconcile_in_flight_non_thumbnail_task_ids(
+    database: &Database,
+    in_flight_non_thumbnail_task_ids: &mut HashSet<i64>,
+) {
+    in_flight_non_thumbnail_task_ids.retain(|task_id| {
+        database
+            .get_task(*task_id)
+            .ok()
+            .flatten()
+            .is_some_and(|task| task.kind != "thumbnail" && task.status == "running")
+    });
+}
+
+fn schedule_pending_worker_tasks_with_concurrency(
+    database: &mut Database,
+    ffmpeg_available: bool,
+    thumbnail_permits: &ThumbnailWorkerPermits,
+    non_thumbnail_permit: &Arc<Semaphore>,
+    task_completion_sender: &mpsc::UnboundedSender<i64>,
+    in_flight_thumbnail_task_ids: &mut HashSet<i64>,
+    in_flight_non_thumbnail_task_ids: &mut HashSet<i64>,
+) {
+    reconcile_in_flight_thumbnail_task_ids(database, in_flight_thumbnail_task_ids);
+    reconcile_in_flight_non_thumbnail_task_ids(database, in_flight_non_thumbnail_task_ids);
+    let pending_task_ids = match pending_drain_task_ids(database) {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(%error, "failed to list pending tasks for worker drain");
+            return;
+        }
+    };
+    for task_id in pending_task_ids {
+        dispatch_worker_task_with_concurrency(
+            database,
+            task_id,
+            ffmpeg_available,
+            thumbnail_permits,
+            non_thumbnail_permit,
+            task_completion_sender,
+            in_flight_thumbnail_task_ids,
+            in_flight_non_thumbnail_task_ids,
+        );
+    }
+}
+
 fn schedule_pending_tasks_with_thumbnail_concurrency(
     database: &mut Database,
     ffmpeg_available: bool,
@@ -343,6 +405,7 @@ fn schedule_pending_tasks_with_thumbnail_concurrency(
     thumbnail_completion_sender: &mpsc::UnboundedSender<i64>,
     in_flight_thumbnail_task_ids: &mut HashSet<i64>,
 ) {
+    reconcile_in_flight_thumbnail_task_ids(database, in_flight_thumbnail_task_ids);
     let pending_task_ids = match pending_drain_task_ids(database) {
         Ok(ids) => ids,
         Err(error) => {
@@ -377,6 +440,41 @@ fn dispatch_task_with_thumbnail_concurrency(
         thumbnail_permits,
         thumbnail_completion_sender,
         in_flight_thumbnail_task_ids,
+    ) {
+        ThumbnailSpawnResult::Spawned | ThumbnailSpawnResult::Deferred => return,
+        ThumbnailSpawnResult::NotThumbnail => {}
+    }
+    run_task(database, task_id, ffmpeg_available);
+}
+
+fn dispatch_worker_task_with_concurrency(
+    database: &mut Database,
+    task_id: i64,
+    ffmpeg_available: bool,
+    thumbnail_permits: &ThumbnailWorkerPermits,
+    non_thumbnail_permit: &Arc<Semaphore>,
+    task_completion_sender: &mpsc::UnboundedSender<i64>,
+    in_flight_thumbnail_task_ids: &mut HashSet<i64>,
+    in_flight_non_thumbnail_task_ids: &mut HashSet<i64>,
+) {
+    match try_spawn_thumbnail_task(
+        database,
+        task_id,
+        ffmpeg_available,
+        thumbnail_permits,
+        task_completion_sender,
+        in_flight_thumbnail_task_ids,
+    ) {
+        ThumbnailSpawnResult::Spawned | ThumbnailSpawnResult::Deferred => return,
+        ThumbnailSpawnResult::NotThumbnail => {}
+    }
+    match try_spawn_non_thumbnail_task(
+        database,
+        task_id,
+        ffmpeg_available,
+        non_thumbnail_permit,
+        task_completion_sender,
+        in_flight_non_thumbnail_task_ids,
     ) {
         ThumbnailSpawnResult::Spawned | ThumbnailSpawnResult::Deferred => return,
         ThumbnailSpawnResult::NotThumbnail => {}
@@ -429,6 +527,42 @@ fn try_spawn_thumbnail_task(
         let _thumbnail_permit = thumbnail_permit;
         run_task(&mut thumbnail_database, task_id, ffmpeg_available);
         let _ = thumbnail_completion_sender.send(task_id);
+    });
+    ThumbnailSpawnResult::Spawned
+}
+
+fn try_spawn_non_thumbnail_task(
+    database: &Database,
+    task_id: i64,
+    ffmpeg_available: bool,
+    non_thumbnail_permit: &Arc<Semaphore>,
+    task_completion_sender: &mpsc::UnboundedSender<i64>,
+    in_flight_non_thumbnail_task_ids: &mut HashSet<i64>,
+) -> ThumbnailSpawnResult {
+    if in_flight_non_thumbnail_task_ids.contains(&task_id) {
+        return ThumbnailSpawnResult::Deferred;
+    }
+
+    let Ok(Some(task)) = database.get_task(task_id) else {
+        return ThumbnailSpawnResult::NotThumbnail;
+    };
+    if task.kind == "thumbnail" || task.status != "pending" {
+        return ThumbnailSpawnResult::NotThumbnail;
+    }
+
+    let Ok(non_thumbnail_permit) = non_thumbnail_permit.clone().try_acquire_owned() else {
+        return ThumbnailSpawnResult::Deferred;
+    };
+    let Ok(Some(mut task_database)) = database.reopen() else {
+        return ThumbnailSpawnResult::NotThumbnail;
+    };
+
+    in_flight_non_thumbnail_task_ids.insert(task_id);
+    let task_completion_sender = task_completion_sender.clone();
+    tokio::task::spawn_blocking(move || {
+        let _non_thumbnail_permit = non_thumbnail_permit;
+        run_task(&mut task_database, task_id, ffmpeg_available);
+        let _ = task_completion_sender.send(task_id);
     });
     ThumbnailSpawnResult::Spawned
 }
@@ -970,7 +1104,6 @@ fn run_thumbnail_task_with_cache_and_before_publish_for_attempt(
             "task {task_id} attempt superseded before thumbnail publish"
         ));
     }
-    yield_thumbnail_if_higher_priority_pending(database, task_id, attempt_generation)?;
     let now = unix_timestamp();
     let blob = ThumbBlobRecord {
         file_id,
@@ -1834,6 +1967,52 @@ mod tests {
         fs::remove_dir_all(&temp_root).expect("cleanup temp root");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_eventually_picks_up_persisted_pending_thumbnail_task_when_wakeup_is_missed() {
+        let temp_root = unique_temp_dir("missed_thumbnail_wakeup_root");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("orphan.jpg"), 800, 400);
+
+        let db_dir = unique_temp_dir("missed_thumbnail_wakeup_db");
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("missed-thumbnail-wakeup.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let _sender = start_worker_with_ffmpeg(database, true);
+
+        let request_database = Database::open(&db_path).expect("open request database");
+        request_database
+            .apply_migrations()
+            .expect("apply request database migrations");
+        let file_id = seed_media_file(&request_database, &temp_root, "orphan.jpg");
+        let request = request_database
+            .request_thumbnail_task(
+                file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Background,
+            )
+            .expect("create pending thumbnail task");
+        let task_id = request.task_id.expect("task id");
+
+        let polling_database = Database::open(&db_path).expect("open polling database");
+        polling_database
+            .apply_migrations()
+            .expect("apply polling database migrations");
+        wait_for_task_statuses(
+            &polling_database,
+            &[(task_id, "succeeded")],
+            Duration::from_secs(5),
+        );
+        let thumbnail = polling_database
+            .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get thumbnail")
+            .expect("thumbnail exists");
+        assert_eq!(thumbnail.state, "ready");
+
+        fs::remove_dir_all(&temp_root).expect("cleanup temp root");
+        let _ = fs::remove_dir_all(&db_dir);
+    }
+
     #[test]
     fn interactive_folder_scan_task_ingests_only_selected_folder_media() {
         let temp_root = unique_temp_dir("interactive_root");
@@ -2361,7 +2540,110 @@ mod tests {
     }
 
     #[test]
-    fn running_background_thumbnail_yields_to_pending_selected_thumbnail() {
+    fn running_background_thumbnail_yields_to_pending_selected_thumbnail_before_generation() {
+        let temp_root = unique_temp_dir("thumbnail_priority_pre_generation_yield_root");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("background.jpg"), 800, 400);
+        write_test_image(&temp_root.join("selected.jpg"), 800, 400);
+        let cache_root = unique_temp_dir("thumbnail_priority_pre_generation_yield_cache");
+        fs::create_dir_all(&cache_root).expect("create cache root");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().to_string(),
+                display_name: "Thumbnail Pre Generation Yield".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "thumbnail-pre-generation-yield-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let background_file_id = insert_pending_thumbnail_file(
+            &database,
+            root_id,
+            folder_id,
+            "background.jpg",
+            "thumbnail-pre-generation-yield-background",
+        );
+        let selected_file_id = insert_pending_thumbnail_file(
+            &database,
+            root_id,
+            folder_id,
+            "selected.jpg",
+            "thumbnail-pre-generation-yield-selected",
+        );
+
+        let background_task_id = database
+            .request_thumbnail_task(
+                background_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Background,
+            )
+            .expect("request background thumbnail")
+            .task_id
+            .expect("background task id");
+        let old_attempt = database
+            .get_task(background_task_id)
+            .expect("get background task")
+            .expect("background task exists")
+            .attempt_generation;
+        let selected_task_id = database
+            .request_thumbnail_task(
+                selected_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Selected,
+            )
+            .expect("request selected thumbnail before background starts")
+            .task_id
+            .expect("selected task id");
+
+        let error =
+            run_thumbnail_task_with_cache(&mut database, background_task_id, &cache_root, true)
+                .expect_err("background thumbnail should yield before generation");
+
+        assert!(
+            error.to_string().contains("yield"),
+            "expected cooperative yield error, got {error}"
+        );
+
+        let background_task = database
+            .get_task(background_task_id)
+            .expect("get background task after yield")
+            .expect("background task exists after yield");
+        assert_eq!(background_task.status, "pending");
+        assert!(background_task.attempt_generation > old_attempt);
+        assert_eq!(background_task.error, None);
+
+        let selected_task = database
+            .get_task(selected_task_id)
+            .expect("get selected task")
+            .expect("selected task exists");
+        assert_eq!(selected_task.status, "pending");
+        assert_eq!(
+            selected_task.priority,
+            crate::db::THUMBNAIL_SELECTED_PRIORITY
+        );
+
+        let background_thumbnail = database
+            .get_thumbnail(background_file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get background thumbnail")
+            .expect("background thumbnail exists");
+        assert_ne!(background_thumbnail.state, "ready");
+
+        fs::remove_dir_all(&temp_root).expect("cleanup media root");
+        fs::remove_dir_all(&cache_root).expect("cleanup cache root");
+    }
+
+    #[test]
+    fn running_background_thumbnail_publishes_generated_bytes_when_selected_arrives_before_publish()
+    {
         let temp_root = unique_temp_dir("thumbnail_priority_yield_root");
         fs::create_dir_all(&temp_root).expect("create media root");
         write_test_image(&temp_root.join("background.jpg"), 800, 400);
@@ -2426,13 +2708,7 @@ mod tests {
             .expect("request background thumbnail")
             .task_id
             .expect("background task id");
-        let old_attempt = database
-            .get_task(background_task_id)
-            .expect("get background task")
-            .expect("background task exists")
-            .attempt_generation;
-
-        let error = run_thumbnail_task_with_cache_and_before_publish(
+        run_thumbnail_task_with_cache_and_before_publish(
             &mut database,
             background_task_id,
             &cache_root,
@@ -2447,19 +2723,13 @@ mod tests {
                     .expect("request selected thumbnail while background is running");
             },
         )
-        .expect_err("background thumbnail should yield to selected thumbnail");
-
-        assert!(
-            error.to_string().contains("yield"),
-            "expected cooperative yield error, got {error}"
-        );
+        .expect("background thumbnail should publish after generating bytes");
 
         let background_task = database
             .get_task(background_task_id)
-            .expect("get background task after yield")
-            .expect("background task exists after yield");
-        assert_eq!(background_task.status, "pending");
-        assert!(background_task.attempt_generation > old_attempt);
+            .expect("get background task after publish")
+            .expect("background task exists after publish");
+        assert_eq!(background_task.status, "succeeded");
         assert_eq!(background_task.error, None);
 
         let selected_task = database
@@ -2478,14 +2748,137 @@ mod tests {
             .get_thumbnail(background_file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("get background thumbnail")
             .expect("background thumbnail exists");
-        assert_ne!(background_thumbnail.state, "ready");
+        assert_eq!(background_thumbnail.state, "ready");
+        assert_eq!(background_thumbnail.served_by.as_deref(), Some("db_blob"));
+        assert!(database
+            .get_thumb_blob(background_file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read background thumb blob")
+            .is_some());
 
         fs::remove_dir_all(&temp_root).expect("cleanup media root");
         fs::remove_dir_all(&cache_root).expect("cleanup cache root");
     }
 
     #[test]
-    fn running_background_thumbnail_for_same_file_yields_to_new_selected_pending_task() {
+    fn running_bulk_thumbnail_publishes_generated_bytes_when_selected_arrives_before_publish() {
+        let temp_root = unique_temp_dir("thumbnail_bulk_priority_yield_root");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("bulk.jpg"), 800, 400);
+        write_test_image(&temp_root.join("selected.jpg"), 800, 400);
+        let cache_root = unique_temp_dir("thumbnail_bulk_priority_yield_cache");
+        fs::create_dir_all(&cache_root).expect("create cache root");
+
+        let mut database = Database::open_in_memory().expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().to_string(),
+                display_name: "Thumbnail Bulk Yield".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "thumbnail-bulk-yield-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let bulk_file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "bulk.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 10,
+                mtime: 1,
+                ctime: None,
+                file_key: Some("thumbnail-yield-bulk".to_string()),
+            })
+            .expect("insert bulk file");
+        let selected_file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "selected.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 11,
+                mtime: 2,
+                ctime: None,
+                file_key: Some("thumbnail-yield-selected".to_string()),
+            })
+            .expect("insert selected file");
+        database
+            .upsert_media_kind(bulk_file_id, "image")
+            .expect("insert bulk media kind");
+        database
+            .upsert_media_kind(selected_file_id, "image")
+            .expect("insert selected media kind");
+
+        let bulk_task_id = database
+            .request_thumbnail_task(
+                bulk_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Bulk,
+            )
+            .expect("request bulk thumbnail")
+            .task_id
+            .expect("bulk task id");
+        run_thumbnail_task_with_cache_and_before_publish(
+            &mut database,
+            bulk_task_id,
+            &cache_root,
+            true,
+            |database| {
+                database
+                    .request_thumbnail_task(
+                        selected_file_id,
+                        crate::thumbnails::GRID_320_PROFILE,
+                        crate::db::ThumbnailTaskPriority::Selected,
+                    )
+                    .expect("request selected thumbnail while bulk is running");
+            },
+        )
+        .expect("bulk thumbnail should publish after generating bytes");
+
+        let bulk_task = database
+            .get_task(bulk_task_id)
+            .expect("get bulk task after publish")
+            .expect("bulk task exists after publish");
+        assert_eq!(bulk_task.status, "succeeded");
+        assert_eq!(bulk_task.priority, crate::db::THUMBNAIL_BULK_PRIORITY);
+        assert_eq!(bulk_task.error, None);
+
+        let selected_task = database
+            .list_tasks()
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.kind == "thumbnail" && task.file_id == Some(selected_file_id))
+            .expect("selected thumbnail task exists");
+        assert_eq!(selected_task.status, "pending");
+        assert_eq!(
+            selected_task.priority,
+            crate::db::THUMBNAIL_SELECTED_PRIORITY
+        );
+
+        let bulk_thumbnail = database
+            .get_thumbnail(bulk_file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("get bulk thumbnail")
+            .expect("bulk thumbnail exists");
+        assert_eq!(bulk_thumbnail.state, "ready");
+        assert_eq!(bulk_thumbnail.served_by.as_deref(), Some("db_blob"));
+        assert!(database
+            .get_thumb_blob(bulk_file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read bulk thumb blob")
+            .is_some());
+
+        fs::remove_dir_all(&temp_root).expect("cleanup media root");
+        fs::remove_dir_all(&cache_root).expect("cleanup cache root");
+    }
+
+    #[test]
+    fn running_background_thumbnail_for_same_file_publishes_when_selected_arrives_before_publish() {
         let temp_root = unique_temp_dir("thumbnail_same_file_priority_yield_root");
         fs::create_dir_all(&temp_root).expect("create media root");
         write_test_image(&temp_root.join("same-file.jpg"), 800, 400);
@@ -2504,16 +2897,11 @@ mod tests {
             )
             .expect("request background thumbnail");
         let background_task_id = background.task_id.expect("background task id");
-        let old_attempt = database
-            .get_task(background_task_id)
-            .expect("get background task")
-            .expect("background task exists")
-            .attempt_generation;
         database
             .mark_task_running_current_attempt_for_test(background_task_id)
             .expect("mark background task running");
 
-        let error = run_thumbnail_task_with_cache_and_before_publish(
+        run_thumbnail_task_with_cache_and_before_publish(
             &mut database,
             background_task_id,
             &cache_root,
@@ -2530,23 +2918,17 @@ mod tests {
                 assert_ne!(selected.task_id, Some(background_task_id));
             },
         )
-        .expect_err("background thumbnail should yield to same-file selected thumbnail");
-
-        assert!(
-            error.to_string().contains("yield"),
-            "expected cooperative yield error, got {error}"
-        );
+        .expect("background thumbnail should publish after generating bytes");
 
         let background_task = database
             .get_task(background_task_id)
-            .expect("get background task after yield")
-            .expect("background task exists after yield");
-        assert_eq!(background_task.status, "pending");
+            .expect("get background task after publish")
+            .expect("background task exists after publish");
+        assert_eq!(background_task.status, "succeeded");
         assert_eq!(
             background_task.priority,
             crate::db::THUMBNAIL_BACKGROUND_PRIORITY
         );
-        assert!(background_task.attempt_generation > old_attempt);
 
         let selected_task = database
             .list_tasks()
@@ -2567,18 +2949,16 @@ mod tests {
             vec![selected_task.id]
         );
 
-        let selected_result =
-            run_thumbnail_task_with_cache(&mut database, selected_task.id, &cache_root, true);
-        assert!(
-            selected_result.is_ok(),
-            "selected thumbnail should run successfully"
-        );
-
         let thumbnail = database
             .get_thumbnail(file_id, crate::thumbnails::GRID_320_PROFILE)
             .expect("get thumbnail")
             .expect("thumbnail exists");
         assert_eq!(thumbnail.state, "ready");
+        assert_eq!(thumbnail.served_by.as_deref(), Some("db_blob"));
+        assert!(database
+            .get_thumb_blob(file_id, crate::thumbnails::GRID_320_PROFILE)
+            .expect("read same-file thumb blob")
+            .is_some());
 
         fs::remove_dir_all(&temp_root).expect("cleanup media root");
         fs::remove_dir_all(&cache_root).expect("cleanup cache root");
@@ -3024,6 +3404,193 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn schedule_pending_tasks_clears_stale_in_flight_thumbnail_ids() {
+        let temp_root = unique_temp_dir("thumbnail_stale_in_flight_root");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("pending.jpg"), 800, 400);
+
+        let db_dir = unique_temp_dir("thumbnail_stale_in_flight_db");
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("thumbnail-stale-in-flight.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let file_id = seed_media_file(&database, &temp_root, "pending.jpg");
+        let task_id = database
+            .request_thumbnail_task(
+                file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Background,
+            )
+            .expect("request pending thumbnail")
+            .task_id
+            .expect("task id");
+
+        let thumbnail_permits = ThumbnailWorkerPermits {
+            selected: Arc::new(Semaphore::new(THUMBNAIL_SELECTED_WORKER_CONCURRENCY)),
+            foreground: Arc::new(Semaphore::new(THUMBNAIL_FOREGROUND_WORKER_CONCURRENCY)),
+            background: Arc::new(Semaphore::new(THUMBNAIL_BACKGROUND_WORKER_CONCURRENCY)),
+        };
+        let (completion_sender, mut completion_receiver) = mpsc::unbounded_channel();
+        let mut in_flight_thumbnail_task_ids = HashSet::new();
+        in_flight_thumbnail_task_ids.insert(task_id);
+        let mut database = database;
+
+        schedule_pending_tasks_with_thumbnail_concurrency(
+            &mut database,
+            true,
+            &thumbnail_permits,
+            &completion_sender,
+            &mut in_flight_thumbnail_task_ids,
+        );
+
+        timeout(Duration::from_secs(5), async {
+            completion_receiver
+                .recv()
+                .await
+                .expect("background thumbnail completion")
+        })
+        .await
+        .expect("stale in-flight id should not prevent pending thumbnail from starting");
+
+        let task = database
+            .get_task(task_id)
+            .expect("get task")
+            .expect("task exists");
+        assert_eq!(task.status, "succeeded");
+
+        fs::remove_dir_all(&temp_root).expect("cleanup media root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn startup_recovery_thumbnail_backlog_does_not_block_new_selected_thumbnail() {
+        let temp_root = unique_temp_dir("thumbnail_startup_recovery_priority_root");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("background.jpg"), 800, 400);
+        write_test_image(&temp_root.join("selected.jpg"), 800, 400);
+
+        let db_dir = unique_temp_dir("thumbnail_startup_recovery_priority_db");
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("thumbnail-startup-recovery-priority.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().to_string(),
+                display_name: "Thumbnail Startup Recovery Priority".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "thumbnail-startup-recovery-priority-root".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+
+        let background_file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "background.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 10,
+                mtime: 1,
+                ctime: None,
+                file_key: Some("thumbnail-startup-background".to_string()),
+            })
+            .expect("insert background file");
+        let selected_file_id = database
+            .upsert_file(FileUpsert {
+                root_id,
+                folder_id,
+                name: "selected.jpg".to_string(),
+                ext: ".jpg".to_string(),
+                size: 11,
+                mtime: 2,
+                ctime: None,
+                file_key: Some("thumbnail-startup-selected".to_string()),
+            })
+            .expect("insert selected file");
+        database
+            .upsert_media_kind(background_file_id, "image")
+            .expect("insert background media kind");
+        database
+            .upsert_media_kind(selected_file_id, "image")
+            .expect("insert selected media kind");
+
+        let background_task_id = database
+            .request_thumbnail_task(
+                background_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Background,
+            )
+            .expect("request startup background thumbnail")
+            .task_id
+            .expect("background task id");
+
+        let background_started = Arc::new(AtomicBool::new(false));
+        let selected_started = Arc::new(AtomicBool::new(false));
+        let release_background = Arc::new(AtomicBool::new(false));
+        let selected_started_notify = Arc::new(Notify::new());
+        let hook_background_started = Arc::clone(&background_started);
+        let hook_selected_started = Arc::clone(&selected_started);
+        let hook_release_background = Arc::clone(&release_background);
+        let hook_selected_started_notify = Arc::clone(&selected_started_notify);
+        let wait_selected_started_notify = Arc::clone(&selected_started_notify);
+        let hook_db_path = db_path.clone();
+        let _hook_guard =
+            set_worker_task_hook_for_test(Arc::new(move |kind, task_id, database_path| {
+                if database_path != Some(hook_db_path.as_path()) || kind != "thumbnail" {
+                    return;
+                }
+                if task_id == background_task_id {
+                    hook_background_started.store(true, Ordering::SeqCst);
+                    while !hook_release_background.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                } else {
+                    hook_selected_started.store(true, Ordering::SeqCst);
+                    hook_selected_started_notify.notify_waiters();
+                }
+            }));
+
+        let sender = start_worker_with_ffmpeg(database, true);
+        let request_database = Database::open(&db_path).expect("open request database");
+        request_database
+            .apply_migrations()
+            .expect("apply request database migrations");
+        let selected_task_id = request_database
+            .request_thumbnail_task(
+                selected_file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Selected,
+            )
+            .expect("request selected thumbnail")
+            .task_id
+            .expect("selected task id");
+        sender
+            .send(selected_task_id)
+            .await
+            .expect("send selected task id");
+
+        timeout(Duration::from_secs(5), async {
+            while !selected_started.load(Ordering::SeqCst) {
+                wait_selected_started_notify.notified().await;
+            }
+        })
+        .await
+        .expect("selected thumbnail should start while startup backlog background task is blocked");
+
+        release_background.store(true, Ordering::SeqCst);
+
+        fs::remove_dir_all(&temp_root).expect("cleanup media root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn selected_thumbnail_worker_starts_while_visible_workers_are_blocked() {
         let temp_root = unique_temp_dir("thumbnail_worker_selected_priority_root");
         fs::create_dir_all(&temp_root).expect("create media root");
@@ -3293,6 +3860,118 @@ mod tests {
 
         fs::remove_dir_all(&first_root_dir).expect("cleanup first root");
         fs::remove_dir_all(&second_root_dir).expect("cleanup second root");
+        let _ = fs::remove_dir_all(db_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn background_thumbnail_wakeup_starts_while_root_scan_is_running() {
+        let temp_root = unique_temp_dir("background_wakeup_during_root_scan_root");
+        fs::create_dir_all(&temp_root).expect("create media root");
+        write_test_image(&temp_root.join("background.jpg"), 800, 400);
+
+        let db_dir = unique_temp_dir("background_wakeup_during_root_scan_db");
+        fs::create_dir_all(&db_dir).expect("create db dir");
+        let db_path = db_dir.join("background-wakeup-during-root-scan.sqlite");
+        let database = Database::open(&db_path).expect("open database");
+        database.apply_migrations().expect("apply migrations");
+        let root_id = database
+            .add_root(NewRoot {
+                path: temp_root.to_string_lossy().to_string(),
+                display_name: "Background Wake During Root Scan".to_string(),
+            })
+            .expect("add root");
+        let folder_id = database
+            .upsert_folder(FolderUpsert {
+                root_id,
+                parent_id: None,
+                name: String::new(),
+                path_hash: "background-wakeup-during-root-scan-folder".to_string(),
+                mtime: Some(1),
+            })
+            .expect("insert root folder");
+        let file_id = insert_pending_thumbnail_file(
+            &database,
+            root_id,
+            folder_id,
+            "background.jpg",
+            "background-wakeup-during-root-scan-file",
+        );
+        let root_scan_task_id = database
+            .create_root_scan_task(root_id)
+            .expect("create root scan task");
+
+        let root_scan_started = Arc::new(AtomicBool::new(false));
+        let thumbnail_started = Arc::new(AtomicBool::new(false));
+        let release_root_scan = Arc::new(AtomicBool::new(false));
+        let root_scan_started_notify = Arc::new(Notify::new());
+        let thumbnail_started_notify = Arc::new(Notify::new());
+        let hook_root_scan_started = Arc::clone(&root_scan_started);
+        let hook_thumbnail_started = Arc::clone(&thumbnail_started);
+        let hook_release_root_scan = Arc::clone(&release_root_scan);
+        let hook_root_scan_started_notify = Arc::clone(&root_scan_started_notify);
+        let hook_thumbnail_started_notify = Arc::clone(&thumbnail_started_notify);
+        let wait_thumbnail_started_notify = Arc::clone(&thumbnail_started_notify);
+        let hook_db_path = db_path.clone();
+        let _hook_guard =
+            set_worker_task_hook_for_test(Arc::new(move |kind, task_id, database_path| {
+                if database_path != Some(hook_db_path.as_path()) {
+                    return;
+                }
+                if kind == "root_scan" && task_id == root_scan_task_id {
+                    hook_root_scan_started.store(true, Ordering::SeqCst);
+                    hook_root_scan_started_notify.notify_waiters();
+                    while !hook_release_root_scan.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                } else if kind == "thumbnail" {
+                    hook_thumbnail_started.store(true, Ordering::SeqCst);
+                    hook_thumbnail_started_notify.notify_waiters();
+                }
+            }));
+
+        let sender = start_worker_with_ffmpeg(database, true);
+        sender
+            .send(root_scan_task_id)
+            .await
+            .expect("send root scan task");
+        timeout(Duration::from_secs(5), async {
+            while !root_scan_started.load(Ordering::SeqCst) {
+                root_scan_started_notify.notified().await;
+            }
+        })
+        .await
+        .expect("root scan should start");
+
+        let request_database = Database::open(&db_path).expect("open request database");
+        request_database
+            .apply_migrations()
+            .expect("apply request database migrations");
+        let thumbnail_task_id = request_database
+            .request_thumbnail_task(
+                file_id,
+                crate::thumbnails::GRID_320_PROFILE,
+                crate::db::ThumbnailTaskPriority::Background,
+            )
+            .expect("request background thumbnail")
+            .task_id
+            .expect("thumbnail task id");
+        sender
+            .send(thumbnail_task_id)
+            .await
+            .expect("send background thumbnail wakeup");
+
+        let thumbnail_started_result = timeout(Duration::from_secs(1), async {
+            while !thumbnail_started.load(Ordering::SeqCst) {
+                wait_thumbnail_started_notify.notified().await;
+            }
+        })
+        .await;
+        release_root_scan.store(true, Ordering::SeqCst);
+        thumbnail_started_result
+            .expect("background thumbnail should start while root scan is still running");
+
+        drop(sender);
+        fs::remove_dir_all(&temp_root).expect("cleanup temp root");
         let _ = fs::remove_dir_all(db_dir);
     }
 

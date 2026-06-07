@@ -484,6 +484,101 @@ describe("createCoreClient", () => {
     assert.equal(recorded[0].signal, controller.signal);
   });
 
+  test("getThumbnailCacheStats serializes scope query and forwards abort signal", async () => {
+    mockFetch({
+      cachedCount: 1,
+      missingCount: 2,
+      staleCount: 3,
+      failedCount: 4,
+      pendingCandidateCount: 5,
+      totalBlobBytes: 6,
+      activeBulkTaskCount: 7
+    });
+    const controller = new AbortController();
+    await client().getThumbnailCacheStats(
+      { rootId: 1, folderId: 2, includeDescendants: true },
+      { signal: controller.signal }
+    );
+    assert.equal(recorded[0].method, "GET");
+    assert.equal(
+      recorded[0].url,
+      `${BASE_URL}/thumbnails/cache/stats?rootId=1&folderId=2&includeDescendants=true`
+    );
+    assert.equal(recorded[0].signal, controller.signal);
+  });
+
+  test("enqueueThumbnailCache serializes refresh mode and forwards abort signal", async () => {
+    mockFetch({
+      acceptedCount: 2,
+      cachedCount: 1,
+      missingCount: 2,
+      staleCount: 3,
+      failedCount: 4,
+      pendingCandidateCount: 5,
+      totalBlobBytes: 6,
+      activeBulkTaskCount: 7
+    });
+    const controller = new AbortController();
+    await client().enqueueThumbnailCache(
+      {
+        rootId: 1,
+        folderId: 2,
+        includeDescendants: false,
+        refreshMode: "retryFailedAndStale",
+        limit: 256
+      },
+      { signal: controller.signal }
+    );
+    assert.equal(recorded[0].method, "POST");
+    assert.equal(recorded[0].url, `${BASE_URL}/tasks/thumbnail-cache`);
+    assert.equal(
+      recorded[0].body,
+      JSON.stringify({
+        rootId: 1,
+        folderId: 2,
+        includeDescendants: false,
+        refreshMode: "retryFailedAndStale",
+        limit: 256
+      })
+    );
+    assert.equal(recorded[0].signal, controller.signal);
+  });
+
+  test("enqueueThumbnailCache serializes observed file ids for seen thumbnail persistence", async () => {
+    mockFetch({
+      acceptedCount: 3,
+      cachedCount: 1,
+      missingCount: 2,
+      staleCount: 0,
+      failedCount: 0,
+      pendingCandidateCount: 0,
+      totalBlobBytes: 6,
+      activeBulkTaskCount: 0
+    });
+    await client().enqueueThumbnailCache({
+      fileIds: [101, 102, 103],
+      refreshMode: "staleOrMissing",
+      limit: 3
+    });
+    assert.equal(recorded[0].method, "POST");
+    assert.equal(recorded[0].url, `${BASE_URL}/tasks/thumbnail-cache`);
+    assert.equal(
+      recorded[0].body,
+      JSON.stringify({
+        fileIds: [101, 102, 103],
+        refreshMode: "staleOrMissing",
+        limit: 3
+      })
+    );
+  });
+
+  test("clearThumbnailCache posts the clear route", async () => {
+    mockFetch({ cleared: true, deletedBlobCount: 2, resetThumbnailCount: 3 });
+    await client().clearThumbnailCache();
+    assert.equal(recorded[0].method, "POST");
+    assert.equal(recorded[0].url, `${BASE_URL}/thumbnails/cache/clear`);
+  });
+
   test("getThumbnailBlob requests the default grid target", async () => {
     mockFetch("thumbnail bytes");
     await client().getThumbnailBlob(42);

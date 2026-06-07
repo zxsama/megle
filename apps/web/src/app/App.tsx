@@ -85,8 +85,6 @@ export function App() {
   useOverlayScrollbars();
   const [activeView, setActiveView] = useState<AppView>("library");
   const interfaceStyle = useInterfaceStyle();
-  const library = useLibraryData();
-  const fileOps = useFileOpsController(library);
   const [menu, setMenu] = useState<ShellContextMenuState | null>(null);
   const [activeCompactPopover, setActiveCompactPopover] =
     useState<CompactPopover>(null);
@@ -108,6 +106,11 @@ export function App() {
   const [previewPreferences, setPreviewPreferences] = useState<PreviewPreferences>(() =>
     readStoredPreviewPreferences()
   );
+  const library = useLibraryData({
+    persistentThumbnailCacheAutoRefresh:
+      previewPreferences.persistentThumbnailCacheAutoRefresh
+  });
+  const fileOps = useFileOpsController(library);
   const orderedPreviewMedia = useMemo(() => {
     const orderedWindowMedia = orderedMediaSlots(library.mediaSlots);
     return orderedWindowMedia.length > 0 ? orderedWindowMedia : library.media;

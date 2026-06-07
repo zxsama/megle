@@ -165,17 +165,21 @@ pub fn cache_key_for(identity: &CacheIdentity<'_>, profile: &str) -> String {
 
 pub fn source_fingerprint_for(identity: &CacheIdentity<'_>, profile: &str) -> String {
     let mut hasher = Sha256::new();
-    for part in [
-        "v2",
-        &identity.file_id.to_string(),
-        &identity.root_id.to_string(),
-        &identity.folder_id.to_string(),
-        identity.name,
-        &identity.size.to_string(),
-        &identity.mtime.to_string(),
-        identity.file_key.unwrap_or(""),
-        profile,
-    ] {
+    let reliable_file_key = identity.file_key.filter(|value| !value.is_empty());
+    let mut parts = vec!["v3".to_string()];
+    if let Some(file_key) = reliable_file_key {
+        parts.push("content".to_string());
+        parts.push(file_key.to_string());
+    } else {
+        parts.push("path".to_string());
+        parts.push(identity.root_id.to_string());
+        parts.push(identity.folder_id.to_string());
+        parts.push(identity.name.to_string());
+    }
+    parts.push(identity.size.to_string());
+    parts.push(identity.mtime.to_string());
+    parts.push(profile.to_string());
+    for part in parts {
         hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part.as_bytes());
     }
@@ -540,6 +544,94 @@ mod tests {
         assert!(parts[2].ends_with(".webp"));
         assert_eq!(parts[2].trim_end_matches(".webp").len(), 64);
         assert!(!Path::new(&first).is_absolute());
+    }
+
+    #[test]
+    fn source_fingerprint_reuses_reliable_file_key_across_path_identity_changes() {
+        let original = CacheIdentity {
+            file_id: 42,
+            root_id: 7,
+            folder_id: 9,
+            name: "image.jpg",
+            size: 1024,
+            mtime: 123456,
+            file_key: Some("dev-inode-1"),
+        };
+        let renamed = CacheIdentity {
+            file_id: 99,
+            root_id: 100,
+            folder_id: 200,
+            name: "renamed.jpg",
+            ..original
+        };
+
+        assert_eq!(
+            source_fingerprint_for(&original, GRID_320_PROFILE),
+            source_fingerprint_for(&renamed, GRID_320_PROFILE)
+        );
+    }
+
+    #[test]
+    fn source_fingerprint_without_file_key_stays_path_bound() {
+        let original = CacheIdentity {
+            file_id: 42,
+            root_id: 7,
+            folder_id: 9,
+            name: "image.jpg",
+            size: 1024,
+            mtime: 123456,
+            file_key: None,
+        };
+        let renamed = CacheIdentity {
+            folder_id: 10,
+            name: "renamed.jpg",
+            ..original
+        };
+
+        assert_ne!(
+            source_fingerprint_for(&original, GRID_320_PROFILE),
+            source_fingerprint_for(&renamed, GRID_320_PROFILE)
+        );
+    }
+
+    #[test]
+    fn source_fingerprint_changes_when_reliable_content_identity_changes() {
+        let identity = CacheIdentity {
+            file_id: 42,
+            root_id: 7,
+            folder_id: 9,
+            name: "image.jpg",
+            size: 1024,
+            mtime: 123456,
+            file_key: Some("dev-inode-1"),
+        };
+
+        let same = source_fingerprint_for(&identity, GRID_320_PROFILE);
+        let changed_size = source_fingerprint_for(
+            &CacheIdentity {
+                size: 2048,
+                ..identity
+            },
+            GRID_320_PROFILE,
+        );
+        let changed_mtime = source_fingerprint_for(
+            &CacheIdentity {
+                mtime: 654321,
+                ..identity
+            },
+            GRID_320_PROFILE,
+        );
+        let changed_key = source_fingerprint_for(
+            &CacheIdentity {
+                file_key: Some("dev-inode-2"),
+                ..identity
+            },
+            GRID_320_PROFILE,
+        );
+
+        assert_ne!(same, changed_size);
+        assert_ne!(same, changed_mtime);
+        assert_ne!(same, changed_key);
     }
 
     #[test]

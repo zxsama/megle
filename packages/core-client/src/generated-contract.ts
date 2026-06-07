@@ -35,6 +35,43 @@ export interface ThumbnailPriorityScopeSyncRequest {
   aheadFileIds: number[];
 }
 
+export interface ThumbnailCacheScopeParams {
+  rootId?: number;
+  folderId?: number;
+  includeDescendants?: boolean;
+}
+
+export type ThumbnailCacheRefreshMode =
+  | "missingOnly"
+  | "staleOrMissing"
+  | "retryFailedAndStale";
+
+export interface ThumbnailCacheTaskRequest extends ThumbnailCacheScopeParams {
+  fileIds?: number[];
+  refreshMode: ThumbnailCacheRefreshMode;
+  limit?: number;
+}
+
+export interface ThumbnailCacheStatsResponse {
+  cachedCount: number;
+  missingCount: number;
+  staleCount: number;
+  failedCount: number;
+  pendingCandidateCount: number;
+  totalBlobBytes: number;
+  activeBulkTaskCount: number;
+}
+
+export interface ThumbnailCacheEnqueueResponse extends ThumbnailCacheStatsResponse {
+  acceptedCount: number;
+}
+
+export interface ThumbnailCacheClearResponse {
+  cleared: boolean;
+  deletedBlobCount: number;
+  resetThumbnailCount: number;
+}
+
 export type ThumbnailPriority = "background" | "ahead" | "visible" | "selected";
 export interface RootRecord {
   id: number;

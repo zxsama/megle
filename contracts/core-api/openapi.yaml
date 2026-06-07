@@ -215,6 +215,44 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /thumbnails/cache/stats:
+    get:
+      operationId: getThumbnailCacheStats
+      parameters:
+        - name: rootId
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+        - name: folderId
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+        - name: includeDescendants
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Persistent thumbnail cache stats for the requested scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThumbnailCacheStatsResponse"
+  /thumbnails/cache/clear:
+    post:
+      operationId: clearThumbnailCache
+      responses:
+        "200":
+          description: Persistent thumbnail cache cleared and thumbnail states reset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThumbnailCacheClearResponse"
   /media/{fileId}/preview:
     get:
       operationId: getPreview
@@ -296,6 +334,28 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: Folder cannot be scanned from its current source state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tasks/thumbnail-cache:
+    post:
+      operationId: enqueueThumbnailCache
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ThumbnailCacheTaskRequest"
+      responses:
+        "202":
+          description: Missing or stale thumbnail cache candidates enqueued at bulk priority.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThumbnailCacheEnqueueResponse"
+        "400":
+          description: Unsupported thumbnail cache refresh mode or invalid scope.
           content:
             application/json:
               schema:
@@ -1270,6 +1330,89 @@ components:
         updatedAt:
           type: integer
           nullable: true
+    ThumbnailCacheScopeParams:
+      type: object
+      properties:
+        rootId:
+          type: integer
+          minimum: 1
+        folderId:
+          type: integer
+          minimum: 1
+        includeDescendants:
+          type: boolean
+    ThumbnailCacheTaskRequest:
+      allOf:
+        - $ref: "#/components/schemas/ThumbnailCacheScopeParams"
+        - type: object
+          required: [refreshMode]
+          properties:
+            fileIds:
+              type: array
+              items:
+                type: integer
+                minimum: 1
+            refreshMode:
+              type: string
+              enum: [missingOnly, staleOrMissing, retryFailedAndStale]
+            limit:
+              type: integer
+              minimum: 1
+    ThumbnailCacheStatsResponse:
+      type: object
+      required:
+        [
+          cachedCount,
+          missingCount,
+          staleCount,
+          failedCount,
+          pendingCandidateCount,
+          totalBlobBytes,
+          activeBulkTaskCount,
+        ]
+      properties:
+        cachedCount:
+          type: integer
+          minimum: 0
+        missingCount:
+          type: integer
+          minimum: 0
+        staleCount:
+          type: integer
+          minimum: 0
+        failedCount:
+          type: integer
+          minimum: 0
+        pendingCandidateCount:
+          type: integer
+          minimum: 0
+        totalBlobBytes:
+          type: integer
+          minimum: 0
+        activeBulkTaskCount:
+          type: integer
+          minimum: 0
+    ThumbnailCacheEnqueueResponse:
+      allOf:
+        - $ref: "#/components/schemas/ThumbnailCacheStatsResponse"
+        - type: object
+          required: [acceptedCount]
+          properties:
+            acceptedCount:
+              type: integer
+              minimum: 0
+    ThumbnailCacheClearResponse:
+      type: object
+      required: [cleared, deletedBlobCount, resetThumbnailCount]
+      properties:
+        cleared:
+          type: boolean
+        deletedBlobCount:
+          type: integer
+          minimum: 0
+        resetThumbnailCount:
+          type: integer
+          minimum: 0
     MediaListResponse:
       type: object
       required: [items, nextCursor]
