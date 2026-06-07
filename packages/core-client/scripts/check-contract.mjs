@@ -6,7 +6,8 @@ import { parse } from "yaml";
 const root = path.resolve(import.meta.dirname, "..", "..", "..");
 
 function read(relativePath) {
-  return readFileSync(path.join(root, relativePath), "utf8");
+  // Keep contract regex checks stable on Windows checkouts with CRLF endings.
+  return readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 function fail(message) {

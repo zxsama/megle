@@ -11,7 +11,9 @@ function fail(message) {
 }
 
 function read(relativePath) {
-  return readFileSync(path.join(root, relativePath), "utf8");
+  // Normalize CRLF to LF so inspectable-source guards behave the same on Windows
+  // checkouts and POSIX worktrees.
+  return readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 function readJson(relativePath) {
