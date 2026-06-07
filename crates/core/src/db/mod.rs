@@ -19,6 +19,23 @@ pub const WAL_MODE: &str = "WAL";
 const WAL_AUTOCHECKPOINT_PAGES: i64 = 4096;
 const WAL_JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 const WAL_TRUNCATE_THRESHOLD_BYTES: u64 = 256 * 1024 * 1024;
+/// `synchronous=NORMAL` (1) is the recommended setting under WAL: it never
+/// corrupts the database and only risks losing the last few *committed*
+/// transactions on OS crash / power loss. Every Megle table (thumbnail
+/// blobs, the file index, the task queue) is regenerable by rescanning, so
+/// this trade is safe — and it removes one fsync per commit, the dominant
+/// cost when the worker persists millions of thumbnails one row at a time.
+const SQLITE_SYNCHRONOUS_NORMAL: i64 = 1;
+/// Negative values are a size in KiB. -65536 → a 64 MiB page cache per
+/// connection so hot browse/scan joins stay resident instead of re-reading
+/// pages from disk on every grid page and thumbnail lookup.
+const SQLITE_CACHE_SIZE_KIB: i64 = -65536;
+/// 256 MiB memory-mapped I/O window so reads (notably serving thumbnail
+/// blobs out of `thumb_blobs`) avoid per-page `read()` syscalls.
+const SQLITE_MMAP_SIZE_BYTES: i64 = 256 * 1024 * 1024;
+/// Keep temp B-trees (ORDER BY / GROUP BY / the cache-stats aggregation)
+/// in memory rather than spilling to disk.
+const SQLITE_TEMP_STORE_MEMORY: i64 = 2;
 
 pub struct Database {
     connection: Connection,
@@ -622,6 +639,10 @@ impl Database {
         if !self.migration_applied(16)? {
             self.connection
                 .execute_batch(migrations::FOLDER_STATUS_BROWSING_INDEXES_MIGRATION)?;
+        }
+        if !self.migration_applied(17)? {
+            self.connection
+                .execute_batch(migrations::THUMBNAIL_TASK_INDEXES_MIGRATION)?;
         }
         self.backfill_media_fts_if_empty()?;
         self.checkpoint_wal_if_larger_than(WAL_TRUNCATE_THRESHOLD_BYTES)?;
@@ -1430,6 +1451,40 @@ impl Database {
             tasks.push(row?);
         }
         Ok(tasks)
+    }
+
+    /// Counts pending/running *bulk* thumbnail tasks restricted to `file_ids`.
+    /// The per-file cache-stats path runs on every browse "seen" batch; a
+    /// bounded indexed COUNT (idx_tasks_kind_file_status) replaces loading the
+    /// entire `tasks` table into memory to filter in Rust.
+    pub fn count_active_bulk_thumbnail_tasks_for_file_ids(
+        &self,
+        file_ids: &[i64],
+    ) -> anyhow::Result<i64> {
+        let unique_file_ids: Vec<i64> = dedupe_scope_file_ids(file_ids).into_iter().collect();
+        if unique_file_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut sql = String::from(
+            "SELECT COUNT(*) FROM tasks \
+             WHERE kind = 'thumbnail' \
+               AND status IN ('pending', 'running') \
+               AND priority = ?1 \
+               AND file_id IN (",
+        );
+        let mut params: Vec<i64> = vec![THUMBNAIL_BULK_PRIORITY];
+        for (index, file_id) in unique_file_ids.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("?{}", index + 2));
+            params.push(*file_id);
+        }
+        sql.push(')');
+        let count: i64 =
+            self.connection
+                .query_row(&sql, params_from_iter(params.iter()), |row| row.get(0))?;
+        Ok(count)
     }
 
     pub fn get_task(&self, task_id: i64) -> anyhow::Result<Option<TaskRecord>> {
@@ -2915,17 +2970,48 @@ impl Database {
         let ahead_file_ids = dedupe_scope_file_ids(ahead_file_ids);
         let now = unix_timestamp();
         let mut updated = 0;
-        let mut statement = transaction.prepare(
-            r#"
-            SELECT tasks.id, tasks.file_id, tasks.priority, tasks.status
-            FROM tasks
-            JOIN files ON files.id = tasks.file_id
-            WHERE tasks.kind = 'thumbnail'
-              AND tasks.status IN ('pending', 'running')
-              AND files.root_id = ?1
-            "#,
-        )?;
-        let rows = statement.query_map([root_id], |row| {
+        // Bound the rescan to tasks that can actually change priority on this
+        // sync: files entering the new selected/visible/ahead scope (promotion
+        // candidates) plus any task currently elevated above the background
+        // baseline (demotion candidates now that the viewport moved). Scanning
+        // every pending task in the root made each scroll an
+        // O(pending-tasks-in-root) write burst under the API lock —
+        // pathological right after a "generate all", which queues a bulk task
+        // per file. Out-of-scope bulk tasks stay at bulk priority (they are
+        // already at/below background, so they need no demotion).
+        let scope_file_ids: Vec<i64> = selected_file_ids
+            .iter()
+            .chain(visible_file_ids.iter())
+            .chain(ahead_file_ids.iter())
+            .copied()
+            .collect::<HashSet<i64>>()
+            .into_iter()
+            .collect();
+        let mut select_sql = String::from(
+            "SELECT tasks.id, tasks.file_id, tasks.priority, tasks.status \
+             FROM tasks \
+             JOIN files ON files.id = tasks.file_id \
+             WHERE tasks.kind = 'thumbnail' \
+               AND tasks.status IN ('pending', 'running') \
+               AND files.root_id = ?1 \
+               AND (tasks.priority > ?2",
+        );
+        let mut select_params: Vec<i64> = vec![root_id, THUMBNAIL_BACKGROUND_PRIORITY];
+        if scope_file_ids.is_empty() {
+            select_sql.push(')');
+        } else {
+            select_sql.push_str(" OR tasks.file_id IN (");
+            for (index, file_id) in scope_file_ids.iter().enumerate() {
+                if index > 0 {
+                    select_sql.push(',');
+                }
+                select_sql.push_str(&format!("?{}", index + 3));
+                select_params.push(*file_id);
+            }
+            select_sql.push_str("))");
+        }
+        let mut statement = transaction.prepare(&select_sql)?;
+        let rows = statement.query_map(params_from_iter(select_params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -6454,23 +6540,8 @@ fn build_thumbnail_cache_stats_for_file_ids(
     file_ids: &[i64],
     entries: &[ThumbnailCacheEntry],
 ) -> ThumbnailCacheStats {
-    let file_id_set: HashSet<i64> = dedupe_scope_file_ids(file_ids).into_iter().collect();
     let active_bulk_task_count = database
-        .list_tasks()
-        .map(|tasks| {
-            tasks
-                .into_iter()
-                .filter(|task| {
-                    task.kind == "thumbnail"
-                        && task.priority == THUMBNAIL_BULK_PRIORITY
-                        && matches!(task.status.as_str(), "pending" | "running")
-                })
-                .filter(|task| {
-                    task.file_id
-                        .is_some_and(|file_id| file_id_set.contains(&file_id))
-                })
-                .count() as i64
-        })
+        .count_active_bulk_thumbnail_tasks_for_file_ids(file_ids)
         .unwrap_or(0);
     build_thumbnail_cache_stats_with_active_count(entries, active_bulk_task_count)
 }
@@ -6716,8 +6787,13 @@ fn hex_value(value: u8) -> anyhow::Result<u8> {
 
 fn configure_file_database_wal(connection: &Connection) -> anyhow::Result<()> {
     connection.pragma_update(None, "journal_mode", WAL_MODE)?;
+    // Must follow journal_mode=WAL: NORMAL is only safe under WAL.
+    connection.pragma_update(None, "synchronous", SQLITE_SYNCHRONOUS_NORMAL)?;
     connection.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
     connection.pragma_update(None, "journal_size_limit", WAL_JOURNAL_SIZE_LIMIT_BYTES)?;
+    connection.pragma_update(None, "cache_size", SQLITE_CACHE_SIZE_KIB)?;
+    connection.pragma_update(None, "mmap_size", SQLITE_MMAP_SIZE_BYTES)?;
+    connection.pragma_update(None, "temp_store", SQLITE_TEMP_STORE_MEMORY)?;
     Ok(())
 }
 
